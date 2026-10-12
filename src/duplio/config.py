@@ -41,7 +41,7 @@ from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.atomic import atomic_write_text
 from duplio.util.fmt import parse_size
 
-PROFILE_TYPES = ("dedupe", "compare", "backup", "mirror", "ingest")
+PROFILE_TYPES = ("dedupe", "compare", "backup", "mirror", "ingest", "merge", "sync", "snapshot")
 
 PROFILE_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
     "dedupe": {"roots": list, "reference": list, "mode": str, "action": str, "keep": list, "verify": str},
@@ -53,6 +53,21 @@ PROFILE_FIELDS: dict[str, dict[str, type | tuple[type, ...]]] = {
     },
     "mirror": {"source": str, "dest": str, "delete": bool, "checksum": bool, "keep_versions": str, "exclude": list},
     "ingest": {"source": str, "dest": str, "layout": str, "media_only": bool, "free_source": bool, "device": str},
+    "merge": {
+        "source": str, "dest": str, "move": bool, "on_conflict": str, "layout": str, "names": str,
+        "exclude": list, "types": list,
+    },
+    "sync": {"a": str, "b": str, "on_conflict": str, "deletions": str, "exclude": list, "types": list},
+    "snapshot": {
+        "source": str, "dest": str, "label": str, "exclude": list, "keep_last": int, "keep_hourly": int,
+        "keep_daily": int, "keep_weekly": int, "keep_monthly": int, "keep_yearly": int, "keep_within": str,
+    },
+}  # fmt: skip
+
+# Allowed in every profile: commands run around the job, notifications, and destination guards.
+COMMON_FIELDS: dict[str, type | tuple[type, ...]] = {
+    "pre": list, "post": list, "on_failure": list, "notify": list, "notify_on": str,
+    "bwlimit": str, "sentinel": str, "expect_mounted": bool,
 }  # fmt: skip
 
 
@@ -68,6 +83,7 @@ class Settings:
     skip_hidden: bool = False
     one_file_system: bool = True
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
+    notify_smtp: dict[str, Any] = field(default_factory=dict)
     path: Path | None = None
 
 
@@ -84,7 +100,7 @@ def validate_profile(name: str, profile: dict[str, Any]) -> dict[str, Any]:
     kind = profile.get("type")
     if kind not in PROFILE_TYPES:
         raise ConfigError(f"profile {name!r}: type must be one of {', '.join(PROFILE_TYPES)}")
-    allowed = PROFILE_FIELDS[kind]
+    allowed = {**PROFILE_FIELDS[kind], **COMMON_FIELDS}
     for key, value in profile.items():
         if key == "type":
             continue
@@ -92,10 +108,28 @@ def validate_profile(name: str, profile: dict[str, Any]) -> dict[str, Any]:
             raise ConfigError(f"profile {name!r}: unknown setting {key!r} for a {kind} profile")
         _expect(value, allowed[key], f"profile {name!r}: {key}")
     required = {"dedupe": ["roots"], "compare": ["source", "against"], "backup": ["source", "repo"],
-                "mirror": ["source", "dest"], "ingest": ["source", "dest"]}[kind]  # fmt: skip
+                "mirror": ["source", "dest"], "ingest": ["source", "dest"], "merge": ["source", "dest"],
+                "sync": ["a", "b"], "snapshot": ["source", "dest"]}[kind]  # fmt: skip
     for key in required:
         if key not in profile:
             raise ConfigError(f"profile {name!r}: missing required setting {key!r}")
+    from duplio.notify import NOTIFY_ON, validate_target
+
+    for target in profile.get("notify", []):
+        validate_target(target)
+    if profile.get("notify_on", "failure") not in NOTIFY_ON:
+        raise ConfigError(f"profile {name!r}: notify_on must be one of {', '.join(NOTIFY_ON)}")
+    if "bwlimit" in profile:
+        from duplio.util.throttle import parse_rate
+
+        parse_rate(profile["bwlimit"])
+    if kind == "merge" and profile.get("on_conflict", "rename") not in ("rename", "skip", "newer", "replace"):
+        raise ConfigError(f"profile {name!r}: on_conflict must be rename, skip, newer or replace")
+    if kind == "sync":
+        if profile.get("on_conflict", "keep-both") not in ("keep-both", "newer", "a", "b", "skip"):
+            raise ConfigError(f"profile {name!r}: on_conflict must be keep-both, newer, a, b or skip")
+        if profile.get("deletions", "propagate") not in ("propagate", "restore", "ignore"):
+            raise ConfigError(f"profile {name!r}: deletions must be propagate, restore or ignore")
     if kind == "dedupe":
         if "action" in profile:
             try:
@@ -140,6 +174,10 @@ def load_settings(dirs: AppDirs | None = None, path: Path | None = None) -> Sett
         settings.min_size = raw if isinstance(raw, int) and not isinstance(raw, bool) else parse_size(str(raw))
     settings.skip_hidden = bool(scan.get("skip_hidden", False))
     settings.one_file_system = bool(scan.get("one_file_system", True))
+    notify = data.get("notify", {})
+    if not isinstance(notify, dict) or not isinstance(notify.get("smtp", {}), dict):
+        raise ConfigError("[notify.smtp] must be a table")
+    settings.notify_smtp = dict(notify.get("smtp", {}))
     for name, profile in data.get("profiles", {}).items():
         if not isinstance(profile, dict):
             raise ConfigError(f"profile {name!r} must be a table")
@@ -207,6 +245,8 @@ def save_settings(settings: Settings, dirs: AppDirs | None = None) -> Path:
         },
         "profiles": settings.profiles,
     }
+    if settings.notify_smtp:
+        data["notify"] = {"smtp": settings.notify_smtp}
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, "# Duplio configuration — see 'duplio config --help'\n\n" + dump_toml(data))
     return path

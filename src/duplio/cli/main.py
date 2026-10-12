@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 
 from duplio.cli import (  # noqa: F401  (register commands)
+    cmd_automation,
     cmd_backup,
     cmd_diff,
     cmd_drive,

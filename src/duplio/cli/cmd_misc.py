@@ -20,6 +20,7 @@ from duplio import __version__
 from duplio.cli.app import cli, get_app, handle_errors
 from duplio.cli.render import t
 from duplio.config import (
+    COMMON_FIELDS,
     PROFILE_FIELDS,
     PROFILE_TYPES,
     load_settings,
@@ -187,9 +188,10 @@ def _parse_setting(kind: str, item: str) -> tuple[str, Any]:
         raise ConfigError(f"--set expects KEY=VALUE, got {item!r}")
     key, _, raw = item.partition("=")
     key = key.strip()
-    expected = PROFILE_FIELDS[kind].get(key)
+    expected = PROFILE_FIELDS[kind].get(key) or COMMON_FIELDS.get(key)
     if expected is None:
-        raise ConfigError(f"{key!r} is not a {kind} setting; valid: {', '.join(PROFILE_FIELDS[kind])}")
+        valid = ", ".join([*PROFILE_FIELDS[kind], *COMMON_FIELDS])
+        raise ConfigError(f"{key!r} is not a {kind} setting; valid: {valid}")
     if expected is list:
         return key, [v.strip() for v in raw.split(",") if v.strip()]
     if expected is bool:
@@ -266,23 +268,57 @@ def profile_remove(name: str) -> None:
 @click.pass_context
 @handle_errors
 def run(ctx: click.Context, name: str, yes: bool, dry_run: bool) -> None:
-    """Run a saved profile.
+    """Run a saved profile, with its before/after commands and notifications.
 
     Scheduled dedupe profiles only ever quarantine (reversible), whatever
     action they name, unless run interactively.
+
+    Exit status: 0 done · 1 done with problems · 2 failed · 3 skipped (drive not connected) · 4 a
+    'pre' command failed.
     """
-    from duplio.cli import cmd_backup, cmd_scan
+    from duplio.cli.hooks import notify_outcome, run_hook_commands, status_for
 
     app = get_app()
     prof = app.settings.profiles.get(name)
     if prof is None:
         raise ConfigError(f"no profile named {name!r} (see 'duplio profile list')")
+    env = {"DUPLIO_PROFILE": name, "DUPLIO_DRY_RUN": "1" if dry_run else "0"}
+    code = 0
+    if prof.get("pre"):
+        code = run_hook_commands(app, "before", list(prof["pre"]), env) and 4
+    if code == 0:
+        try:
+            _check_reachable(app, prof)
+        except ConfigError as exc:
+            app.console.print(Text(f"Skipping {name}: {exc}", style="yellow"))
+            code = 3
+    if code == 0:
+        try:
+            _run_profile(ctx, app, name, prof, yes, dry_run)
+        except SystemExit as stop:
+            code = stop.code if isinstance(stop.code, int) else (0 if stop.code is None else 2)
+    status = status_for(code)
+    after_env = {**env, "DUPLIO_STATUS": status, "DUPLIO_EXIT_CODE": str(code)}
+    if prof.get("on_failure") and status in ("problems", "failed") and not dry_run:
+        run_hook_commands(app, "on failure", list(prof["on_failure"]), after_env)
+    if prof.get("post"):
+        run_hook_commands(app, "after", list(prof["post"]), after_env)
+    if not dry_run:
+        notify_outcome(app, name, prof, status, code)
+    if code:
+        sys.exit(code)
+
+
+def _guard_kwargs(prof: dict[str, Any]) -> dict[str, Any]:
+    return {"bwlimit": prof.get("bwlimit"), "expect_mounted": prof.get("expect_mounted"),
+            "sentinel": prof.get("sentinel") or None}
+
+
+def _run_profile(ctx: click.Context, app, name: str, prof: dict[str, Any], yes: bool, dry_run: bool) -> None:  # type: ignore[no-untyped-def]
+    from duplio.cli import cmd_backup, cmd_merge, cmd_scan, cmd_snapshot, cmd_sync
+
     kind = prof["type"]
-    try:
-        _check_reachable(app, prof)
-    except ConfigError as exc:
-        app.console.print(Text(f"Skipping {name}: {exc}", style="yellow"))
-        sys.exit(3)
+    guards = _guard_kwargs(prof)
     if kind == "dedupe":
         action = prof.get("action", app.settings.action.value)
         if yes and action not in ("quarantine", "hardlink", "reflink"):
@@ -298,7 +334,7 @@ def run(ctx: click.Context, name: str, yes: bool, dry_run: bool) -> None:
     elif kind == "backup":
         ctx.invoke(cmd_backup.backup_run, source=prof["source"], repo=prof["repo"], label=prof.get("label", name),
                    tags=tuple(prof.get("tags", [])), exclude=tuple(prof.get("exclude", [])), include=(), rehash=False,
-                   cross_filesystems=False)
+                   cross_filesystems=False, **guards)
         keeps = {k: prof.get(k, 0) for k in ("keep_last", "keep_hourly", "keep_daily", "keep_weekly", "keep_monthly", "keep_yearly")}
         if any(keeps.values()) or prof.get("keep_within"):
             ctx.invoke(cmd_backup.backup_forget, repo=prof["repo"], do_apply=not dry_run, prune=bool(prof.get("prune", True)),
@@ -306,12 +342,31 @@ def run(ctx: click.Context, name: str, yes: bool, dry_run: bool) -> None:
     elif kind == "mirror":
         ctx.invoke(cmd_backup.mirror, source=prof["source"], dest=prof["dest"], delete_extraneous=bool(prof.get("delete")),
                    checksum=bool(prof.get("checksum")), no_verify=False, keep_versions=prof.get("keep_versions"),
-                   exclude=tuple(prof.get("exclude", [])), max_change=0.5, force=False, dry_run=dry_run, yes=yes)
+                   exclude=tuple(prof.get("exclude", [])), max_change=0.5, force=False, dry_run=dry_run, yes=yes, **guards)
     elif kind == "ingest":
         ctx.invoke(cmd_backup.ingest_cmd, source=prof["source"], library=prof["dest"],
                    layout=prof.get("layout", cmd_backup.DEFAULT_LAYOUT), all_files=not prof.get("media_only", True),
                    device_label=prof.get("device", ""), reimport_deleted=False,
-                   free_source=bool(prof.get("free_source")) and not dry_run, dry_run=dry_run, yes=yes)
+                   free_source=bool(prof.get("free_source")) and not dry_run, dry_run=dry_run, yes=yes, **guards)
+    elif kind == "merge":
+        ctx.invoke(cmd_merge.merge_cmd, source=prof["source"], dest=prof["dest"], move=bool(prof.get("move")),
+                   clean_source=False, on_conflict=prof.get("on_conflict", "rename"), layout=prof.get("layout", "{rel}"),
+                   names=prof.get("names", "auto"), keep_dupes=False, no_verify=False, jobs=None, tag="", limit=20,
+                   dry_run=dry_run, yes=yes, exclude=tuple(prof.get("exclude", [])), types=tuple(prof.get("types", [])),
+                   **guards)
+    elif kind == "sync":
+        ctx.invoke(cmd_sync.sync_cmd, a=prof["a"], b=prof["b"], on_conflict=prof.get("on_conflict", "keep-both"),
+                   deletions=prof.get("deletions", "propagate"), max_delete=0.5, force=False, reset=False,
+                   no_verify=False, jobs=None, limit=25, dry_run=dry_run, yes=yes,
+                   exclude=tuple(prof.get("exclude", [])), types=tuple(prof.get("types", [])), **guards)
+    elif kind == "snapshot":
+        ctx.invoke(cmd_snapshot.snapshot_create, source=prof["source"], dest=prof["dest"],
+                   label=prof.get("label", name), tags=(), exclude=tuple(prof.get("exclude", [])), include=(),
+                   cross_filesystems=False, **guards)
+        keeps = {k: prof.get(k, 0) for k in ("keep_last", "keep_hourly", "keep_daily", "keep_weekly", "keep_monthly", "keep_yearly")}
+        if any(keeps.values()) or prof.get("keep_within"):
+            ctx.invoke(cmd_snapshot.snapshot_forget, dest=prof["dest"], do_apply=not dry_run, yes=True,
+                       keep_within=prof.get("keep_within"), keep_tag=(), **keeps)
 
 
 def _scan_defaults() -> dict[str, Any]:
@@ -327,13 +382,13 @@ def _check_reachable(app, prof: dict[str, Any]) -> None:  # type: ignore[no-unty
     """Scheduled runs: a phone that is not plugged in is not an error."""
     from duplio.errors import DuplioError
 
-    for key in ("source", "dest", "repo"):
+    for key in ("source", "dest", "repo", "a", "b"):
         if key in prof:
             try:
                 loc = app.registry.open(prof[key])
             except DuplioError as exc:
                 raise ConfigError(f"{prof[key]} is not reachable ({exc})") from exc
-            if key == "source" and loc.backend.stat(loc.path) is None:
+            if key in ("source", "a", "b") and loc.backend.stat(loc.path) is None:
                 raise ConfigError(f"{loc.display} is not connected")
     for root in prof.get("roots", []):
         try:
