@@ -24,8 +24,12 @@ in one scan.
       ┌──────┴─────────────────────────────────────────┴───┐
       │ vfs: Backend ── LocalBackend (+ mount profiles)    │  storage
       │              ── SMBBackend (smbprotocol)           │
+      │              ── SftpBackend (ssh -s sftp)          │
+      │              ── DavBackend (http.client)           │
+      │              ── FtpBackend (ftplib)                │
       │              ── ADBBackend (adb shell / exec-out)  │
       └────────────────────────────────────────────────────┘
+      preview: embedded thumbnails, decoders, cache        pictures for the UI, never for decisions
 ```
 
 ## Storage: `duplio.vfs`
@@ -38,7 +42,7 @@ in one scan.
 - **writing**: `open_write` (atomic, no clobber), `rename` (no clobber), `remove`, `makedirs`, `set_mtime`, `hardlink`, `reflink`, `trash`;
 - **path algebra**: `join`, `parent`, `basename`, `normalize`, `is_within`, `same_file`.
 
-Backend-native paths are opaque strings: POSIX for local and ADB, UNC for SMB.
+Backend-native paths are opaque strings: POSIX for local, ADB, SFTP, WebDAV and FTP, UNC for SMB.
 Paths relative to a scan root are always POSIX, so results compare across
 backends.
 
@@ -51,7 +55,10 @@ backends.
 - the parallel-read budget;
 - which hashes the far side can compute;
 - whether rename is atomic;
-- hard-link, reflink and trash support.
+- hard-link, reflink and trash support;
+- `virtual` (a cloud or virtual drive whose files may download when read) and the derived `read_cost` (0 internal disk, 1 USB or
+  spinning disk, 2 network, phone or cloud). The picture cache and the similar-image fingerprinting use `read_cost`, not the
+  backend type, to decide what is worth saving.
 
 Engines decide everything from these properties, never from the backend type.
 A new backend is therefore usually just a class plus a `Capabilities` profile.
@@ -61,12 +68,31 @@ A new backend is therefore usually just a class plus a `Capabilities` profile.
 Windows. A GVFS MTP path, a jmtpfs mount, a `cifs` share, a FAT card or a spinning
 disk each get the right profile automatically.
 
+### Network protocols: `vfs/remote.py`
+
+SFTP, WebDAV and FTP share `ListingBackend`: a backend that can list one folder (`_list`) gets the walker, `listdir`, the
+POSIX path algebra, the depth limit and the check that refuses names a server must not send (`..`, a path separator). It
+also provides `RangedReader`, a seekable file built from "open a stream at this offset", which is how a thumbnail or a
+sample of a big file costs one small request on every protocol, and `climb_removing` for emptying folders upward.
+
+- `vfs/sftp_protocol.py` is a small SFTP version 3 client over any pair of byte streams. Requests carry numbers and answers
+  repeat them, so reads keep a window of requests in flight. `vfs/sftp.py` runs it over the system `ssh` program
+  (`ssh -s host sftp`), which brings the user's keys, agent, `~/.ssh/config`, jump hosts and `known_hosts` for free, and
+  keeps the whole backend free of compiled dependencies.
+- `vfs/webdav.py` uses `http.client` with a small pool of connections, `PROPFIND` for listings (parsed as it arrives),
+  ranged `GET`, and `PUT` + `MOVE` for atomic writes; Basic and Digest authentication.
+- `vfs/ftp.py` uses `ftplib` with a bounded pool of logged-in connections, `MLSD` where there is one and `LIST` + `MDTM`
+  otherwise, `REST` for ranged reads, and an explicit binary-mode step after every listing.
+
+All three use one source of size and time for both listing and `stat`, because the executor compares a scan's facts with a
+fresh look.
+
 ### Adding a backend
 
-1. Subclass `Backend` and implement `id`, `capabilities`, `uri`, `walk`, `stat` and `open_read`. Writing methods are optional; the defaults raise `UnsupportedOperation`.
+1. Subclass `Backend` (or `ListingBackend` for a protocol that lists one folder at a time) and implement `id`, `capabilities`, `uri`, `walk` (or `_list`), `stat` and `open_read`. Writing methods are optional; the defaults raise `UnsupportedOperation`.
 2. Teach `vfs/location.py` the location syntax (`location_kind` and `BackendRegistry.open`).
 3. If the far side can hash, implement `remote_hash` and list the algorithms in `Capabilities.remote_hash_algorithms`. The engine negotiates one algorithm per group.
-4. Add a fake to `tests/fakes.py` and run the engine/executor tests against it, as `test_remote_backends.py` does for ADB and SMB.
+4. Test it against a real server where one can run in the test process (`tests/remotekit.py` starts WsgiDAV, pyftpdlib and paramiko's SFTP server) and add it to the `remote` fixture of `tests/test_remote_contract.py`, which runs the same walk, read, write, delete, rename, probe and backup-repository checks on every protocol. Otherwise add a fake to `tests/fakes.py`, as `test_remote_backends.py` does for ADB and SMB.
 
 ### Cross-cutting services for network storage
 
@@ -78,6 +104,33 @@ disk each get the right profile automatically.
 - `util/names.py`: Windows/SMB/exFAT name rules (illegal characters, trailing dots, reserved names, 255-unit limit) as `rel_issues` / `fix_rel`; `Capabilities.windows_names` says when they apply.
 - `util/timecmp.py`: modification-time equality within the coarser drive's resolution, plus the single exact one-hour DST offset.
 - `vfs/probe.py`: measures a drive's real behaviour instead of trusting its file-system name.
+
+## Pictures: `duplio.preview`
+
+The review screens and `duplio preview` show pictures without paying for them twice.
+
+- `exif.py` finds the cheapest picture inside a file by reading ranges: the thumbnail in a JPEG's EXIF block (the first
+  ~64 KiB), or the thumbnail and larger previews of a TIFF-based RAW file (DNG, CR2, NEF, ARW…). It works through a
+  byte-budgeted reader, so a hostile file cannot make it read without limit.
+- `jpeg.py` and `png.py` decode and encode thumbnails in pure Python (baseline JPEG matches Pillow within rounding), so the
+  picture pane needs nothing installed. `render.py` turns a picture into half-block characters, applying EXIF orientation.
+- `store.py` keeps pictures: a session store in a temporary folder (default) or a persistent one in the cache folder, indexed in
+  SQLite by a hash of drive, path, size and modification time, with no file names, trimmed least-recently-used to a size cap.
+- `service.py` is the cheapest-first ladder: cache, then a ranged read of the photo's own thumbnail, then a bounded whole read
+  only when the file is small or the caller asked, otherwise `Unavailable` with a reason. It also chooses the cheapest member of
+  a group of identical files (`pick_source`) and prefetches the next groups in the background (two workers, a per-drive
+  limit, newest request first).
+- `vfs/mounts.py` decides whether a drive is slow or virtual (Windows placeholder attributes, macOS dataless files, volume
+  labels such as Tresorit/OneDrive, WebDAV redirector paths), and `duplio drives` explains each verdict.
+
+`vfs/listing.py` is a short-lived memory of folder listings for the folder browser (`tui/picker.py`); scans never use it.
+
+## Launchers and bundled libraries
+
+`Duplio.bat`, `Duplio.command` and `duplio.sh` find a Python 3.11 or newer, put `src/` and `vendor/` on its path and run
+`python -m duplio`. `vendor/` holds the pure-Python libraries (click, rich, textual and their dependencies) as unpacked
+wheels with their licences; `tools/refresh_vendor.py` rebuilds it and refuses anything compiled. A bare `duplio` at a
+terminal opens the guided screen.
 
 ## File names: `duplio.util.text`
 

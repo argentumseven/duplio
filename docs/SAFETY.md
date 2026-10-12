@@ -83,6 +83,46 @@ code that enforces it and the test that proves it.
 | A bandwidth limit also covers verification reads | `transfer.copy_verified(limiter=…)` | `test_copy_verified_respects_limiter` |
 | Names a destination cannot store are rewritten without losing or merging files | `util/names.py`, `merge.plan_merge` | `test_windows_problem_names_are_flagged_and_fixed`, `test_names_are_fixed_for_windows_style_destinations` |
 
+## Network servers (SFTP, WebDAV, FTP) are not trusted either
+
+A server is another computer, and what it sends back is data, not instructions. These rows apply to `sftp://`, `davs://`
+and `ftps://` locations (and their unencrypted forms). The `remote` fixture in `tests/test_remote_contract.py` runs the shared
+rows against a real WebDAV, FTP (with and without `MLSD`) and SFTP server.
+
+| Guarantee | Where | Test |
+|---|---|---|
+| A backslash in a name is part of the name, never a separator: `a\b.txt` and `a/b.txt` stay two different files (mixing them up would hash, and then act on, the wrong one) | `ListingBackend.normalize` | `test_a_backslash_is_part_of_a_name_not_a_folder_separator` (all four server kinds) |
+| A name a server sends cannot leave the folder it is copied into (`..`, a path separator, an empty name) | `vfs/remote.py::unsafe_name`, the walker | `test_names_that_would_escape_the_folder_are_refused`, `test_names_the_server_sends_cannot_escape` (FTP and SFTP) |
+| A server or user name cannot become an option of the `ssh` program (`sftp://-oProxyCommand=…`) | `vfs/sftp.py::parse_sftp` | `test_names_that_ssh_could_read_as_options_are_refused` |
+| A changed SSH host key is refused, with an explanation; a new one is remembered by `ssh` itself | `explain_ssh_failure`, `StrictHostKeyChecking=accept-new` | `test_a_changed_host_key_is_refused_with_an_explanation`, `test_ssh_is_started_with_safe_defaults` |
+| A password is asked for only after keys fail, goes to ssh through a private helper that answers password prompts and nothing else, and is never on a command line; the helper is removed afterwards | `SftpBackend._open_session`, `_askpass_script` | `test_a_password_is_used_only_when_no_key_works_and_never_for_other_questions`, `test_a_wrong_password_is_refused_once_without_hammering_the_server` |
+| FTP over TLS verifies the server's certificate | `FtpBackend._connect` | `test_ftp_over_tls_is_verified_and_works` |
+| A file without a size or a modification time is reported as unreadable, never given a made-up one; an FTP server with neither `MLSD` nor `MDTM` is refused | `Child.problem`, `FtpBackend._learn` | `test_a_file_without_size_or_time_is_reported_not_guessed`, `test_files_without_times_are_reported_not_guessed`, `test_a_server_that_cannot_report_times_is_refused` |
+| A scan's size and time for a file are the same facts a later check sees | listing and `stat` use one source per server | `test_stat_agrees_with_the_listing` |
+| Binary files are never altered by a text-mode transfer (FTP switches to text mode for listings) | `ftp._binary` | `test_binary_files_survive_after_listings` |
+| A file is written to a hidden temporary name, its size checked, moved into place without replacing anything unless asked, and then looked up under the final name; any failure leaves nothing behind | `open_write` of each backend | `test_writing_never_replaces_unless_asked`, `test_an_error_while_writing_leaves_nothing_behind`, `test_a_large_upload_round_trips` |
+| A server that stores a file under a different name than asked is noticed | `_check_stored` | `test_the_drive_probe_runs_and_cleans_up` (WsgiDAV cuts a name at `?`) |
+| Overwriting keeps the old file until the new one is in place, and puts it back on failure | `FtpBackend._put_in_place`, `SftpBackend._commit` | `test_an_overwrite_keeps_the_old_file_until_the_new_one_is_in_place`, `test_overwrite_with_and_without_the_atomic_rename_extension` |
+| Only single files are deleted: never a folder (WebDAV `DELETE` would remove everything inside it) | `remove` of each backend | `test_remove_deletes_single_files_and_refuses_folders`, `test_remove_deletes_files_but_refuses_folders` |
+| Empty folders are removed only when verified empty (SFTP and FTP) or when they are Duplio's own temporary folders (WebDAV) | `remove_empty_dirs` | `test_empty_folders_go_but_never_ones_with_files` |
+| Renames never replace | `rename` of each backend | `test_rename_does_not_overwrite` |
+| A hostile listing cannot exhaust memory or run code: documents with a DTD are refused, SFTP packets over 8 MiB are refused, truncated answers are errors | `parse_multistatus`, `SftpSession._read_packet`, `Reader` | `test_a_listing_with_a_dtd_is_refused`, `test_an_enormous_packet_is_not_allocated`, `test_truncated_attributes_are_a_protocol_error_not_a_crash`, `test_a_greeting_from_something_that_is_not_sftp_is_refused` |
+| A dropped connection is an error that the retry layer understands, never a short file | `RangedReader.readinto` | `test_a_lost_connection_is_reported_and_the_next_call_reconnects`, `test_a_connection_closed_by_the_server_is_noticed_before_use` |
+| Backup repositories work on all of them | | `test_a_backup_repository_works_on_the_server` |
+
+## Pictures from slow drives are for looking at
+
+| Guarantee | Where | Test |
+|---|---|---|
+| A picture never decides anything: identity comes from re-reading the real files; similar-image groups are never `CERTAIN`, so only reversible actions apply | `compare/engine.py`, `plan/planner.py` | `test_similar_plan_only_reversible` |
+| A picture of a big photo on a slow drive costs a few kilobytes, once | `preview/exif.py`, `preview/service.py` | `test_a_photo_on_a_slow_drive_costs_kilobytes_the_first_time_and_nothing_after`, `test_one_picture_serves_a_group_and_the_next_groups_are_fetched_ahead` |
+| A picture with no small preview inside is not downloaded unless it is small or you ask | `PreviewService.get` | `test_a_picture_without_a_preview_is_not_downloaded_unless_small_or_asked` |
+| A file that exists only in the cloud is never downloaded to make a picture, unless asked | `offline` flag from the file attributes | `test_a_cloud_only_file_is_never_fetched_unasked`, `test_cloud_only_files_wait_until_asked`, `test_placeholder_files_are_recognised` |
+| Pictures are kept only until Duplio closes unless persistence is chosen; the saved index holds no file names | `preview/store.py`, `preview/settings.py` | `test_session_store_disappears_when_closed`, `test_store_index_holds_no_file_names`, `test_modes_and_where_things_are_kept` |
+| An edited file is never shown as its old self | the key includes size and modification time | `test_a_changed_file_gets_a_new_key`, `test_a_changed_file_is_fetched_again` |
+| A damaged or hostile image cannot crash the decoders or make them read without limit | `preview/exif.py`, `preview/jpeg.py` | `test_garbage_and_truncated_files_never_raise`, `test_offsets_past_the_end_of_the_file_are_ignored`, `test_the_byte_budget_stops_a_file_that_asks_for_too_much`, `test_progressive_and_non_jpeg_data_are_refused_cleanly` |
+| Folder listings remembered by the folder browser are never used by scans, comparisons or anything that changes files | `vfs/listing.py` is used by `tui/picker.py` only | `test_a_server_is_asked_once_while_you_walk_up_and_down`, `test_fast_local_disks_are_never_remembered` |
+
 ## Merge and sync never destroy
 
 | Guarantee | Where | Test |
@@ -210,6 +250,10 @@ reach commands through environment variables, never through the shell command li
 (`test_target_parsing_and_masking`).
 
 ## Known limits
+
+- **Pictures:** the persistent picture cache (`previews settings --keep persistent`) is stored unencrypted in Duplio's cache folder; the default keeps pictures only until Duplio closes. The built-in decoder reads baseline JPEG thumbnails (what cameras embed); a progressive or unusual image is shown only when Pillow is installed, otherwise the pane says why there is no picture. A drive that Duplio cannot recognise as slow (no sign in its file-system name, volume label or file attributes) is read like a normal disk; `duplio drives PATH` shows the verdict, and `previews settings --mode always` caches everywhere.
+- **Network servers:** WebDAV cannot set a modification time and FTP can only where the server has `MFMT`, so copies there carry the time of the upload (content, not time, decides what is identical). FTP has no "rename unless the name exists": the check happens just before the rename, so another program writing the same names at the same instant could be overwritten. FTP and WebDAV assume names are case-insensitive and Windows-style (the cautious choice; `duplio probe` measures the real thing). Implicit FTPS (port 990) is not supported. SFTP password login needs a Unix-like computer (keys and the agent work everywhere). A WebDAV server that quietly stores a file under another name is caught after the write, but its misnamed copy stays on the server.
+- **What was and was not exercised:** the network backends are tested against WsgiDAV, pyftpdlib and paramiko's SFTP server (reached through a stand-in for the `ssh` program), not against every vendor's server and not against the real OpenSSH client. The Linux launcher is tested; `Duplio.bat` and `Duplio.command` are reviewed but have not been run on Windows or macOS. Whether a Tresorit drive is an SMB or WebDAV share on a given computer is not settled by public documentation: Duplio treats any virtual or network drive the same and `duplio drives` reports what the computer says.
 
 - **Backups store file contents, modification time and permission bits only.** Symbolic links, empty directories, ownership, extended attributes, ACLs, macOS resource forks and NTFS alternate data streams are not stored. Quarantine moves (renames) keep everything, but the copy-based fallback used on MTP does not.
 - Detection is exact. Similar-but-not-identical files are only found for images (`--similar-images`); duplicate *folders*, truncated copies and paired files (RAW+JPEG, Live Photos, sidecars) are not recognised.

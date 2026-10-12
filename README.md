@@ -5,13 +5,14 @@
 <h1 align="center">Duplio</h1>
 <p align="center"><em>Duplicates in. One survivor out.</em></p>
 
-Duplio finds identical files across **local folders, phones (MTP, PTP, iOS AFC, or
-Android over ADB) and SMB shares**, helps you decide which copy survives, and cleans
+Duplio finds identical files across **local folders, USB drives, phones (MTP, PTP, iOS AFC, or
+Android over ADB) and network drives (SMB, SFTP, WebDAV, FTP)**, helps you decide which copy survives, and cleans
 up in a way you can always undo. It also **compares two folders by content** (a renamed
 photo is not a difference), **merges** whatever one lacks into the other, **syncs** in both
 directions, and does **deduplicated, encrypted, versioned backups**, hard-link **snapshots**,
 **verified mirrors** and **phone photo imports** that skip what you already have. Every one of
-them works on local folders, mounted network drives, native SMB shares and phones alike.
+them works on local folders, mounted network drives, native network connections and phones alike. On a slow
+drive it fetches only the small preview built into each photo, once, so reviewing pictures does not wait on the link.
 
 It is built around one rule: **never lose data.** Nothing is removed without a plan
 you review. Right before anything is touched, the file and the copy you keep are
@@ -36,10 +37,11 @@ is read again.
 
 ## Contents
 
-- [Install](#install)
+- [Install](#install) (or just double-click a launcher)
 - [Quick start](#quick-start)
 - [The terminal UI](#the-terminal-ui)
 - [Phones, cameras and network shares](#phones-cameras-and-network-shares)
+- [Pictures on slow drives](#pictures-on-slow-drives)
 - [How duplicates are detected](#how-duplicates-are-detected)
 - [Performance](#performance)
 - [What counts as "the same file"](#what-counts-as-the-same-file)
@@ -60,7 +62,34 @@ is read again.
 
 ## Install
 
-Duplio needs Python 3.11 or newer.
+### The easy way: double-click, nothing to install
+
+1. Download Duplio (**Code → Download ZIP** on GitHub) and unpack it. Right-click → *Extract All* on Windows.
+2. Double-click the launcher for your computer. [`START-HERE.txt`](START-HERE.txt) says the same in three short steps.
+
+| Computer | Launcher | Notes |
+|---|---|---|
+| Windows | `Duplio.bat` | |
+| Mac | `Duplio.command` | the first time, right-click → *Open* (macOS asks once because the file came from the internet) |
+| Linux, or any terminal | `./duplio.sh` | |
+
+The launcher runs Duplio straight from its folder. **Nothing is installed, compiled or downloaded**: the libraries Duplio
+needs are bundled in [`vendor/`](vendor/README.md) (all pure Python, so the same files work everywhere). The one thing the
+computer must have is Python 3.11 or newer, which is free; if it is missing the launcher says how to get it (on Windows
+it offers to install it through the built-in `winget`, after asking). With no arguments the launcher opens the guided
+screen; with arguments it runs that command: `./duplio.sh scan ~/Pictures`.
+
+What works with nothing else installed: every command, the guided screen, duplicate finding, compare/merge/sync, plain
+backups, picture previews (Duplio decodes the thumbnails itself), and network drives over SFTP, WebDAV and FTP.
+What needs an optional package, because it contains compiled code that cannot be bundled for every computer:
+similar-image search (Pillow), encrypted backups (cryptography), native `smb://` (smbprotocol; a mounted share works
+without it), faster hashing (blake3, xxhash) and content-defined backup chunking (numpy). `duplio doctor` lists them, and a
+feature that needs one says so instead of failing.
+
+> The Linux launcher is exercised by the automated tests, including on a Python that has no packages at all. The Windows
+> `Duplio.bat` and macOS `Duplio.command` follow the same steps but have not been run on those systems by their author.
+
+### With pip
 
 ```bash
 pip install "duplio[all]"        # everything: TUI, fast hashing, SMB, images, trash, encryption
@@ -83,7 +112,7 @@ Run `duplio doctor` to see what is installed, which phone tools (`adb`, `jmtpfs`
 ## Quick start
 
 ```bash
-duplio ui                                          # guided interface (recommended)
+duplio                                             # guided interface (the same as: duplio ui)
 
 duplio scan ~/Pictures ~/Downloads                 # read-only: what is duplicated?
 duplio dedupe ~/Pictures ~/Downloads               # scan → plan → confirm → quarantine
@@ -97,6 +126,9 @@ duplio diff ~/Photos smb://me@nas/photos           # same files? renamed? only o
 duplio merge ~/Photos smb://me@nas/photos --dry-run  # copy over only what the NAS lacks
 duplio sync ~/Documents /media/usb/Documents       # two-way, deletions never destructive
 duplio probe smb://me@nas/backups                  # how does this drive really behave?
+duplio scan sftp://me@nas.local/photos davs://cloud.example.com/remote.php/dav/files/me/Photos
+duplio drives                                      # which of my drives are slow, virtual, cloud-only?
+duplio preview "T:\Photos\IMG_0042.jpg"            # a picture in the terminal, fetched cheaply
 ```
 
 A typical clean-up has three steps, and you can stop after any of them:
@@ -112,7 +144,7 @@ A typical clean-up has three steps, and you can stop after any of them:
 `duplio ui` opens a keyboard- and mouse-driven interface:
 
 - **Home** has eight workflows and a live list of connected phones, shares and drives.
-- **Find duplicates**: add locations, either typed in or picked from the detected devices. Mark any location as *reference* (used for matching, never changed). Then choose the mode and verification level.
+- **Find duplicates**: add locations, either typed in, picked from the detected devices, or chosen with the folder browser (**Browse…**, or `Ctrl+O` in any folder box; it walks local folders, USB drives, phones and network servers, and remembers a remote folder's listing for two minutes so going up and down a NAS does not ask it again; `F5` asks again). Mark any location as *reference* (used for matching, never changed). Then choose the mode and verification level.
 - **Review**: duplicate groups on the left, sorted by wasted space, and their copies on the right: ★ keep, ✗ remove, 🔒 locked (reference, protected or read-only).
   - `space` toggles keep/remove. You can never unmark the last kept copy.
   - `k` keeps only the highlighted copy.
@@ -121,6 +153,7 @@ A typical clean-up has three steps, and you can stop after any of them:
   - `p` shows the plan.
 
   The action can be switched (quarantine, trash, delete, hardlink, reflink) and the summary updates live.
+  A **picture pane** shows the highlighted copy. It is fetched once per group from the cheapest copy, the next groups are fetched in the background while you read, and nothing stored only in the cloud is downloaded until you press `f` ([details](#pictures-on-slow-drives)). `o` opens it in your image viewer.
 - **Similar images** tab: visually similar but not identical pictures. Nothing is selected unless you mark it, and marked images can only be quarantined or trashed.
 - **Plan review**: every change, with a *Verify only (dry run)* button. Permanent deletion requires typing `DELETE`.
 - **History & undo**: every applied plan. Undo it, or permanently empty its quarantine, which requires typing `PURGE`.
@@ -140,12 +173,73 @@ Run `duplio devices` to list everything Duplio can see, each with a location str
 | **iPhone/iPad** | `ifuse` mount or GVFS `afc:`/`gphoto2:` | Read access to the camera roll; PTP is treated as read-only. |
 | **SMB**, mounted | any `cifs`/`smbfs` mount or GVFS `smb-share:` | Detected and treated as network storage (parallel reads, 1 s time tolerance, case-insensitive). |
 | **SMB**, native | `smb://[domain;]user@server/share/path` or `\\server\share` | No mount needed (`pip install duplio[smb]`). The password comes from `DUPLIO_SMB_PASSWORD`, `keyring`, or a prompt. With no user name, Kerberos is used. |
-| USB sticks, SD cards | their mount point | FAT/exFAT get 2-second timestamp tolerance and no hard links. |
+| **SFTP** (SSH) | `sftp://user@host[:port]/path` | Uses the `ssh` program that comes with Windows 10+, macOS and Linux: your keys, ssh-agent, `~/.ssh/config` and `known_hosts` apply. Nothing to install. |
+| **WebDAV** (Nextcloud, ownCloud, Synology/QNAP, Apache/nginx) | `davs://user@host/path` (or `https://…`); `dav://` for plain http | Standard library only. Basic and Digest login. |
+| **FTP / FTPS** | `ftps://user@host/path` (encrypted); `ftp://…` is **not encrypted** | Standard library only. The server must be able to report file times (MLSD or MDTM). |
+| Cloud drives (Tresorit, OneDrive, iCloud, Dropbox, Google Drive) | their drive letter or folder | Recognised as virtual; pictures are cached and nothing is downloaded unasked. See [Pictures on slow drives](#pictures-on-slow-drives). |
+| USB sticks, SD cards | their mount point | FAT/exFAT get 2-second timestamp tolerance and no hard links. Reading is treated as slow, so pictures are cached. |
 
 On **macOS** Android phones are not mounted. Use ADB, or an MTP FUSE tool. On
 **Windows** phones are only visible in Explorer, not as drive letters, so use ADB.
 Duplio refuses to scan the same phone through ADB and MTP at once, because each
 file would look like its own duplicate.
+
+## Pictures on slow drives
+
+Reviewing duplicates means looking at pictures, and on a USB stick, a NAS, a phone or a cloud drive that is exactly the
+slow part: a 6 MB photo has to cross the link just to draw a thumbnail. Duplio asks the cheapest question first:
+
+1. **Seen already?** Every picture it has fetched is kept, so going back and forth costs nothing.
+2. **The photo's own thumbnail.** Cameras and phones store a small JPEG inside each photo (in its EXIF block), and RAW files
+   (DNG, CR2, NEF, ARW and the like) carry larger previews. Duplio reads only the first ~64 KiB of the file (a *ranged*
+   read, a few kilobytes on the wire) and takes that.
+3. **A small file, read whole**: up to 1 MiB on a slow drive.
+4. **Only when you ask**: a larger picture with no preview inside is not downloaded unless you press `f` in the review
+   screen (or pass `--download`). Until then the pane says why there is no picture.
+5. **Identical copies are one picture.** For a group of identical files, the picture comes from the cheapest copy: one
+   already cached, then one that is not cloud-only, then the faster drive, then the smaller file.
+
+Which drives count as slow? `duplio drives` shows how every drive was recognised. In the default `auto` mode this is
+network and SMB/SFTP/WebDAV/FTP drives, phones and cameras, USB sticks and spinning disks, and cloud or virtual drives
+(Windows placeholder files, macOS "dataless" files, OneDrive/iCloud/Dropbox/Google Drive/Tresorit-style drives). An
+internal SSD is read directly.
+
+**Cloud-only files are never fetched unasked.** A file that exists only in the cloud (the drive lists it but has not
+downloaded it) is detected from its file attributes, and previewing it would download it. Duplio waits: `f` in the review
+screen, `--online-only`, or `duplio previews settings --online-only` allow it.
+
+**What is kept, and for how long.** By default pictures are kept only until Duplio closes, in a private temporary folder
+that is deleted on exit. That is deliberate: a zero-knowledge drive such as Tresorit keeps your files encrypted so that
+only your devices see them, and a thumbnail cache on disk would be a plain-text copy of part of them. If you would rather
+keep the pictures between runs, switch it on knowingly:
+
+```bash
+duplio previews settings --keep persistent --max-size 2GB   # stored UNENCRYPTED in Duplio's cache folder
+duplio previews stats                                       # how big is it?
+duplio previews clear                                       # delete every saved picture
+duplio previews warm sftp://me@nas/photos/trip              # fetch a folder's pictures in advance (or overnight)
+```
+
+The saved index holds no file names (entries are looked up by a hash of the drive, path, size and modification time), and a
+file that changes gets a new key, so an edited photo is never shown as its old self.
+
+**A picture is only a picture.** Previews are for your eyes. They are never used to decide that files are identical, which
+files to remove, or whether a copy is safe: those decisions always come from re-reading the real files (see
+[docs/SAFETY.md](docs/SAFETY.md)).
+
+**Similar-image search** (`--similar`) is the other thing that reads whole photos. On slow drives it fingerprints each photo
+from the same small embedded thumbnail instead, a few kilobytes per photo. Photos with no small preview inside are
+skipped with a note saying how many; `--similar-full-read` reads them whole, as it used to.
+
+**Pictures without Pillow.** The terminal picture pane works with nothing installed: Duplio carries its own small JPEG and
+PNG decoders for thumbnails. (Pillow is used when present, and for similar images.)
+
+**A Tresorit drive.** Tresorit describes its drive as a virtual drive that exists while its app runs, lists files without
+storing them locally and decrypts them as they are opened. Whether Windows reports it to programs as a network (SMB or
+WebDAV) drive is not something public documentation settles, so Duplio does not guess: run `duplio drives T:\` (or the
+folder path on macOS) and it prints the drive type, the file-system name and, for a mapped network drive, the server your
+computer says it is connected to, and how it decided the drive is slow. Whatever the answer, the drive is treated as
+virtual: pictures are cached, and nothing is downloaded unless you say so.
 
 ## How duplicates are detected
 
@@ -435,7 +529,24 @@ sides were identical, which is how it tells *new here* from *deleted there*:
 
 ## Network drives
 
-Mounted shares (`cifs`, `smbfs`, NFS, SSHFS, cloud FUSE mounts) and native `smb://` locations get the same treatment, and
+Duplio talks to these directly, with no mount needed, and every command that takes a folder accepts them:
+
+| Kind | Address | Needs | Notes |
+|---|---|---|---|
+| SMB | `smb://[domain;]user@server/share/path`, `\\server\share\path` | `pip install duplio[smb]` | Or mount the share and use the mount point. Password: `DUPLIO_SMB_PASSWORD`, the keyring, or a prompt. |
+| **SFTP** | `sftp://user@host[:port]/path` | the `ssh` program (built into Windows 10+, macOS, Linux) | Login works as it does for `ssh`: keys and ssh-agent, `~/.ssh/config`, jump hosts. Password (`DUPLIO_SFTP_PASSWORD`, keyring or prompt) is handed to ssh through a private helper file that is removed afterwards; not available on Windows, where a key or the agent is used. The first time a server is seen its key is trusted and remembered in `known_hosts`; a key that later **changes** is refused with an explanation. For stricter handling set `DUPLIO_SSH_OPTIONS="-o StrictHostKeyChecking=yes"` (it also takes `-i key`, `-J jump`…). |
+| **WebDAV** | `davs://user@host[:port]/path`, `https://…` (`dav://`, `http://` are not encrypted) | nothing | Nextcloud, ownCloud, Synology and QNAP WebDAV, Apache and nginx DAV. Basic and Digest login; `DUPLIO_DAV_PASSWORD`, the keyring or a prompt. WebDAV cannot set a file's modification time, so copies there carry their upload time (content, not time, decides what is identical). |
+| **FTP / FTPS** | `ftps://user@host[:port]/path` (explicit TLS), `ftp://…` | nothing | `ftp://` sends the password and every file **unencrypted**; the interface and `duplio drives` say so. The server must report file times (MLSD, or MDTM); one that cannot is refused rather than guessed at. Implicit FTPS (port 990) is not supported. `DUPLIO_FTP_PASSWORD`, the keyring or a prompt. |
+| Android | `adb:/sdcard/DCIM` | `adb` | Hashes are computed on the phone. |
+
+Paths are taken from the top of what the server shows (`sftp://host/home/me/photos`). Passwords are never written to
+disk. On all three new kinds, a file is written under a hidden temporary name, its size is checked, and only then is it
+moved into place, without replacing anything unless asked; only single files are ever deleted (never a folder, which on
+WebDAV would take everything inside with it); and every copy is read back and compared before it counts. They are tested
+against real servers (WsgiDAV, pyftpdlib, and paramiko's SFTP server behind a stand-in for `ssh`), not against every
+vendor's: a server with unusual behaviour may need `duplio probe` first.
+
+Mounted shares (`cifs`, `smbfs`, NFS, SSHFS, cloud FUSE mounts) and all of the above get the same treatment, and
 Duplio checks what can go wrong with them before writing anything:
 
 | Risk | What Duplio does |
@@ -627,11 +738,12 @@ of file; `--newer-than 30d` and `--older-than 1y` limit all but sync by age. The
 | Duplicates | `scan`, `dedupe`, `compare`, `similar`, `plan`, `apply` |
 | Safety net | `undo`, `history`, `quarantine list/purge`, `recover`, `sessions` |
 | Two folders | `diff`, `merge`, `sync` |
-| Network drives | `probe`, `sentinel create/check`; `--bwlimit`, `--expect-mounted`, `--sentinel` on every command that writes |
+| Network drives | `drives`, `probe`, `sentinel create/check`; `--bwlimit`, `--expect-mounted`, `--sentinel` on every command that writes |
+| Pictures | `preview`, `previews warm/stats/clear/settings` |
 | Backups | `backup init/run/snapshots/ls/restore/check/forget/prune/trash/repair/diff/stats/unlock/find/history/export/passwd`, `snapshot create/list/forget`, `mirror`, `ingest` |
 | Integrity | `manifest create/verify`, `versions list/prune` |
 | Automation | `profile list/add/remove`, `run`, `schedule`, `notify`, `watch` |
-| Setup | `ui`, `devices`, `doctor`, `rules`, `config [init]`, `cache stats/clear/prune` |
+| Setup | `ui` (or just `duplio`), `devices`, `doctor`, `rules`, `config [init]`, `cache stats/clear/prune` |
 
 Every command has `--help` with examples. `scan` and `compare` accept `--json` and `--export report.{html,csv,json}`.
 
@@ -650,14 +762,25 @@ cache = true
 exclude = ["*.tmp"]
 protect = ["**/Lightroom/**"]
 skip_hidden = false
+
+[previews]               # pictures from slow, remote and cloud drives (see "Pictures on slow drives")
+mode = "auto"            # auto: slow/remote/cloud drives · always · off
+keep = "session"         # session: gone when Duplio closes · persistent: kept (UNENCRYPTED) between runs
+max_size = "1GB"         # limit of the persistent cache
+size_px = 256            # longest side of a stored picture
+prefetch = 12            # pictures fetched ahead of the one on screen
+small_download = "1MB"   # a picture this small may be read whole on a slow drive without asking
+max_download = "64MB"    # never read more than this of one file to make a picture
+online_only = false      # fetch cloud-only files' pictures without asking (this downloads them)
 ```
 
 ## Project layout
 
 ```
 src/duplio/
-  vfs/          storage backends: base contract, local (+ mount classification), SMB, ADB, locations,
-                destination guards, retry, drive probe
+  vfs/          storage backends: base contract, local (+ mount and cloud-drive classification), SMB, SFTP (+ its
+                protocol client), WebDAV, FTP/FTPS, ADB, locations, destination guards, retry, drive probe, listing cache
+  preview/      pictures from slow drives: embedded-thumbnail extraction, JPEG/PNG decoders, cache, cheapest-first service
   hashing/      algorithm registry, streaming & sampled hashing, SQLite digest cache
   scan/         filters (exclude / include / protect), roots, inventory, overlap detection
   compare/      staged engine, device-aware scheduler, similar images, result model, sessions, folder diff
@@ -668,12 +791,14 @@ src/duplio/
   devices/      phone / share / drive discovery
   reporting/    JSON / CSV / HTML exports
   cli/          click commands and Rich rendering
-  tui/          Textual application
+  tui/          Textual application (incl. the folder browser and the picture pane)
   transfer.py   the single verified-copy primitive (retry + bandwidth limit)
   notify.py     webhook / command / e-mail notifications
   watch.py      polling change detection
   util/faults.py crash and error injection points used by the crash sweeps
 benchmarks/     scale.py: time and memory on a large synthetic tree
+Duplio.bat, Duplio.command, duplio.sh, START-HERE.txt   double-click launchers (no installation)
+vendor/         the pure-Python libraries the launchers use (rebuild: tools/refresh_vendor.py)
   config.py     TOML settings and profiles
   schedule.py   systemd / launchd / Task Scheduler / cron generation
 ```
@@ -685,11 +810,16 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the parts fit together 
 
 ```bash
 pip install -e ".[all,dev]"
-pytest              # 560+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, merge, sync, CLI, TUI, crash sweeps
+pytest              # 800+ tests: engine, safety, odd file names, backends (fake ADB/SMB; real WebDAV, FTP and SFTP servers
+                    # run inside the tests), pictures, launchers, backups, merge, sync, CLI, TUI, crash sweeps
 DUPLIO_SWEEP=full pytest tests/test_crash_sweep.py   # kill every operation at every durable step (the release gate)
 python benchmarks/scale.py --files 300000 --dir /big/disk   # time and memory on a large tree
 ruff check src tests && mypy src
+python tools/refresh_vendor.py                               # rebuild vendor/ (needs internet access)
 ```
+
+The network-drive tests start WsgiDAV, pyftpdlib and paramiko's SFTP server inside the test process; without those
+packages (they are in the `dev` extra) those tests are skipped.
 
 The icon (`assets/duplio-icon-original.png`, with resized copies and a multi-size
 `duplio.ico`) shows a blue and a red featureless figure pulling apart, still joined by a

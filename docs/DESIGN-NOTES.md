@@ -95,6 +95,58 @@ SMB and exFAT. Duplio checks the mount, an optional marker file, responsiveness 
 transient errors with a reconnect; rewrites names deliberately instead of failing mid-copy; and compares times within what each
 drive can store. `duplio probe` measures all of this on the actual drive.
 
+## Pictures on slow and cloud drives
+
+The complaint that started this: reviewing duplicates on a cloud drive was slow because every thumbnail meant pulling the whole
+photo across. The options considered, and why the cheapest-first ladder won:
+
+- **Download and keep copies of the photos** (a mirror): fastest afterwards, but it moves the cost to the first run, uses as
+  much disk as the library, and for a zero-knowledge drive writes decrypted copies to disk.
+- **Cache thumbnails made from whole downloads**: saves the second look, not the first, which is the slow one.
+- **Read the thumbnail the photo already carries.** Cameras and phones write a JPEG thumbnail into the EXIF block near the start
+  of the file, and RAW files carry previews at known offsets in their TIFF structure. A ranged read of the first ~64 KiB gets it:
+  kilobytes instead of megabytes, with no cache needed for the first look. It is a trick image browsers commonly use on local
+  files; the addition here is doing it with ranged reads over each protocol, and falling back (small file read whole; bigger
+  pictures only when asked) in a defined order.
+- Cache what was fetched, in a temporary folder that is deleted when Duplio closes by default, with an opt-in persistent cache.
+  The default is deliberately the cautious one for zero-knowledge drives.
+
+Cloud drives report files that are not on disk with placeholder attributes (Windows: `FILE_ATTRIBUTE_OFFLINE`,
+`RECALL_ON_OPEN`, `RECALL_ON_DATA_ACCESS`; macOS: the `SF_DATALESS` flag). Reading such a file downloads it, so Duplio
+treats the attribute as "online only" and fetches nothing until asked.
+
+**Tresorit.** The question was whether a Tresorit drive is an SMB share. Searches (the vendor's pages could not be opened from
+the environment this was written in, so this rests on search results, not on the documents) describe it as a client-side virtual
+drive (a drive letter on Windows, a location in Finder on macOS) that exists only while the Tresorit app runs, keeps file
+metadata locally and decrypts contents on demand; an older macOS version used FUSE, and some reports tie the older Windows
+drive's behaviour to the Windows WebDAV redirector. None of them says SMB, and none settles what a given version reports.
+So Duplio does not assume: `duplio drives PATH` prints the drive type, file-system name, volume label and, for mapped drives,
+the server name Windows reports, and says whether it recognised a WebDAV redirector. Any drive that looks virtual or networked
+gets the same treatment.
+
+## More than SMB
+
+Common remote kinds and how each was added without new installs:
+
+- **SFTP** is the most requested after SMB. Instead of an SSH library (which brings compiled code that cannot be bundled for
+  every computer), Duplio speaks the SFTP protocol itself over the system `ssh`. That keeps keys, agent, `~/.ssh/config` and
+  `known_hosts` behaviour identical to what the user already has. The cost is that password login needs a helper file for ssh's
+  `SSH_ASKPASS` mechanism, which is done on Unix-like systems only.
+- **WebDAV** covers Nextcloud, ownCloud, and the "WebDAV" switch of Synology and QNAP boxes, and is also what the Windows
+  WebDAV redirector talks. Its `DELETE` removes a folder with everything inside, so Duplio never issues one for a folder it did
+  not just create, and it cannot set modification times, so content decides identity.
+- **FTP/FTPS** is old but is still what routers with a USB disk, cameras and shared hosting offer. `MLSD` gives exact
+  times; servers without it (vsftpd, for one) are handled with `LIST` plus `MDTM`; a server with neither is refused, because
+  Duplio's cache and change checks need a modification time it can trust.
+
+## Run it without installing
+
+The launchers exist for people who are not going to type `pip install`. The constraint is "no compile, no download": the
+libraries Duplio needs at run time (click, rich, textual and their dependencies) are pure Python, so they are committed
+unpacked in `vendor/` (importing from wheel files would break Textual, which reads its own style files from disk). Features
+that need compiled code (Pillow, cryptography, smbprotocol, numpy) stay optional, and the picture pane has its own small
+decoders precisely so the common path does not need Pillow.
+
 ## Paid features, and where they landed
 
 | Feature of commercial tools | In Duplio |
