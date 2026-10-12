@@ -71,6 +71,7 @@ class FileEntry:
     inode: tuple[int, int] | None = None
     nlink: int = 1
     protected: bool = False
+    ctime_ns: int | None = None  # inode change time where the storage reports a real one
 
 
 @dataclass
@@ -207,6 +208,7 @@ def scan(
                     inode=raw.inode,
                     nlink=raw.nlink,
                     protected=scan_filter.is_protected(raw.rel),
+                    ctime_ns=raw.ctime_ns,
                 )
             )
             pending += 1

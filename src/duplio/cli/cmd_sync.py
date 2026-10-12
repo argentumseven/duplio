@@ -122,6 +122,9 @@ def result_panel(report: SyncReport) -> Panel:
 @click.option("--max-delete", type=click.FloatRange(0.01, 1.0), default=0.5, show_default=True,
               help="Safety brake: stop if more than this fraction of a side would be removed.")
 @click.option("--force", is_flag=True, help="Override the safety brakes (empty side, too many deletions).")
+@click.option("--ignore-ctime", is_flag=True,
+              help="Do not compare content just because a file's change time moved (permissions, attributes) while its "
+                   "size and modification time did not.")
 @click.option("--reset", is_flag=True, help="Forget the history of this pair: the next run is a first sync (no deletions).")
 @click.option("--no-verify", is_flag=True, help="Do not read copies back to check them.")
 @click.option("--jobs", type=click.IntRange(1, 16), default=None, help="Parallel copies (default: automatic).")
@@ -130,7 +133,7 @@ def result_panel(report: SyncReport) -> Panel:
 @click.option("-y", "--yes", is_flag=True, help="Do not ask before replacing, removing or resolving conflicts.")
 @guard_options
 @handle_errors
-def sync_cmd(a: str, b: str, on_conflict: str, deletions: str, max_delete: float, force: bool, reset: bool,
+def sync_cmd(a: str, b: str, on_conflict: str, deletions: str, max_delete: float, force: bool, ignore_ctime: bool, reset: bool,
              no_verify: bool, jobs: int | None, limit: int, dry_run: bool, yes: bool, bwlimit: str | None,
              expect_mounted: bool | None, sentinel: str | None, **kw: Any) -> None:
     """Two-way sync: changes on either side are carried to the other.
@@ -156,7 +159,8 @@ def sync_cmd(a: str, b: str, on_conflict: str, deletions: str, max_delete: float
             raise ConfigError(f"not a duration: {kw['time_tolerance']!r} (examples: 2s, 90s, 1h)") from exc
     options = SyncOptions(
         basis=Basis(kw.get("basis") or "time-size"), on_conflict=on_conflict, deletions=deletions, max_delete=max_delete,
-        force=force, ignore_dst=bool(kw.get("ignore_dst")), time_tolerance_ns=tolerance, verify=not no_verify,
+        force=force, ignore_dst=bool(kw.get("ignore_dst")), ignore_ctime=ignore_ctime, time_tolerance_ns=tolerance,
+        verify=not no_verify,
         jobs=jobs, limiter=make_limiter(bwlimit), algorithm=kw.get("algorithm"), expect_mounted=expect_mounted,
         sentinel=sentinel,
     )

@@ -181,14 +181,16 @@ def test_sync_compares_by_content_a_file_edited_in_the_same_timestamp_step(tmp_p
     assert contents.count(b"version ONE") == 2 and contents.count(b"version TWO") == 2
 
 
-def test_sync_cannot_see_a_silent_edit_of_a_long_settled_file(tmp_path: Path, registry: BackendRegistry,
-                                                              dirs) -> None:  # type: ignore[no-untyped-def]
+def test_sync_sees_a_silent_edit_of_a_long_settled_file_through_its_change_time(
+        tmp_path: Path, registry: BackendRegistry, dirs) -> None:  # type: ignore[no-untyped-def]
     pair = _sync_pair(tmp_path, registry, dirs)
     f = write(pair.a / "archive.txt", b"version ONE", mtime=T0)
     pair.sync()
     silent_edit(f, b"version TWO")
     plan, _ = pair.plan()
-    assert not plan.has_work  # the documented limit of any size-and-time sync; `manifest verify` finds this
+    assert plan.has_work  # size and time are unchanged, the change time is not
+    plan, _ = pair.plan(ignore_ctime=True)
+    assert not plan.has_work  # the documented limit once the change time is set aside; `manifest verify` finds this
 
 
 def test_a_time_in_the_future_never_wins_a_newer_contest(tmp_path: Path, registry: BackendRegistry,

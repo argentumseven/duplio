@@ -79,6 +79,7 @@ class SyncOptions:
     max_delete: float = 0.5  # stop if more than this fraction of a side would be deleted
     force: bool = False
     ignore_dst: bool = False
+    ignore_ctime: bool = False  # do not treat a moved change time / new inode as a sign that content may have changed
     time_tolerance_ns: int | None = None
     verify: bool = True
     jobs: int | None = None
@@ -220,6 +221,16 @@ def plan_sync(
         return e.size != size or not mtimes_match(e.mtime_ns, mtime, tolerance_ns=tol_side[side],
                                                   dst_shift=options.ignore_dst)
 
+    def doubtful(side: int, e: FileEntry, base: Baseline) -> bool:
+        """Same size and time as recorded, yet the change time or identity moved: the content may have been edited
+        and the modification time put back (or the file replaced by another with the same size and time)."""
+        if options.ignore_ctime:
+            return False
+        ctime, ino = (base.ctime_a, base.ino_a) if side == 0 else (base.ctime_b, base.ino_b)
+        if ctime is not None and e.ctime_ns is not None and ctime != e.ctime_ns:
+            return True
+        return bool(roots[side].caps.stable_inodes and ino is not None and e.inode is not None and ino != e.inode[1])
+
     def unproven(side: int, base: Baseline) -> bool:
         """Was this side's file recorded so soon after its last modification that "same size and time" proves nothing?"""
         mtime = base.mtime_a if side == 0 else base.mtime_b
@@ -252,14 +263,27 @@ def plan_sync(
         if a is not None and b is not None:
             if base is not None:
                 ca, cb = changed(0, a, base), changed(1, b, base)
+                da = not ca and doubtful(0, a, base)
+                db = not cb and doubtful(1, b, base)
                 if not ca and not cb:
                     if unproven(0, base) or unproven(1, base):
                         # Edited within the same timestamp step as the last sync? Only the content can say.
                         undecided.append((key, a, b, None))
                         continue
+                    if da or db:
+                        # Size and time say "unchanged" but the change time or identity moved. If only one side did,
+                        # that side is the one that may have changed; identical content settles it either way.
+                        if da != db:
+                            frm = 0 if da else 1
+                            undecided.append((key, a, b, SyncAction(
+                                SyncOp.UPDATE, key, a, b, frm=frm,
+                                reason=f"changed on {SIDE[frm]} (same size and time, but edited in place)")))
+                        else:
+                            undecided.append((key, a, b, None))
+                        continue
                     plan.unchanged += 1
                     continue
-                if ca != cb:
+                if ca != cb and not (db if ca else da):
                     frm = 0 if ca else 1
                     action = SyncAction(SyncOp.UPDATE, key, a, b, frm=frm,
                                         reason=f"changed on {SIDE[frm]}")
@@ -555,7 +579,8 @@ def run_sync(
 
 
 def _baseline(a: FileEntry, b: FileEntry) -> Baseline:
-    return Baseline(a.rel, a.size, a.mtime_ns, b.rel, b.size, b.mtime_ns, time.time_ns())
+    return Baseline(a.rel, a.size, a.mtime_ns, b.rel, b.size, b.mtime_ns, time.time_ns(),
+                    a.ctime_ns, a.inode[1] if a.inode else None, b.ctime_ns, b.inode[1] if b.inode else None)
 
 
 def _record(state: SyncState, key: str, plan: SyncPlan, src_side: int, src: FileEntry, dest_path: str,
@@ -565,7 +590,8 @@ def _record(state: SyncState, key: str, plan: SyncPlan, src_side: int, src: File
     info = dest_root.backend.stat(dest_path)
     if info is None:
         return
-    dest = FileEntry(-1, 1 - src_side, dest_path, dest_rel, info.size, info.mtime_ns)
+    dest = FileEntry(-1, 1 - src_side, dest_path, dest_rel, info.size, info.mtime_ns, info.inode, info.nlink,
+                     ctime_ns=info.ctime_ns)
     a, b = (src, dest) if src_side == 0 else (dest, src)
     state.put(key, _baseline(a, b))
 

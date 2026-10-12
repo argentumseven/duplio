@@ -22,7 +22,7 @@ from duplio.util.appdirs import AppDirs
 from duplio.util.fmt import iso_now
 from duplio.util.text import fs_bytes, fs_str
 
-SCHEMA_VERSION = "2"  # v2: each row records when it was written (see the racy-timestamp rule in sync.py)
+SCHEMA_VERSION = "3"  # v2: when each row was written (racy-timestamp rule); v3: change time and identity per side
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     key      BLOB PRIMARY KEY,
@@ -32,7 +32,11 @@ CREATE TABLE IF NOT EXISTS files (
     rel_r    BLOB    NOT NULL,
     size_r   INTEGER NOT NULL,
     mtime_r  INTEGER NOT NULL,
-    recorded_ns INTEGER NOT NULL DEFAULT 0
+    recorded_ns INTEGER NOT NULL DEFAULT 0,
+    ctime_l  INTEGER,
+    ino_l    INTEGER,
+    ctime_r  INTEGER,
+    ino_r    INTEGER
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
@@ -49,6 +53,10 @@ class Baseline:
     size_b: int
     mtime_b: int
     recorded_ns: int = 0  # when this row was written; 0 = unknown
+    ctime_a: int | None = None  # change time / inode number of each side when the row was written (None = unknown)
+    ino_a: int | None = None
+    ctime_b: int | None = None
+    ino_b: int | None = None
 
 
 def pair_id(uri_a: str, uri_b: str) -> str:
@@ -68,6 +76,13 @@ class SyncState:
         left = min(uri_a, uri_b)
         self.flipped = uri_a != left  # our "A" is the stored right-hand side
         row = self._conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
+        if row is not None and row[0] == "2":
+            # v2 -> v3 only adds columns: keep the history, with the new facts unknown (they are learned on the next
+            # time each file is recorded; unknown means "fall back to size and time", exactly as before).
+            for column in ("ctime_l INTEGER", "ino_l INTEGER", "ctime_r INTEGER", "ino_r INTEGER"):
+                self._conn.execute(f"ALTER TABLE files ADD COLUMN {column}")
+            self._conn.execute("UPDATE meta SET value=? WHERE key='schema'", (SCHEMA_VERSION,))
+            row = (SCHEMA_VERSION,)
         if row is not None and row[0] != SCHEMA_VERSION:
             # An older or unknown format: forget it and behave as a first run, which never deletes anything.
             self._conn.execute("DROP TABLE IF EXISTS files")
@@ -94,24 +109,25 @@ class SyncState:
     def load(self) -> dict[str, Baseline]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT key, rel_l, size_l, mtime_l, rel_r, size_r, mtime_r, recorded_ns FROM files").fetchall()
+                "SELECT key, rel_l, size_l, mtime_l, rel_r, size_r, mtime_r, recorded_ns, ctime_l, ino_l, ctime_r, ino_r "
+                "FROM files").fetchall()
         out: dict[str, Baseline] = {}
-        for key, rl, sl, ml, rr, sr, mr, rec in rows:
+        for key, rl, sl, ml, rr, sr, mr, rec, cl, il, cr, ir in rows:
             if self.flipped:
-                out[fs_str(key)] = Baseline(fs_str(rr), sr, mr, fs_str(rl), sl, ml, rec)
+                out[fs_str(key)] = Baseline(fs_str(rr), sr, mr, fs_str(rl), sl, ml, rec, cr, ir, cl, il)
             else:
-                out[fs_str(key)] = Baseline(fs_str(rl), sl, ml, fs_str(rr), sr, mr, rec)
+                out[fs_str(key)] = Baseline(fs_str(rl), sl, ml, fs_str(rr), sr, mr, rec, cl, il, cr, ir)
         return out
 
     def put(self, key: str, base: Baseline) -> None:
         if self.flipped:
             row = (fs_bytes(key), fs_bytes(base.rel_b), base.size_b, base.mtime_b, fs_bytes(base.rel_a),
-                   base.size_a, base.mtime_a, base.recorded_ns)
+                   base.size_a, base.mtime_a, base.recorded_ns, base.ctime_b, base.ino_b, base.ctime_a, base.ino_a)
         else:
             row = (fs_bytes(key), fs_bytes(base.rel_a), base.size_a, base.mtime_a, fs_bytes(base.rel_b),
-                   base.size_b, base.mtime_b, base.recorded_ns)
+                   base.size_b, base.mtime_b, base.recorded_ns, base.ctime_a, base.ino_a, base.ctime_b, base.ino_b)
         with self._lock:
-            self._conn.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
+            self._conn.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", row)
 
     def drop(self, key: str) -> None:
         with self._lock:

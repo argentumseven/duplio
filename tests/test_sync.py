@@ -491,3 +491,84 @@ def test_cli_validation(tmp_path: Path) -> None:
     assert invoke("sync", str(a), str(a / "x")).exit_code == 2
     with pytest.raises(ConfigError):
         SyncOptions(on_conflict="nope").validate()
+
+
+# ---------------------------------------------------------------- change time and identity
+def silent_edit(path: Path, content: bytes) -> None:
+    """New content, same size, same modification time: only the change time moves."""
+    st = path.stat()
+    assert len(content) == st.st_size
+    path.write_bytes(content)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def test_an_edit_that_put_the_old_modification_time_back_is_still_synced(pair: Pair) -> None:
+    write(pair.a / "f.bin", b"version ONE", mtime=T0)
+    pair.sync()
+    silent_edit(pair.a / "f.bin", b"version TWO")
+    plan, report = pair.sync()
+    assert ops(plan) == {"f.bin": "update"} and not report.failures
+    assert (pair.b / "f.bin").read_bytes() == b"version TWO"  # was: the two sides silently differed for ever
+    assert not pair.plan()[0].has_work
+
+
+def test_a_permission_change_alone_is_checked_and_costs_no_copy(pair: Pair, monkeypatch: pytest.MonkeyPatch) -> None:
+    write(pair.a / "f.bin", rand_bytes(5000, 1), mtime=T0)
+    pair.sync()
+    os.chmod(pair.a / "f.bin", 0o600)  # moves the change time, leaves content, size and time alone
+    plan, report = pair.sync()
+    assert [a.op for a in plan.actions] == [SyncOp.MARK] and not report.failures  # compared, found identical
+    assert not pair.plan()[0].actions  # the record was refreshed: quiet again
+
+
+def test_ignoring_the_change_time_restores_the_old_limit(pair: Pair) -> None:
+    write(pair.a / "f.bin", b"version ONE", mtime=T0)
+    pair.sync()
+    silent_edit(pair.a / "f.bin", b"version TWO")
+    plan, _ = pair.sync(ignore_ctime=True)
+    assert not plan.actions and (pair.b / "f.bin").read_bytes() == b"version ONE"
+
+
+def test_in_place_edits_on_both_sides_are_a_conflict_not_a_coin_toss(pair: Pair) -> None:
+    write(pair.a / "f.bin", b"version ONE", mtime=T0)
+    pair.sync()
+    silent_edit(pair.a / "f.bin", b"version AAA")
+    silent_edit(pair.b / "f.bin", b"version BBB")
+    plan, _ = pair.sync()
+    assert ops(plan) == {"f.bin": "conflict"}
+    contents = sorted(v for v in tree(pair.a).values())
+    assert contents == [b"version AAA", b"version BBB"]  # both versions survive on A
+
+
+def test_an_edit_on_one_side_and_an_in_place_edit_on_the_other_is_a_conflict(pair: Pair) -> None:
+    write(pair.a / "f.bin", b"version ONE", mtime=T0)
+    pair.sync()
+    write(pair.a / "f.bin", b"a longer second version", mtime=T0 + 100)
+    silent_edit(pair.b / "f.bin", b"version BBB")
+    plan, _ = pair.plan()
+    assert ops(plan) == {"f.bin": "conflict"}
+
+
+def test_history_from_before_change_times_were_recorded_is_kept(tmp_path: Path, dirs: AppDirs) -> None:
+    import sqlite3
+
+    a, b = tmp_path / "A", tmp_path / "B"
+    path = dirs.state / "sync" / f"{pair_id(str(a), str(b))}.sqlite3"
+    path.parent.mkdir(parents=True)
+    conn = sqlite3.connect(path)
+    conn.executescript("""
+        CREATE TABLE files (key BLOB PRIMARY KEY, rel_l BLOB NOT NULL, size_l INTEGER NOT NULL, mtime_l INTEGER NOT NULL,
+                            rel_r BLOB NOT NULL, size_r INTEGER NOT NULL, mtime_r INTEGER NOT NULL,
+                            recorded_ns INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        INSERT INTO meta VALUES ('schema', '2'), ('left', 'x'), ('right', 'y');
+    """)
+    conn.execute("INSERT INTO files VALUES (?, ?, 1, 5, ?, 1, 5, 7)", (b"f.txt", b"f.txt", b"f.txt"))
+    conn.commit()
+    conn.close()
+    state = SyncState(path, "x", "y")
+    base = state.load()["f.txt"]
+    assert (base.size_a, base.mtime_a, base.recorded_ns) == (1, 5, 7) and base.ctime_a is None and base.ino_b is None
+    state.put("g.txt", base)
+    assert set(state.load()) == {"f.txt", "g.txt"}
+    state.close()
