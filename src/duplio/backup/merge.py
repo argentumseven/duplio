@@ -353,7 +353,11 @@ class MergeReport:
 
 
 def auto_jobs(plan: MergePlan) -> int:
-    kinds = {plan.src.caps.kind, plan.dest.caps.kind}
+    return auto_jobs_for(plan.src, plan.dest)
+
+
+def auto_jobs_for(src: Root, dest: Root) -> int:
+    kinds = {src.caps.kind, dest.caps.kind}
     if MediaKind.DEVICE in kinds or MediaKind.ROTATIONAL in kinds or MediaKind.REMOVABLE in kinds:
         return 1
     return 3 if MediaKind.NETWORK in kinds else 2
@@ -383,8 +387,6 @@ def run_merge(
                       needed_bytes=plan.bytes_to_copy)
     algorithm = options.algorithm or default_full_algorithm()
     jobs = max(1, options.jobs or auto_jobs(plan))
-    lock = threading.Lock()
-    taken_late: set[str] = set()
 
     with exclusive_lock(dirs.state / "apply.lock", purpose="merge"):
         journal = Journal(
@@ -397,12 +399,14 @@ def run_merge(
         )
         report.journal = journal.path
         progress.stage("Copying", total_items=len(plan.actions), total_bytes=plan.bytes_to_copy)
+        env = TransferEnv(src, dest, journal, apply_id, algorithm, cancel, progress, verify=options.verify,
+                          limiter=options.limiter)
 
         def job(action: MergeAction) -> MergeResult:
             if cancel.cancelled:
                 return MergeResult(action, "cancelled")
             try:
-                result = _execute(action, plan, journal, apply_id, algorithm, cancel, progress, lock, taken_late)
+                result = execute_action(action, env)
             except CancelledError:
                 return MergeResult(action, "cancelled")
             except Exception as exc:  # one bad file must not stop the others
@@ -431,9 +435,27 @@ def run_merge(
     return report
 
 
-def _execute(action: MergeAction, plan: MergePlan, journal: Journal, apply_id: str, algorithm: str,
-             cancel: CancelToken, progress: ProgressSink, lock: threading.Lock, taken_late: set[str]) -> MergeResult:
-    src, dest = plan.src, plan.dest
+@dataclass
+class TransferEnv:
+    """Everything one copy needs; ``duplio sync`` builds one per direction."""
+
+    src: Root
+    dest: Root
+    journal: Journal
+    apply_id: str
+    algorithm: str
+    cancel: CancelToken
+    progress: ProgressSink
+    verify: bool = True
+    limiter: RateLimiter | None = None
+    rename_on_collision: bool = True  # merge: keep both; sync: a collision is an error
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
+    """Copy (or replace) one file, journaled and verified; never overwrites without archiving first."""
+    journal, apply_id, algorithm = env.journal, env.apply_id, env.algorithm
+    src, dest = env.src, env.dest
     sb, db = src.backend, dest.backend
     entry = action.entry
     info = sb.stat(entry.path)
@@ -465,7 +487,7 @@ def _execute(action: MergeAction, plan: MergePlan, journal: Journal, apply_id: s
             db.makedirs(db.parent(archived))
             db.rename(target, archived)
             try:
-                digest = _copy(action, target, plan, algorithm, cancel, progress)
+                digest = _copy(action, target, env)
             except BaseException:
                 with contextlib.suppress(Exception):
                     db.rename(archived, target)  # put the old version back
@@ -477,14 +499,14 @@ def _execute(action: MergeAction, plan: MergePlan, journal: Journal, apply_id: s
         target = db.join(dest.path, dest_rel)
         for attempt in range(6):
             try:
-                digest = _copy(action, target, plan, algorithm, cancel, progress)
+                digest = _copy(action, target, env)
                 break
             except FileExistsError:
                 # Something appeared at the path since the comparison (or a filtered-out file sits there).
-                with lock:
-                    taken_late.add(dest_rel)
-                    dest_rel = _with_suffix(action.dest_rel, f" ({attempt + 2})")
-                    target = db.join(dest.path, dest_rel)
+                if not env.rename_on_collision:
+                    raise
+                dest_rel = _with_suffix(action.dest_rel, f" ({attempt + 2})")
+                target = db.join(dest.path, dest_rel)
         else:
             raise FileExistsError(f"{action.dest_rel}: the name keeps being taken in the destination")
         journal.done(seq, dst=target, digest=digest, algorithm=algorithm, size=entry.size)
@@ -498,13 +520,12 @@ def _execute(action: MergeAction, plan: MergePlan, journal: Journal, apply_id: s
         raise
 
 
-def _copy(action: MergeAction, target: str, plan: MergePlan, algorithm: str, cancel: CancelToken,
-          progress: ProgressSink) -> str:
+def _copy(action: MergeAction, target: str, env: TransferEnv) -> str:
     entry = action.entry
     return copy_verified(
-        (plan.src.backend, entry.path), (plan.dest.backend, target),
-        algorithm=algorithm, expected_size=entry.size, mtime_ns=entry.mtime_ns, verify=plan.options.verify,
-        cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n), limiter=plan.options.limiter,
+        (env.src.backend, entry.path), (env.dest.backend, target),
+        algorithm=env.algorithm, expected_size=entry.size, mtime_ns=entry.mtime_ns, verify=env.verify,
+        cancel=env.cancel, on_bytes=lambda n: env.progress.advance(nbytes=n), limiter=env.limiter,
     )
 
 

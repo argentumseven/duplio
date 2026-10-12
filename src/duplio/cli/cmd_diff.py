@@ -44,17 +44,20 @@ KIND_STYLE = {Kind.SAME: "green", Kind.MOVED: "cyan", Kind.CHANGED: "yellow", Ki
               Kind.UNREADABLE: "bold red"}
 
 
-def compare_options(fn: Callable[..., Any]) -> Callable[..., Any]:
-    """Options shared by every command that compares two locations (diff, merge, sync)."""
+ALL_BASES = tuple(basis.value for basis in Basis)
+
+
+def make_compare_options(*, default_basis: str = "content", bases: tuple[str, ...] = ALL_BASES,
+                         comparing_only: bool = True) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    """Options shared by every command that compares two locations (diff, merge, sync).
+
+    ``comparing_only`` adds the options that only matter when files are looked up by content (moves, byte check).
+    """
     options = [
-        click.option("--basis", type=click.Choice([b.value for b in Basis]), default="content", show_default=True,
+        click.option("--basis", type=click.Choice(list(bases)), default=default_basis, show_default=True,
                      help="content = compare what is inside (finds renames) · time-size = same path, size and time · "
                           "size = same path and size."),
-        click.option("--verify", "verify", type=click.Choice(["hash", "bytes"]), default="hash", show_default=True,
-                     help="hash = cryptographic hash · bytes = hash, then byte-for-byte confirmation."),
         click.option("--hash", "algorithm", default=None, help="Content hash (default: blake3 if installed, else blake2b)."),
-        click.option("--moves/--no-moves", "moves", default=True,
-                     help="With time-size/size: also read files that did not match, to find renamed and moved ones."),
         click.option("--time-tolerance", default=None, metavar="DURATION",
                      help="Treat modification times this close as equal, e.g. 2s (default: what the two drives can store)."),
         click.option("--ignore-dst", is_flag=True, help="Treat an exact one-hour time difference as equal (FAT/NTFS vs Unix)."),
@@ -68,9 +71,23 @@ def compare_options(fn: Callable[..., Any]) -> Callable[..., Any]:
         click.option("--cross-filesystems", is_flag=True, help="Descend into other filesystems mounted inside a location."),
         click.option("--no-cache", is_flag=True, help="Ignore and do not update the hash cache."),
     ]
-    for option in reversed(options):
-        fn = option(fn)
-    return fn
+    if comparing_only:
+        options[1:1] = [
+            click.option("--verify", "verify", type=click.Choice(["hash", "bytes"]), default="hash", show_default=True,
+                         help="hash = cryptographic hash · bytes = hash, then byte-for-byte confirmation."),
+            click.option("--moves/--no-moves", "moves", default=True,
+                         help="With time-size/size: also read files that did not match, to find renamed and moved ones."),
+        ]
+
+    def decorate(fn: Callable[..., Any]) -> Callable[..., Any]:
+        for option in reversed(options):
+            fn = option(fn)
+        return fn
+
+    return decorate
+
+
+compare_options = make_compare_options()
 
 
 def diff_options_from(kw: dict[str, Any]) -> DiffOptions:

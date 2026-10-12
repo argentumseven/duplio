@@ -181,6 +181,37 @@ def _undo_merge_replace(op: OpState, registry: BackendRegistry, dry_run: bool) -
     return UndoLine(op.seq, "merge-replace", src, "restored", "previous version put back")
 
 
+def _undo_sync_rename(op: OpState, registry: BackendRegistry, dry_run: bool) -> UndoLine:
+    """Give a conflict's set-aside file its old name back (the winner's copy was removed just before)."""
+    intent = op.intent
+    original, renamed = str(intent["src"]), str(op.done_record.get("dst") if op.done_record else intent["dst"])
+    backend = registry.open(intent["src_root"]).backend
+    if backend.stat(renamed) is None:
+        return UndoLine(op.seq, "sync-rename", original, "failed", "the renamed file no longer exists")
+    if backend.stat(original) is not None:
+        return UndoLine(op.seq, "sync-rename", original, "conflict", "a file exists at the original name; left as is")
+    if dry_run:
+        return UndoLine(op.seq, "sync-rename", original, "would-restore", f"rename {renamed} back")
+    backend.rename(renamed, original)
+    return UndoLine(op.seq, "sync-rename", original, "restored", "original name restored")
+
+
+def _forget_sync_history(summary: JournalSummary, dirs: AppDirs) -> None:
+    """After undoing a sync, the recorded 'last identical state' is no longer true: start over safely.
+
+    Without history the next sync is a first run, which never deletes anything.
+    """
+    from duplio.backup.syncstate import pair_id
+
+    uris = [str(r.get("uri", "")) for r in summary.header.get("roots", [])]
+    if len(uris) != 2:
+        return
+    base = dirs.state / "sync" / f"{pair_id(uris[0], uris[1])}.sqlite3"
+    for suffix in ("", "-wal", "-shm"):
+        with contextlib.suppress(OSError):
+            Path(str(base) + suffix).unlink()
+
+
 def undo(
     apply_id: str | None,
     registry: BackendRegistry,
@@ -215,6 +246,8 @@ def undo(
                 elif kind == "quarantine":
                     line = _safe(lambda op=op: _restore_quarantine(op, registry, dry_run), op, kind, src)
                     report.lines.append(line)
+                elif kind == "sync-rename":
+                    report.lines.append(_safe(lambda op=op: _undo_sync_rename(op, registry, dry_run), op, kind, src))
                 elif kind == "merge-copy":
                     report.lines.append(_safe(lambda op=op: _undo_merge_copy(op, registry, dry_run), op, kind, src))
                 elif kind == "merge-replace":
@@ -236,6 +269,8 @@ def undo(
         finally:
             if journal is not None:
                 journal.close()
+        if not dry_run and summary.header.get("action") == "sync" and report.count("restored"):
+            _forget_sync_history(summary, dirs)
     return report
 
 
