@@ -97,8 +97,8 @@ class HomeScreen(Screen[None]):
         yield Footer()
 
     def on_resize(self, event: events.Resize) -> None:
-        # The mark is 20 rows tall; on short terminals the workflow cards matter more.
-        self.query_one("#logo", Logo).display = event.size.height >= 42
+        # The mark is 22 rows tall; on short terminals the workflow cards matter more.
+        self.query_one("#logo", Logo).display = event.size.height >= 46
 
     def on_mount(self) -> None:
         table = self.query_one("#devices", DataTable)

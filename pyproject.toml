@@ -52,7 +52,7 @@ duplio = "duplio.cli.main:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-duplio = ["tui/*.tcss", "assets/*.svg"]
+duplio = ["tui/*.tcss"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

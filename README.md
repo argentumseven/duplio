@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/duplio-icon-256.png" width="160" alt="Duplio icon: two faceless grey silhouettes, hunched with legs apart, peeling apart from each other">
+  <img src="assets/duplio-icon-256.png" width="160" alt="Duplio icon: a blue and a red featureless figure pulling apart, joined by a stretching web">
 </p>
 
 <h1 align="center">Duplio</h1>
@@ -408,9 +408,10 @@ pytest              # 180+ tests: engine, safety, odd file names, backends (fake
 ruff check src tests && mypy src
 ```
 
-The icon (`assets/duplio-icon.svg`) shows two faceless grey silhouettes, hunched with
-their legs apart, peeling apart from each other. The terminal logo
-(`duplio.assets.logo`) is the same mark sampled into half-block characters.
+The icon (`assets/duplio-icon-original.png`, with resized copies and a multi-size
+`duplio.ico`) shows a blue and a red featureless figure pulling apart, still joined by a
+stretching web. The terminal logo (`duplio.assets.logo`) is the same picture sampled into
+colour half-block characters.
 
 ## License
 

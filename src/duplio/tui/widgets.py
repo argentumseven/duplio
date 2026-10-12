@@ -18,10 +18,10 @@ from duplio.util.text import printable
 
 
 class Logo(Static):
-    """The Duplio mark: two faceless silhouettes peeling apart (see ``duplio.assets.logo``)."""
+    """The Duplio mark (see ``duplio.assets.logo``)."""
 
     DEFAULT_CSS = """
-    Logo { width: auto; height: auto; color: $text; padding: 0 2; }
+    Logo { width: auto; height: auto; padding: 0 2; }
     """
 
     def __init__(self, **kwargs: object) -> None:
