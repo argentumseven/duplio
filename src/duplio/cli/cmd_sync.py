@@ -34,8 +34,9 @@ from duplio.errors import ConfigError
 from duplio.scan.inventory import RootRole, make_roots, scan
 from duplio.util.fmt import human_duration, human_size, parse_duration, plural
 
+# No age filters here: a file near the cut-off could look "deleted" on a drive that rounds its times.
 sync_compare_options = make_compare_options(default_basis="time-size", bases=("time-size", "content"),
-                                            comparing_only=False)
+                                            comparing_only=False, ages=False)
 MARK = {SyncOp.COPY: ("+", "green"), SyncOp.UPDATE: ("↻", "magenta"), SyncOp.DELETE: ("✗", "red3"),
         SyncOp.CONFLICT: ("⚠", "yellow")}
 

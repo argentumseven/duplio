@@ -17,10 +17,8 @@
 from __future__ import annotations
 
 import contextlib
-import time
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 
 from duplio.errors import SafetyError
 from duplio.events import CancelToken, NullProgress, ProgressSink
@@ -29,7 +27,7 @@ from duplio.hashing.cache import HashCache, NullCache
 from duplio.hashing.core import hash_file
 from duplio.scan.filters import ScanFilter
 from duplio.transfer import copy_verified
-from duplio.util.fmt import parse_duration, utc_stamp
+from duplio.util.fmt import utc_stamp
 from duplio.util.text import name_key, printable
 from duplio.util.throttle import RateLimiter
 from duplio.vfs.base import RawEntry, WalkStats
@@ -320,32 +318,6 @@ def run_mirror(
 
 def prune_versions(dest: Location, keep_for: str) -> int:
     """Delete version folders older than ``keep_for`` (e.g. ``90d``). Returns folders removed."""
-    db = dest.backend
-    root = db.join(dest.path, VERSIONS_DIR)
-    if db.stat(root) is None:
-        return 0
-    cutoff = time.time() - parse_duration(keep_for)
-    removed = 0
-    for name, is_dir in db.listdir(root):
-        if not is_dir:
-            continue
-        try:
-            stamp = datetime.strptime(name, "%Y%m%dT%H%M%SZ").replace(tzinfo=UTC).timestamp()
-        except ValueError:
-            continue
-        if stamp >= cutoff:
-            continue
-        folder = db.join(root, name)
-        for raw in list(db.walk(folder, walk_filter=None)):
-            db.remove(raw.path)
-        _remove_tree_dirs(db, folder)
-        removed += 1
-    return removed
+    from duplio.backup.versions import prune_versions as prune
 
-
-def _remove_tree_dirs(backend, folder: str) -> None:  # type: ignore[no-untyped-def]
-    """Remove the now-empty directory tree under ``folder`` (deepest first)."""
-    for name, is_dir in backend.listdir(folder):
-        if is_dir:
-            _remove_tree_dirs(backend, backend.join(folder, name))
-    backend.remove_empty_dirs(folder, backend.parent(folder))
+    return len(prune(dest, older_than=keep_for))

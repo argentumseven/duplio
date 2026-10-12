@@ -15,11 +15,11 @@ from duplio.cli.console import SafeConsole, harden_streams
 from duplio.cli.context import AppContext, setup_logging
 from duplio.cli.progress import RichProgress
 from duplio.compare.model import Mode, ScanOptions, Verify
-from duplio.errors import CancelledError, DuplioError
+from duplio.errors import CancelledError, ConfigError, DuplioError
 from duplio.events import CancelToken
 from duplio.hashing.algorithms import full_hash_choices
 from duplio.scan.filters import ScanFilter
-from duplio.util.fmt import parse_size
+from duplio.util.fmt import parse_duration, parse_size
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"], "max_content_width": 110}
 
@@ -143,6 +143,11 @@ def scan_options(fn: Callable[..., Any]) -> Callable[..., Any]:
         click.option("--protect", multiple=True, metavar="GLOB", help="Scan but never remove matching files (repeatable)."),
         click.option("--min-size", type=SIZE, default=None, help="Ignore smaller files (default 1 B: skip empty files)."),
         click.option("--max-size", type=SIZE, default=None, help="Ignore larger files."),
+        click.option("--type", "types", multiple=True, metavar="KIND",
+                     help="Only these kinds of file: images, video, audio, documents, archives, code, or an extension "
+                          "like .pdf (repeatable)."),
+        click.option("--newer-than", default=None, metavar="AGE", help="Only files modified within this long, e.g. 30d."),
+        click.option("--older-than", default=None, metavar="AGE", help="Only files last modified longer ago than this."),
         click.option("--skip-hidden", is_flag=True, help="Skip dot-files and dot-folders."),
         click.option("--include-vcs", is_flag=True, help="Also scan .git/.hg/.svn internals (normally skipped)."),
         click.option("--no-default-excludes", is_flag=True, help="Do not skip system junk (Thumbs.db, .Trash, @eaDir…)."),
@@ -160,9 +165,37 @@ def scan_options(fn: Callable[..., Any]) -> Callable[..., Any]:
     return fn
 
 
+def _age_cutoffs(kw: dict[str, Any]) -> tuple[int | None, int | None]:
+    """``--newer-than 30d`` / ``--older-than 1y`` as modification-time bounds in nanoseconds."""
+    import time
+
+    now = time.time()
+    after = before = None
+    try:
+        if kw.get("newer_than"):
+            after = int((now - parse_duration(str(kw["newer_than"]))) * 1e9)
+        if kw.get("older_than"):
+            before = int((now - parse_duration(str(kw["older_than"]))) * 1e9)
+    except ValueError as exc:
+        raise ConfigError(f"not a duration: {exc} (examples: 12h, 30d, 2w, 1y)") from exc
+    return after, before
+
+
 def build_filter(app: AppContext, kw: dict[str, Any]) -> ScanFilter:
     settings = app.settings
+    after, before = _age_cutoffs(kw)
+    kinds = list(kw.get("types") or [])
+    if kinds:
+        from duplio.scan.filters import resolve_types
+
+        try:
+            resolve_types(kinds)
+        except ValueError as exc:
+            raise ConfigError(str(exc)) from exc
     return ScanFilter(
+        types=kinds,
+        modified_after_ns=after,
+        modified_before_ns=before,
         include=list(kw.get("include") or []),
         exclude=list(settings.exclude) + list(kw.get("exclude") or []),
         protect=list(settings.protect) + list(kw.get("protect") or []),

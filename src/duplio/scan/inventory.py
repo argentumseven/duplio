@@ -194,6 +194,8 @@ def scan(
             one_file_system=one_file_system,
             should_stop=lambda: cancel.cancelled,
         ):
+            if scan_filter.uses_time and scan_filter.skip_by_time(raw.mtime_ns):
+                continue
             bucket.append(
                 FileEntry(
                     id=-1,

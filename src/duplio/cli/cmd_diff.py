@@ -48,7 +48,7 @@ ALL_BASES = tuple(basis.value for basis in Basis)
 
 
 def make_compare_options(*, default_basis: str = "content", bases: tuple[str, ...] = ALL_BASES,
-                         comparing_only: bool = True) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+                         comparing_only: bool = True, ages: bool = True) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
     """Options shared by every command that compares two locations (diff, merge, sync).
 
     ``comparing_only`` adds the options that only matter when files are looked up by content (moves, byte check).
@@ -65,12 +65,20 @@ def make_compare_options(*, default_basis: str = "content", bases: tuple[str, ..
         click.option("-x", "--exclude", multiple=True, metavar="GLOB", help="Skip matching files/folders (repeatable)."),
         click.option("--min-size", type=SIZE, default=None, help="Ignore smaller files (default: none; empty files count)."),
         click.option("--max-size", type=SIZE, default=None, help="Ignore larger files."),
+        click.option("--type", "types", multiple=True, metavar="KIND",
+                     help="Only these kinds of file: images, video, audio, documents, archives, code, or an extension "
+                          "like .pdf (repeatable)."),
         click.option("--skip-hidden", is_flag=True, help="Skip dot-files and dot-folders."),
         click.option("--include-vcs", is_flag=True, help="Also compare .git/.hg/.svn internals (normally skipped)."),
         click.option("--no-default-excludes", is_flag=True, help="Do not skip system junk (Thumbs.db, .Trash, @eaDir…)."),
         click.option("--cross-filesystems", is_flag=True, help="Descend into other filesystems mounted inside a location."),
         click.option("--no-cache", is_flag=True, help="Ignore and do not update the hash cache."),
     ]
+    if ages:
+        options.extend([
+            click.option("--newer-than", default=None, metavar="AGE", help="Only files modified within this long, e.g. 30d."),
+            click.option("--older-than", default=None, metavar="AGE", help="Only files last modified longer ago than this."),
+        ])
     if comparing_only:
         options[1:1] = [
             click.option("--verify", "verify", type=click.Choice(["hash", "bytes"]), default="hash", show_default=True,

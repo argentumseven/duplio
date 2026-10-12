@@ -8,6 +8,7 @@ from duplio.cli import (  # noqa: F401  (register commands)
     cmd_backup,
     cmd_diff,
     cmd_drive,
+    cmd_integrity,
     cmd_merge,
     cmd_misc,
     cmd_plan,
