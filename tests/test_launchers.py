@@ -168,3 +168,40 @@ def test_the_bundled_libraries_are_complete_and_licensed() -> None:
     compiled = [p for p in vendor.rglob("*") if p.suffix in (".so", ".pyd", ".dll", ".dylib")]
     assert not compiled, compiled  # compiled code would work on one kind of computer only
     assert (vendor / "README.md").is_file()
+
+
+@posix_only
+def test_the_launcher_prefers_a_python_that_can_open_the_window(tmp_path: Path) -> None:
+    """A newer Python without Tk loses to an older one that has it; with no Tk anywhere, any new-enough Python still runs the commands."""
+    folder = tmp_path / "app"
+    folder.mkdir()
+    for name in ("src", "vendor"):
+        (folder / name).symlink_to(ROOT / name, target_is_directory=True)
+    text = SH.read_text()
+    search = 'for dir in /opt/homebrew/bin /usr/local/bin /Library/Frameworks/Python.framework/Versions/Current/bin "$HOME/.local/bin" /usr/bin; do'
+    assert search in text, "the launcher's fallback search changed; update this test"
+    (folder / "duplio.sh").write_text(text.replace(search, "for dir in /nonexistent; do"))
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    for name in ("dirname", "readlink", "uname", "cat"):
+        (tools / name).symlink_to(shutil.which(name) or f"/usr/bin/{name}")
+    marker = tmp_path / "which"
+
+    def shim(name: str, has_tk: bool) -> None:
+        path = tools / name
+        path.write_text(f'#!/bin/sh\ncase "$*" in *"import tkinter"*) exit {0 if has_tk else 1};; esac\n'
+                        f'case "$1" in -m) echo {name} > "{marker}";; esac\nexec "{sys.executable}" "$@"\n')
+        path.chmod(0o755)
+
+    def run() -> str:
+        marker.unlink(missing_ok=True)
+        result = subprocess.run(["/bin/sh", str(folder / "duplio.sh"), "--version"], capture_output=True, text=True,
+                                env={"PATH": str(tools)}, check=False)  # fmt: skip
+        assert result.returncode == 0 and "duplio, version" in result.stdout, result.stderr
+        return marker.read_text().strip()
+
+    shim("python3.14", has_tk=False)
+    shim("python3.12", has_tk=True)
+    assert run() == "python3.12"  # the newest Python has no Tk, the older one does
+    shim("python3.12", has_tk=False)
+    assert run() == "python3.14"  # no Tk anywhere: the newest one still runs the text commands

@@ -5,7 +5,7 @@
 # everything Duplio needs is in the "src" and "vendor" folders next to this file. The only thing the
 # computer must have is Python 3.11 or newer.
 #
-#   ./duplio.sh                 open Duplio's guided screen
+#   ./duplio.sh                 open Duplio's window (two folders side by side, with pictures)
 #   ./duplio.sh scan ~/Pictures run a command (./duplio.sh --help lists them)
 #
 # To use it from anywhere, link it into a folder on your PATH:  ln -s "$PWD/duplio.sh" ~/.local/bin/duplio
@@ -41,24 +41,45 @@ is_new_enough() {
   "$1" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1
 }
 
+# Duplio's window needs Tk, which some Pythons lack (a Linux python3 without python3-tk, Homebrew's Python). The text commands
+# do not need it, so: prefer a Python that has Tk, and settle for any new-enough one.
+has_tk() {
+  "$1" -c 'import tkinter' >/dev/null 2>&1
+}
+
+# Every Python that might do, one path per line.
+candidates() {
+  for name in python3.15 python3.14 python3.13 python3.12 python3.11 python3 python; do
+    found=$(command -v "$name" 2>/dev/null) || continue
+    echo "$found"
+  done
+  # Places installers put Python that a plain terminal does not always have on its PATH (macOS in particular).
+  for dir in /opt/homebrew/bin /usr/local/bin /Library/Frameworks/Python.framework/Versions/Current/bin "$HOME/.local/bin" /usr/bin; do
+    for name in python3.15 python3.14 python3.13 python3.12 python3.11 python3; do
+      [ -x "$dir/$name" ] && echo "$dir/$name"
+    done
+  done
+}
+
 find_python() {
   if [ -n "$DUPLIO_PYTHON" ]; then
     is_new_enough "$DUPLIO_PYTHON" && { echo "$DUPLIO_PYTHON"; return 0; }
     echo "Duplio: DUPLIO_PYTHON ($DUPLIO_PYTHON) is not Python 3.11 or newer; looking for another." >&2
   fi
-  for name in python3.15 python3.14 python3.13 python3.12 python3.11 python3 python; do
-    found=$(command -v "$name" 2>/dev/null) || continue
-    is_new_enough "$found" && { echo "$found"; return 0; }
-  done
-  # Places installers put Python that a plain terminal does not always have on its PATH (macOS in particular).
-  for dir in /opt/homebrew/bin /usr/local/bin /Library/Frameworks/Python.framework/Versions/Current/bin "$HOME/.local/bin" /usr/bin; do
-    for name in python3.15 python3.14 python3.13 python3.12 python3.11 python3; do
-      if [ -x "$dir/$name" ] && is_new_enough "$dir/$name"; then
-        echo "$dir/$name"
-        return 0
-      fi
-    done
-  done
+  list=$(candidates)
+  fallback=""
+  while IFS= read -r found; do
+    [ -n "$found" ] || continue
+    is_new_enough "$found" || continue
+    if has_tk "$found"; then
+      echo "$found"
+      return 0
+    fi
+    [ -n "$fallback" ] || fallback=$found
+  done <<LIST
+$list
+LIST
+  [ -n "$fallback" ] && { echo "$fallback"; return 0; }
   return 1
 }
 

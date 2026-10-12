@@ -44,6 +44,7 @@ class DuplioGroup(click.Group):
     """Lists commands in a deliberate order with section headings."""
 
     SECTIONS = (
+        ("Open a screen", ["gui", "ui"]),
         ("Find & clean duplicates", ["scan", "dedupe", "compare", "similar", "plan", "apply"]),
         ("Compare, merge & sync folders", ["diff", "merge", "sync"]),
         ("Safety net", ["undo", "history", "quarantine", "recover", "sessions", "versions"]),
@@ -51,7 +52,7 @@ class DuplioGroup(click.Group):
         ("Network drives", ["drives", "probe", "sentinel"]),
         ("Pictures", ["preview", "previews"]),
         ("Automation", ["profile", "run", "schedule", "watch", "notify"]),
-        ("Devices & setup", ["ui", "devices", "doctor", "rules", "config", "cache"]),
+        ("Devices & setup", ["devices", "doctor", "rules", "config", "cache"]),
     )
 
     def list_commands(self, ctx: click.Context) -> list[str]:
@@ -82,7 +83,7 @@ def cli(ctx: click.Context, quiet: bool, verbose: bool, no_color: bool) -> None:
 
     \b
     Quick start:
-      duplio                                     guided terminal interface (same as: duplio ui)
+      duplio                                     open the window (two folders side by side, with pictures)
       duplio scan ~/Pictures /media/phone        see what is duplicated
       duplio dedupe ~/Pictures                   clean up (quarantine, undoable)
       duplio compare adb:/sdcard/DCIM --against ~/Pictures   what's not backed up?
@@ -100,11 +101,20 @@ def cli(ctx: click.Context, quiet: bool, verbose: bool, no_color: bool) -> None:
     ctx.obj = app
     ctx.call_on_close(app.close)
     if ctx.invoked_subcommand is None:
-        # At a terminal, a bare `duplio` (or double-clicking the launcher) opens the guided interface; the command list
-        # stays one `duplio --help` away, and is what scripts and pipes get.
-        if sys.stdin.isatty() and sys.stdout.isatty() and importlib.util.find_spec("textual") is not None:
-            ctx.invoke(cli.commands["ui"])
-            return
+        # At a terminal, a bare `duplio` (or double-clicking the launcher) opens the window; if this computer cannot show one
+        # it opens the text screen instead. The command list stays one `duplio --help` away, and is what scripts and pipes get.
+        interactive = sys.stdin.isatty() and sys.stdout.isatty()
+        if interactive:
+            from duplio.cli.cmd_misc import open_window
+
+            problem = open_window()
+            if problem is None:
+                return
+            if importlib.util.find_spec("textual") is not None:
+                console.print(Text(f"{problem} Opening the text screen instead.", style="yellow"))
+                ctx.invoke(cli.commands["ui"])
+                return
+            console.print(Text(problem, style="yellow"))
         from duplio.cli.render import banner
 
         banner(console)

@@ -32,10 +32,35 @@ from duplio.plan.rules import RULE_HELP
 from duplio.util.fmt import human_size
 
 
+def open_window() -> str | None:
+    """Open Duplio's window and keep it open. Returns why it could not open, or ``None`` after it was closed."""
+    from duplio.gui import tk_problem
+
+    problem = tk_problem()
+    if problem:
+        return problem
+    from duplio.cli.console import harden_streams
+    from duplio.gui.app import run
+
+    harden_streams()
+    app = get_app()
+    app.close()  # the window manages its own backends and caches
+    return run(app.dirs)
+
+
+@cli.command()
+@handle_errors
+def gui() -> None:
+    """Open Duplio's window: two folders side by side, with pictures."""
+    problem = open_window()
+    if problem:
+        raise ConfigError(f"{problem} (The text screen works without it: duplio ui)")
+
+
 @cli.command()
 @handle_errors
 def ui() -> None:
-    """Open the interactive terminal interface."""
+    """Open the interactive terminal interface (text only)."""
     try:
         from duplio.tui.app import DuplioApp
     except ImportError as exc:

@@ -20,9 +20,11 @@ if not exist "%HERE%src\duplio\__init__.py" (
   exit /b 1
 )
 
-rem ---- find a Python that is new enough
+rem ---- find a Python that is new enough; one that can open Duplio's window (it has Tk) is preferred
 set "PYEXE="
 set "PYARGS="
+set "FALLBACK_EXE="
+set "FALLBACK_ARGS="
 
 if defined DUPLIO_PYTHON set "PYEXE=%DUPLIO_PYTHON%"
 
@@ -31,10 +33,18 @@ if not defined PYEXE (
   if not errorlevel 1 (
     for %%V in (3.15 3.14 3.13 3.12 3.11) do (
       if not defined PYEXE (
-        py -%%V -c "import sys" >nul 2>&1
+        py -%%V -c "import tkinter" >nul 2>&1
         if not errorlevel 1 (
           set "PYEXE=py"
           set "PYARGS=-%%V"
+        ) else (
+          if not defined FALLBACK_EXE (
+            py -%%V -c "import sys" >nul 2>&1
+            if not errorlevel 1 (
+              set "FALLBACK_EXE=py"
+              set "FALLBACK_ARGS=-%%V"
+            )
+          )
         )
       )
     )
@@ -44,10 +54,22 @@ if not defined PYEXE (
 if not defined PYEXE (
   for %%C in (python python3) do (
     if not defined PYEXE (
-      %%C -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
-      if not errorlevel 1 set "PYEXE=%%C"
+      %%C -c "import sys, tkinter; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+      if not errorlevel 1 (
+        set "PYEXE=%%C"
+      ) else (
+        if not defined FALLBACK_EXE (
+          %%C -c "import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)" >nul 2>&1
+          if not errorlevel 1 set "FALLBACK_EXE=%%C"
+        )
+      )
     )
   )
+)
+
+if not defined PYEXE if defined FALLBACK_EXE (
+  set "PYEXE=%FALLBACK_EXE%"
+  set "PYARGS=%FALLBACK_ARGS%"
 )
 
 if not defined PYEXE goto :nopython
