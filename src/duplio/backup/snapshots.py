@@ -35,6 +35,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from duplio.backup import lockfile
 from duplio.backup.repository import SnapshotMeta
 from duplio.compare.scheduler import Job, run_jobs
 from duplio.errors import RepositoryError, SafetyError
@@ -91,6 +92,7 @@ class SnapshotSet:
                     meta = SnapshotMeta.from_dict(json.loads(handle.read()))
             except (OSError, ValueError, TypeError):
                 continue
+            meta.id = name  # the file name is the identity; an edited record cannot point at another folder
             if self.b.stat(self.b.join(self.loc.path, name)) is not None:
                 out.append((name, meta))
         out.sort(key=lambda item: (item[1].time, item[0]))
@@ -102,6 +104,11 @@ class SnapshotSet:
         payload = json_dumps(meta.to_dict(), indent=1).encode()
         with self.b.open_write(self._meta_path(name)) as handle:
             handle.write(payload)
+
+    def _lock(self, purpose: str):  # type: ignore[no-untyped-def]
+        """Only one snapshot create/forget at a time per destination (a scheduled run may start while one is busy)."""
+        return lockfile.exclusive(self.b, self.b.join(self.loc.path, f"{META_DIR}/.lock"), purpose,
+                                  hint="If that process is gone, delete the file '.lock' in the .duplio-snapshots folder.")
 
     # ------------------------------------------------------------------ support check
     def require_hardlinks(self) -> None:
@@ -144,16 +151,34 @@ class SnapshotSet:
         cancel: CancelToken | None = None,
         now: float | None = None,
     ) -> SnapshotReport:
+        info = source.backend.stat(source.path)
+        if info is None or not info.is_dir:
+            raise RepositoryError(f"source folder not found: {source.display}")
+        self.require_hardlinks()
+        with self._lock("snapshot"):
+            return self._create_locked(source, scan_filter=scan_filter, label=label, tags=tags,
+                                       one_file_system=one_file_system, limiter=limiter, progress=progress,
+                                       cancel=cancel, now=now)
+
+    def _create_locked(
+        self,
+        source: Location,
+        *,
+        scan_filter: ScanFilter | None,
+        label: str,
+        tags: list[str] | None,
+        one_file_system: bool,
+        limiter: RateLimiter | None,
+        progress: ProgressSink | None,
+        cancel: CancelToken | None,
+        now: float | None,
+    ) -> SnapshotReport:
         progress = progress or NullProgress()
         cancel = cancel or CancelToken()
         scan_filter = scan_filter or ScanFilter.for_backup()
         sb, db = source.backend, self.b
         if sb.id == db.id and (db.is_within(self.loc.path, source.path) or db.is_within(source.path, self.loc.path)):
             raise RepositoryError("the snapshot folder cannot be inside the folder being backed up (or vice versa)")
-        info = sb.stat(source.path)
-        if info is None or not info.is_dir:
-            raise RepositoryError(f"source folder not found: {source.display}")
-        self.require_hardlinks()
         self._remove_leftovers()
 
         previous = None
@@ -273,6 +298,12 @@ class SnapshotSet:
     # ------------------------------------------------------------------ forget
     def forget(self, name: str) -> int:
         """Delete one snapshot. Returns the bytes freed (files that no other snapshot links to)."""
+        if not name or name.startswith(".") or "/" in name or "\\" in name or name in (".", ".."):
+            raise SafetyError(f"not a snapshot folder name: {name!r}")
+        with self._lock("forget"):
+            return self._forget_locked(name)
+
+    def _forget_locked(self, name: str) -> int:
         record = self._meta_path(name)
         if self.b.stat(record) is not None:
             self.b.remove(record)  # first: from here on the snapshot no longer exists

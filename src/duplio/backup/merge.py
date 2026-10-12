@@ -488,9 +488,17 @@ def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
             db.rename(target, archived)
             try:
                 digest = _copy(action, target, env)
-            except BaseException:
+                moved = _changed_during_copy(sb, entry)
+                if moved:
+                    raise _SourceMoved(moved)
+            except BaseException as exc:
                 with contextlib.suppress(Exception):
+                    if isinstance(exc, _SourceMoved):
+                        db.remove(target)  # the new copy may be torn: discard it
                     db.rename(archived, target)  # put the old version back
+                if isinstance(exc, _SourceMoved):
+                    journal.event(seq, "skipped", reason=str(exc))
+                    return MergeResult(action, "skipped", str(exc))
                 raise
             journal.done(seq, dst=target, archived=archived, digest=digest, algorithm=algorithm, size=entry.size)
             return MergeResult(action, "done", f"replaced (old version: {VERSIONS_DIR}/{apply_id}/{prev.rel})",
@@ -509,6 +517,12 @@ def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
                 target = db.join(dest.path, dest_rel)
         else:
             raise FileExistsError(f"{action.dest_rel}: the name keeps being taken in the destination")
+        moved = _changed_during_copy(sb, entry)
+        if moved:  # a file written to while it was copied may be neither its old nor its new content
+            with contextlib.suppress(Exception):
+                db.remove(target)
+            journal.event(seq, "skipped", reason=moved)
+            return MergeResult(action, "skipped", moved)
         journal.done(seq, dst=target, digest=digest, algorithm=algorithm, size=entry.size)
         return MergeResult(action, "done", "" if dest_rel == action.dest_rel else f"saved as {dest_rel}", target,
                            digest, algorithm)
@@ -518,6 +532,19 @@ def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
     except BaseException as exc:
         journal.failed(seq, str(exc) or type(exc).__name__)
         raise
+
+
+class _SourceMoved(Exception):
+    """The source file changed (or vanished) while it was being copied."""
+
+
+def _changed_during_copy(backend, entry: FileEntry) -> str | None:  # type: ignore[no-untyped-def]
+    after = backend.stat(entry.path)
+    if after is None:
+        return "the source file disappeared while it was being copied"
+    if after.size != entry.size or after.mtime_ns != entry.mtime_ns:
+        return "the source file changed while it was being copied; it will be picked up next time"
+    return None
 
 
 def _copy(action: MergeAction, target: str, env: TransferEnv) -> str:

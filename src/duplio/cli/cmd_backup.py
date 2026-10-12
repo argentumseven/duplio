@@ -256,6 +256,8 @@ def backup_check(repo: str, read_data: bool, subset: float | None) -> None:
         app.console.print(Text(f"corrupt chunk {oid}", style="red"))
     for line in report.unreadable_trees:
         app.console.print(Text(f"unreadable snapshot {line}", style="red"))
+    for line in report.unreadable_summaries:
+        app.console.print(Text(f"unreadable snapshot summary {line}", style="red"))
     sys.exit(1)
 
 

@@ -38,7 +38,6 @@ import random
 import secrets
 import socket
 import threading
-import time
 import zlib
 from collections import defaultdict
 from collections.abc import Iterator
@@ -46,9 +45,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from duplio import __version__
+from duplio.backup import lockfile
 from duplio.backup.crypto import PasswordRequired, RepoCrypto, require_library
 from duplio.compare.scheduler import Job, run_jobs
-from duplio.errors import LockError, RepositoryError
+from duplio.errors import RepositoryError
 from duplio.events import CancelToken, NullProgress, ProgressSink
 from duplio.scan.filters import ScanFilter, extension
 from duplio.util.fmt import iso_now, utc_stamp_ms
@@ -210,12 +210,13 @@ class CheckReport:
     missing: dict[str, list[str]] = field(default_factory=dict)  # snapshot -> missing oids
     corrupt: list[str] = field(default_factory=list)
     unreadable_trees: list[str] = field(default_factory=list)
+    unreadable_summaries: list[str] = field(default_factory=list)  # a snapshot exists but its summary cannot be read
     orphans: int = 0
     read_objects: int = 0
 
     @property
     def ok(self) -> bool:
-        return not self.missing and not self.corrupt and not self.unreadable_trees
+        return not self.missing and not self.corrupt and not self.unreadable_trees and not self.unreadable_summaries
 
 
 @dataclass
@@ -346,50 +347,9 @@ class Repository:
     # ------------------------------------------------------------------ locking
     @contextlib.contextmanager
     def lock(self, purpose: str) -> Iterator[None]:
-        path = self.p("locks/repo.lock")
-        info = {"pid": os.getpid(), "host": socket.gethostname(), "time": time.time(), "purpose": purpose}
-        for _ in range(2):
-            try:
-                with self.b.open_write(path) as handle:
-                    handle.write(json.dumps(info).encode())
-                break
-            except FileExistsError:
-                held = self._read_lock(path)
-                if self._is_stale(held):
-                    with contextlib.suppress(Exception):
-                        self.b.remove(path)
-                    continue
-                raise LockError(
-                    f"repository is locked by {held.get('purpose', 'another operation')} "
-                    f"(pid {held.get('pid')} on {held.get('host')}). If that process is gone, run "
-                    f"'duplio backup unlock'."
-                ) from None
-        else:  # pragma: no cover
-            raise LockError("could not lock the repository")
-        try:
+        with lockfile.exclusive(self.b, self.p("locks/repo.lock"), purpose,
+                                hint="If that process is gone, run 'duplio backup unlock'."):
             yield
-        finally:
-            with contextlib.suppress(Exception):
-                self.b.remove(path)
-
-    def _read_lock(self, path: str) -> dict[str, Any]:
-        try:
-            with self.b.open_read(path) as handle:
-                return dict(json.loads(handle.read() or b"{}"))
-        except (OSError, ValueError):
-            return {}
-
-    @staticmethod
-    def _is_stale(held: dict[str, Any]) -> bool:
-        if not held:
-            return False
-        if time.time() - float(held.get("time", 0)) > STALE_LOCK_S:
-            return True
-        if held.get("host") == socket.gethostname():
-            from duplio.plan.journal import _pid_alive
-
-            return not _pid_alive(int(held.get("pid", -1)))
-        return False
 
     def force_unlock(self) -> bool:
         path = self.p("locks/repo.lock")
@@ -460,19 +420,32 @@ class Repository:
         return blob if self.crypto is None else self.crypto.open(blob, f"{kind}:{name}".encode())
 
     # ------------------------------------------------------------------ snapshots
-    def snapshots(self) -> list[SnapshotMeta]:
-        out = []
+    def _read_summaries(self) -> tuple[list[SnapshotMeta], list[str]]:
+        """Every readable snapshot summary, plus a description of each one that could not be read."""
+        out: list[SnapshotMeta] = []
+        unreadable: list[str] = []
         for name, is_dir in self.b.listdir(self.p("snapshots")):
             if is_dir or not name.endswith(".json"):
                 continue
+            sid = name[: -len(".json")]
             try:
                 with self.b.open_read(self.p(f"snapshots/{name}")) as handle:
-                    raw = self._open_meta("snap", name[: -len(".json")], handle.read())
-                out.append(SnapshotMeta.from_dict(json.loads(raw)))
-            except (OSError, ValueError, TypeError, RepositoryError):
+                    raw = self._open_meta("snap", sid, handle.read())
+                meta = SnapshotMeta.from_dict(json.loads(raw))
+            except (OSError, ValueError, TypeError, RepositoryError) as exc:
+                unreadable.append(f"{sid}: {exc}")
                 continue
+            meta.id = sid  # the file name is the identity; a damaged or edited record cannot point elsewhere
+            out.append(meta)
         out.sort(key=lambda s: (s.time, s.id))
-        return out
+        return out, unreadable
+
+    def snapshots(self) -> list[SnapshotMeta]:
+        """The readable snapshots. Use :meth:`snapshot_problems` to learn about the ones that are not."""
+        return self._read_summaries()[0]
+
+    def snapshot_problems(self) -> list[str]:
+        return self._read_summaries()[1]
 
     def find_snapshot(self, ref: str) -> SnapshotMeta:
         snaps = self.snapshots()
@@ -760,7 +733,7 @@ class Repository:
         index = self.index()
         report.objects = len(index)
         referenced: set[str] = set()
-        snaps = self.snapshots()
+        snaps, report.unreadable_summaries = self._read_summaries()
         report.snapshots = len(snaps)
         progress.stage("Checking snapshots", total_items=len(snaps))
         for snap in snaps:
@@ -800,7 +773,12 @@ class Repository:
             self._index = None
             index = self.index()
             referenced: set[str] = set()
-            snaps = self.snapshots()
+            snaps, unreadable = self._read_summaries()
+            if unreadable:
+                raise RepositoryError(
+                    f"{len(unreadable)} snapshot summary file(s) cannot be read ({unreadable[0]}); refusing to prune, "
+                    "because their data would look unused. Run 'duplio backup check' and try again."
+                )
             for snap in snaps:
                 try:
                     referenced.update(c for e in self.tree(snap.id) for c in e.chunks)
