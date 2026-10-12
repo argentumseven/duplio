@@ -5,6 +5,9 @@ Accepted forms:
 * ``/home/me/Pictures``, ``~/Pictures``, ``C:\\Users\\me``  — local (incl. mounts)
 * ``smb://user@nas/photos/2024`` or ``\\\\nas\\photos``   — native SMB
 * ``adb:/sdcard/DCIM`` or ``adb://SERIAL/sdcard/DCIM``     — Android over ADB
+* ``davs://user@host/path`` (or ``https://…``)            — WebDAV (Nextcloud, ownCloud, NAS web folders)
+* ``ftp://user@host/path``, ``ftps://user@host/path``      — FTP, and FTP with TLS
+* ``sftp://user@host/path``                                — SFTP (needs the ``ssh`` program that comes with the system)
 
 A :class:`BackendRegistry` shares one backend instance per server/device, so a
 scan over two folders of the same NAS uses one authenticated session.
@@ -44,12 +47,18 @@ class Location:
 
 
 def location_kind(text: str) -> str:
-    """Classify a location string without opening it: local, smb or adb."""
+    """Classify a location string without opening it: local, smb, adb, dav, ftp or sftp."""
     lowered = text.lower()
     if lowered.startswith("smb://"):
         return "smb"
     if lowered.startswith("adb:"):
         return "adb"
+    if lowered.startswith(("dav://", "davs://", "http://", "https://")):
+        return "dav"
+    if lowered.startswith(("ftp://", "ftps://")):
+        return "ftp"
+    if lowered.startswith("sftp://"):
+        return "sftp"
     if sys.platform != "win32" and text.startswith(("\\\\", "//")) and len(text) > 2:
         return "smb"
     return "local"
@@ -93,6 +102,42 @@ class BackendRegistry:
                     key, SMBBackend(target, credential_provider=self.credential_provider)
                 )
             return Location(backend, target.unc)
+        if kind == "dav":
+            from duplio.vfs.webdav import DavBackend, parse_dav
+
+            dav_target = parse_dav(text)
+            key = (
+                f"{'davs' if dav_target.tls else 'dav'}://{(dav_target.username or '')}@"
+                f"{dav_target.host.lower()}:{dav_target.port}"
+            )
+            with self._lock:
+                backend = self._backends.get(key)
+            if backend is None:
+                backend = self.register(key, DavBackend(dav_target, credential_provider=self.credential_provider))
+            return Location(backend, dav_target.path)
+        if kind == "ftp":
+            from duplio.vfs.ftp import FtpBackend, parse_ftp
+
+            ftp_target = parse_ftp(text)
+            key = (
+                f"{'ftps' if ftp_target.tls else 'ftp'}://{(ftp_target.username or '')}@"
+                f"{ftp_target.host.lower()}:{ftp_target.port}"
+            )
+            with self._lock:
+                backend = self._backends.get(key)
+            if backend is None:
+                backend = self.register(key, FtpBackend(ftp_target, credential_provider=self.credential_provider))
+            return Location(backend, ftp_target.path)
+        if kind == "sftp":
+            from duplio.vfs.sftp import SftpBackend, parse_sftp
+
+            sftp_target = parse_sftp(text)
+            key = f"sftp://{(sftp_target.username or '')}@{sftp_target.host.lower()}:{sftp_target.port or 22}"
+            with self._lock:
+                backend = self._backends.get(key)
+            if backend is None:
+                backend = self.register(key, SftpBackend(sftp_target, credential_provider=self.credential_provider))
+            return Location(backend, sftp_target.path)
         if kind == "adb":
             from duplio.vfs.adb import ADBBackend, parse_adb
 

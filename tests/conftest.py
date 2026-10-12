@@ -16,7 +16,8 @@ def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Every test gets its own Duplio state/config/cache folder."""
     home = tmp_path / "duplio-home"
     monkeypatch.setenv("DUPLIO_HOME", str(home))
-    monkeypatch.delenv("DUPLIO_SMB_PASSWORD", raising=False)
+    for name in ("SMB", "DAV", "FTP", "SFTP"):
+        monkeypatch.delenv(f"DUPLIO_{name}_PASSWORD", raising=False)
     return home
 
 

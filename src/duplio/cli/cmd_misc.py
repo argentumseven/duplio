@@ -102,12 +102,15 @@ def doctor(benchmark: bool) -> None:
         ("send2trash", "system trash action", "trash"),
         ("cryptography", "encrypted backup repositories", "encrypt"),
         ("numpy", "content-defined chunking for backups", "cdc"),
-        ("keyring", "stored SMB passwords", "-"),
+        ("keyring", "stored passwords for SMB, WebDAV, FTP and SFTP", "-"),
     ):
         present = importlib.util.find_spec(module) is not None
-        row(module, present, "installed" if present else f"missing (pip install 'duplio[{extra}]')", purpose)
+        hint = f"pip install 'duplio[{extra}]'" if extra != "-" else f"pip install {module}"
+        row(module, present, "installed" if present else f"not installed; optional ({hint})", purpose)
     adb = find_adb()
     row("adb", adb is not None, adb or "not found (Android platform-tools)", "phones over USB debugging")
+    ssh = os.environ.get("DUPLIO_SSH") or shutil.which("ssh")
+    row("ssh", ssh is not None, ssh or "not found (install the OpenSSH client)", "sftp:// servers")
     for tool, purpose in (("jmtpfs", "mount phones (MTP)"), ("gio", "GVFS phone/SMB mounts")):
         found = shutil.which(tool)
         row(tool, found is not None, found or "not found", purpose)

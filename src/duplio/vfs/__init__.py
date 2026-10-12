@@ -1,4 +1,4 @@
-"""Storage backends: local (incl. mounted phones/shares), native SMB and ADB."""
+"""Storage backends: local (incl. mounted phones/shares), native SMB, WebDAV, FTP/FTPS, SFTP and ADB."""
 
 from duplio.vfs.base import (
     Backend,
