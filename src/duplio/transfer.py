@@ -45,16 +45,33 @@ def copy_verified(
     ``limiter`` caps the transfer rate, including the read-back verification.
     """
 
+    state = {"committed": False}
+
+    def discard_unverified() -> None:
+        # We created the destination (overwrite=False means nothing was there) but could not confirm it.
+        state["committed"] = False
+        dst[0].remove(dst[1])
+
     def once() -> str:
+        if state["committed"] and not overwrite:
+            # An earlier attempt finished writing, then failed (for instance the read-back dropped) and could not
+            # remove its output. Retrying would meet our own file and treat it as someone else's.
+            discard_unverified()
         return _copy_once(src, dst, algorithm=algorithm, expected_size=expected_size,
                           expected_digest=expected_digest, mtime_ns=mtime_ns, overwrite=overwrite,
-                          verify=verify, cancel=cancel, on_bytes=on_bytes, limiter=limiter)
+                          verify=verify, cancel=cancel, on_bytes=on_bytes, limiter=limiter, state=state)
 
     def recover() -> None:
         src[0].recover()
         dst[0].recover()
 
-    return retry_transient(once, attempts=attempts, cancel=cancel, recover=recover)
+    try:
+        return retry_transient(once, attempts=attempts, cancel=cancel, recover=recover)
+    except BaseException:
+        if state["committed"] and not overwrite:
+            with contextlib.suppress(Exception):
+                discard_unverified()  # last chance: never leave an unverified copy under the real name
+        raise
 
 
 def _copy_once(
@@ -70,6 +87,7 @@ def _copy_once(
     cancel: CancelToken | None,
     on_bytes: Callable[[int], None] | None,
     limiter: RateLimiter | None,
+    state: dict[str, bool],
 ) -> str:
     src_backend, src_path = src
     dst_backend, dst_path = dst
@@ -105,6 +123,7 @@ def _copy_once(
         digest = hasher.hexdigest()
         if expected_digest is not None and digest != expected_digest:
             raise VerificationError(f"{src_path}: content no longer matches the scanned digest")
+    state["committed"] = True  # the destination now exists under its real name; verification is still to come
     if verify:
         try:
             written = hash_file(
@@ -119,6 +138,7 @@ def _copy_once(
             with contextlib.suppress(Exception):
                 dst_backend.remove(dst_path)
             raise VerificationError(f"verification failed: {dst_backend.display(dst_path)} differs from its source")
+    state["committed"] = False  # verified: this copy is now the result
     if mtime_ns is not None:
         dst_backend.set_mtime(dst_path, mtime_ns)
     return digest

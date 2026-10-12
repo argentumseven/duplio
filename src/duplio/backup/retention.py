@@ -6,7 +6,8 @@ the newest snapshot of each of the last N distinct days that have snapshots,
 and so on for each rule. A snapshot is kept if *any* rule keeps it.
 
 Safety additions: an empty policy is refused (it would delete everything),
-and the newest snapshot of every group is always kept.
+and the newest snapshot of every group is always kept, together with the newest
+one that had no read errors.
 """
 
 from __future__ import annotations
@@ -100,6 +101,11 @@ def apply_policy(
                 reasons[snap.id].append(name)
         if members and not reasons[members[0].id]:
             reasons[members[0].id].append("newest (always kept)")
+        # A snapshot that had read errors is incomplete; the newest one that had none must survive as well, or
+        # thinning could leave only incomplete ones.
+        complete = next((snap for snap in members if not snap.errors), None)
+        if complete is not None and not reasons[complete.id]:
+            reasons[complete.id].append("newest without errors (always kept)")
         for snap in members:
             if reasons.get(snap.id):
                 keep.append((snap, reasons[snap.id]))

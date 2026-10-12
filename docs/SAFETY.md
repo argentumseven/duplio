@@ -111,6 +111,29 @@ code that enforces it and the test that proves it.
 | A wrong password opens nothing; a hostile config cannot demand terabytes of key-derivation memory | `RepoCrypto.unlock` | `test_password_rules`, `test_hostile_key_derivation_cost_is_refused` |
 | Changing the password does not touch the data | `Repository.change_password` | `test_change_password_keeps_the_data` |
 
+## Found by independent review, now fixed (each has a regression test)
+
+| Guarantee | Where | Test |
+|---|---|---|
+| A snapshot summary that cannot be read is reported by `check` and stops `prune`; it is never silently left out (which made its chunks look unused) | `Repository._read_summaries`, `check`, `prune` | `test_prune_refuses_when_a_snapshot_summary_cannot_be_read`, `test_a_flaky_read_of_one_summary_cannot_make_prune_destroy_its_data` |
+| A record cannot point at another snapshot or folder: the file name is the identity, and `forget` validates it | `Repository._read_summaries`, `SnapshotSet.snapshots/forget` | `test_a_summary_cannot_name_another_snapshot`, `test_forget_uses_the_folder_name_not_the_id_inside_the_record`, `test_forget_is_locked_too_and_checks_names` |
+| Two snapshot runs cannot overlap (lock file in the destination) | `backup/lockfile.py`, `SnapshotSet._lock` | `test_a_second_snapshot_run_cannot_wipe_the_first_ones_work` |
+| A source written to while it is copied is discarded, not kept torn under its real name | `merge._changed_during_copy` | `test_a_source_written_to_during_the_copy_is_not_reported_as_copied` |
+| A repository whose key block was removed is refused instead of silently becoming plaintext | `Repository._refuse_downgrade` | `test_removing_the_key_block_does_not_turn_backups_into_plaintext` |
+| Key-derivation memory is capped as a whole (128·r·n) | `RepoCrypto.unlock` | `test_key_derivation_cost_is_capped_by_memory` |
+| Names that differ only in Unicode form are verified separately in a manifest | `manifest.verify_manifest` | `test_manifest_keeps_unicode_variants_apart` |
+| Snapshots keep permission bits (minus write) and notice permission-only changes | `snapshots._make_read_only`, `_same_permissions` | `test_snapshots_keep_permissions_and_notice_chmod` |
+| A file outside the filters on one side is not read as "deleted" there | `sync.plan_sync` | `test_a_file_outside_the_filters_on_one_side_is_not_a_deletion` |
+| Sync deletions wait when any copy failed or the run was cancelled | `sync.run_sync` | `test_deletions_wait_when_a_copy_failed` |
+| `--ignore-dst` also applies to each side's own history | `sync.plan_sync` | `test_ignore_dst_also_applies_to_each_sides_own_history` |
+| Sync and merge never delete or replace protected paths | `sync.plan_sync`, `merge._conflict` | `test_sync_never_deletes_or_replaces_protected_paths`, `test_merge_never_replaces_a_protected_destination_file` |
+| `sync --reset --dry-run` keeps the history | `cli/cmd_sync.py` | `test_reset_with_dry_run_keeps_the_history` |
+| A hard-linked pair does not hide other files of the same content; an unreadable file of the same size blocks "only here" | `compare/diff.py` | `test_a_hard_linked_pair_does_not_hide_identical_copies`, `test_an_unreadable_file_of_the_same_size_blocks_only_here` |
+| A copy that was written but could not be verified or cleaned up is removed before a retry, never left under the real name | `transfer.copy_verified` | `test_a_copy_whose_readback_failed_and_whose_cleanup_failed_is_not_left_behind` |
+| After a crash, `duplio recover` says where the previous version went | `undo._describe_incomplete` | `test_recover_explains_a_crash_between_archiving_and_writing` |
+| Backslashes in Linux file names stay part of the name; keep-both names obey the destination's rules | `merge.render_layout`, `_conflict` | `test_a_backslash_in_a_linux_file_name_is_part_of_the_name`, `test_keep_both_names_respect_the_destination_rules` |
+| Retention always keeps the newest snapshot that had no read errors | `retention.apply_policy` | `test_retention_keeps_the_newest_snapshot_without_errors` |
+
 ## Notifications cannot hurt a job
 
 A failed webhook, command or e-mail is a warning, never a failure (`test_failed_delivery_is_reported_not_raised`); messages
@@ -128,7 +151,9 @@ reach commands through environment variables, never through the shell command li
 - Hard links and clones share or replace storage. After a hard link, editing one name edits the other; reflinks do not have this problem. `duplio undo` turns them back into independent files.
 - The system trash cannot be restored programmatically; Duplio tells you where the files went.
 - A share mounted locally *and* opened as `smb://` at the same time cannot be recognised as the same storage in advance. The executor's post-action keeper check catches it and rolls the change back.
-- **A lost repository password cannot be recovered.** Encryption protects contents and names; it does not hide how many objects there are, their sizes or their timestamps.
+- **A lost repository password cannot be recovered.** Encryption protects contents and names; it does not hide how many objects there are, their sizes or their timestamps. `duplio-repo.json` itself is not authenticated: a changed configuration is refused when it contradicts the stored data or its own markers, but on a repository that holds no data yet nothing can reveal that its key block was removed. Changing the password re-wraps the master key and does not rotate it, so a saved copy of the old configuration still opens with the old password.
+- Snapshot hard-link reuse trusts size, modification time (within what the drive can store) and permission bits; a file edited without changing any of them would be linked to the stale copy. `duplio manifest verify` finds that kind of change.
+- The first sync with the default `time-size` basis treats same-size, same-time files as identical without reading them; `--basis content` reads them.
 - `merge`, `sync` and `snapshot` copy file contents and modification times only, with the same limits as backups (no symbolic links, ownership, extended attributes or empty folders). Hard-link snapshots keep permission bits.
 - `sync` does not detect renames: a renamed file is a deletion plus a new file (the content is copied again; nothing is lost). It also cannot pair names that differ only by case or Unicode form on a drive that distinguishes them; those are left alone and reported.
 - `merge --move` and `--clean-source` re-read and re-hash both copies before removing a source file, so a move reads each file about three times.

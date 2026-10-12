@@ -423,3 +423,104 @@ def test_merge_never_replaces_a_protected_destination_file(tmp_path: Path, regis
     assert [x.kind for x in plan.actions] == ["rename"]
     run_merge(plan, registry, dirs=dirs)
     assert (b / "App.app" / "Contents" / "main.bin").read_bytes() == b"installed build"
+
+
+# ---------------------------------------------------------------- crash diagnosis and stray copies
+def test_recover_explains_a_crash_between_archiving_and_writing(tmp_path: Path, registry: BackendRegistry, dirs) -> None:  # type: ignore[no-untyped-def]
+    from duplio.plan.journal import Journal, list_journals, summarize
+    from duplio.plan.undo import inspect_incomplete
+
+    a, b = tmp_path / "A", tmp_path / "B"
+    write(a / "n.txt", b"new version", mtime=T0 + 50)
+    write(b / "n.txt", b"old version", mtime=T0)
+    roots = make_roots([(registry.open(str(a)), RootRole.NORMAL), (registry.open(str(b)), RootRole.NORMAL)])
+    plan = plan_merge(diff_inventory(scan(roots, ScanFilter(min_size=0)), DiffOptions()),
+                      MergeOptions(on_conflict="replace"))
+    report = run_merge(plan, registry, dirs=dirs)
+    intent = summarize(list_journals(dirs.journals)[0]).ops[0].intent
+    assert intent["archived"].endswith(f"{report.apply_id}/n.txt")  # the journal says where the old version goes
+    # Now fake the moment of the crash: old version set aside, nothing written yet, no "done" record.
+    archived = Path(intent["archived"])
+    (b / "n.txt").rename(tmp_path / "gone-for-now")
+    archived.parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / "gone-for-now").rename(archived)
+    journal = Journal(dirs.journals / "99999999T000000000Z-crash.jsonl", header={"apply_id": "crash", "action": "merge"})
+    journal.intent(op="merge-replace", src_root=intent["src_root"], src=intent["src"], dst_root=intent["dst_root"],
+                   dst=intent["dst"], archived=str(archived), size=1, mtime_ns=1)
+    journal.close()
+    states = [state for _, op, state in inspect_incomplete(registry, dirs) if op.intent.get("archived")]
+    assert states and "previous version was set aside" in states[0] and str(archived) in states[0]
+
+
+def test_a_copy_whose_readback_failed_and_whose_cleanup_failed_is_not_left_behind(
+        tmp_path: Path, registry: BackendRegistry, monkeypatch: pytest.MonkeyPatch) -> None:
+    import duplio.transfer as transfer
+    from duplio.transfer import copy_verified
+
+    backend = registry.local()
+    source = write(tmp_path / "src.bin", rand_bytes(5000, 4), mtime=T0)
+    target = tmp_path / "dst.bin"
+    real_hash, real_remove = transfer.hash_file, LocalBackend.remove
+    calls = {"hash": 0, "remove": 0}
+
+    def flaky_hash(*args, **kwargs):  # type: ignore[no-untyped-def]
+        calls["hash"] += 1
+        if calls["hash"] == 1:
+            raise OSError(errno.ESTALE, "Stale file handle")  # the read-back drops
+        return real_hash(*args, **kwargs)
+
+    def flaky_remove(self, path):  # type: ignore[no-untyped-def]
+        calls["remove"] += 1
+        if calls["remove"] == 1:
+            raise OSError(errno.EIO, "I/O error")  # and so does the cleanup that follows it
+        return real_remove(self, path)
+
+    monkeypatch.setattr(transfer, "hash_file", flaky_hash)
+    monkeypatch.setattr(LocalBackend, "remove", flaky_remove)
+    monkeypatch.setattr("duplio.vfs.retry.time.sleep", lambda s: None)
+    digest = copy_verified((backend, str(source)), (backend, str(target)), algorithm="blake2b")
+    assert digest and target.read_bytes() == source.read_bytes()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["dst.bin", "src.bin"]  # no "dst (2).bin", no stray file
+
+
+# ---------------------------------------------------------------- names
+def test_a_backslash_in_a_linux_file_name_is_part_of_the_name(tmp_path: Path, registry: BackendRegistry, dirs) -> None:  # type: ignore[no-untyped-def]
+    a, b = tmp_path / "A", tmp_path / "B"
+    b.mkdir()
+    write(a / "report\\final.txt", b"hello", mtime=T0)
+    roots = make_roots([(registry.open(str(a)), RootRole.NORMAL), (registry.open(str(b)), RootRole.NORMAL)])
+    diff = diff_inventory(scan(roots, ScanFilter(min_size=0)), DiffOptions())
+    plan = plan_merge(diff, MergeOptions())
+    assert [x.dest_rel for x in plan.actions] == ["report\\final.txt"]  # was: report/final.txt (a new folder)
+    run_merge(plan, registry, dirs=dirs)
+    assert (b / "report\\final.txt").read_bytes() == b"hello"
+    # a layout typed with Windows separators still works
+    from duplio.backup.merge import render_layout
+
+    assert render_layout("{year}\\{name}", plan.actions[0].entry) == "2020/report\\final.txt"
+
+
+def test_keep_both_names_respect_the_destination_rules(tmp_path: Path, registry: BackendRegistry) -> None:
+    a, b = tmp_path / "phone: DCIM", tmp_path / "B"
+    write(a / "IMG_1.jpg", b"from phone", mtime=T0 + 5)
+    write(b / "IMG_1.jpg", b"already here", mtime=T0)
+    roots = make_roots([(registry.open(str(a)), RootRole.NORMAL), (registry.open(str(b)), RootRole.NORMAL)])
+    roots[1].caps = roots[1].caps.with_(windows_names=True)  # an SMB/exFAT destination
+    plan = plan_merge(diff_inventory(scan(roots, ScanFilter(min_size=0)), DiffOptions()), MergeOptions())
+    (action,) = plan.actions
+    assert action.kind == "rename" and ":" not in action.dest_rel and action.dest_rel.startswith("IMG_1 (from phone_ DCIM ")
+
+
+# ---------------------------------------------------------------- retention
+def test_retention_keeps_the_newest_snapshot_without_errors() -> None:
+    from duplio.backup.repository import SnapshotMeta
+    from duplio.backup.retention import RetentionPolicy, apply_policy
+
+    def snap(n: int, errors: int) -> SnapshotMeta:
+        return SnapshotMeta(id=f"s{n}", time=f"2026-01-0{n}T00:00:00+00:00", host="h", source="/src", label="",
+                            tags=[], parent=None, files=1, bytes=1, errors=errors)
+
+    snaps = [snap(1, 0), snap(2, 0), snap(3, 4)]  # the newest is incomplete
+    decision = apply_policy(snaps, RetentionPolicy(keep_last=1))
+    assert {m.id for m, _ in decision.keep} == {"s3", "s2"}
+    assert [m.id for m in decision.remove] == ["s1"]

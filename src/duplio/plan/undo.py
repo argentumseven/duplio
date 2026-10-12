@@ -380,12 +380,36 @@ def inspect_incomplete(registry: BackendRegistry, dirs: AppDirs | None = None) -
     findings = []
     for path in list_journals(dirs.journals):
         for op in summarize(path).incomplete:
-            intent = op.intent
             try:
-                backend = registry.open(intent["src_root"]).backend
-                exists = backend.stat(intent["src"]) is not None
-                state = "original still in place (nothing happened)" if exists else "original is gone: check the quarantine folder"
+                state = _describe_incomplete(op.intent, registry)
             except DuplioError as exc:
                 state = f"cannot check: {exc}"
             findings.append((path, op, state))
     return findings
+
+
+def _describe_incomplete(intent: dict[str, Any], registry: BackendRegistry) -> str:
+    kind = str(intent.get("op", ""))
+    if kind in ("merge-copy", "merge-replace"):
+        backend = registry.open(intent["dst_root"]).backend
+        written = backend.stat(intent["dst"]) is not None
+        archived = intent.get("archived")
+        kept = bool(archived) and backend.stat(str(archived)) is not None
+        if kind == "merge-replace" and kept:
+            if written:
+                return f"the new version is in place; the previous version is kept at {archived}"
+            return (f"the previous version was set aside at {archived} and the new one was not written: run the "
+                    "merge again, or move the previous version back")
+        if written:
+            return f"a file exists at {intent['dst']}, but the copy was not confirmed in the journal: verify it or copy again"
+        return "nothing was written (the destination is as before)"
+    if kind == "sync-rename":
+        backend = registry.open(intent["src_root"]).backend
+        renamed = backend.stat(intent["dst"]) is not None
+        original = backend.stat(intent["src"]) is not None
+        if renamed and not original:
+            return f"the file was renamed to {intent['dst']}; the next sync completes the conflict"
+        return "the file was not renamed" if original else "neither name exists: check the quarantine and versions folders"
+    backend = registry.open(intent["src_root"]).backend
+    exists = backend.stat(intent["src"]) is not None
+    return "original still in place (nothing happened)" if exists else "original is gone: check the quarantine folder"

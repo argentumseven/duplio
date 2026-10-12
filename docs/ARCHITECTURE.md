@@ -72,6 +72,7 @@ disk each get the right profile automatically.
 
 - `vfs/guards.py`: checks run before anything is written to a destination: a really mounted file system (not the empty mount point), a sentinel marker file, a hung server (the probe runs in a daemon thread with a timeout), and free space with a reserve.
 - `vfs/retry.py` and `transfer.copy_verified`: transient errors (stale handle, dropped session, timeout) are retried with backoff and `Backend.recover()` (SMB drops its connection cache); each retry restarts the file, so partial copies are never kept.
+- `backup/lockfile.py`: the lock file used by repositories and snapshot folders (exclusive create, owner pid/host/time, reclaimed only when the owner is provably gone).
 - `util/throttle.py`: one token bucket shared by all workers (copies, read-back verification, repository uploads).
 - `util/names.py`: Windows/SMB/exFAT name rules (illegal characters, trailing dots, reserved names, 255-unit limit) as `rel_issues` / `fix_rel`; `Capabilities.windows_names` says when they apply.
 - `util/timecmp.py`: modification-time equality within the coarser drive's resolution, plus the single exact one-hour DST offset.

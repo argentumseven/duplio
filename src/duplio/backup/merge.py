@@ -178,8 +178,10 @@ def render_layout(template: str, entry: FileEntry) -> str:
         "year": f"{moment.year:04d}", "month": f"{moment.month:02d}", "day": f"{moment.day:02d}",
         "date": moment.strftime("%Y-%m-%d"),
     }  # fmt: skip
-    text = _TOKEN_RE.sub(lambda m: values[m.group(1)], template)
-    parts = [p for p in text.replace("\\", "/").split("/") if p]
+    # Backslashes in the *template* are path separators (typed on Windows); in a file name they are ordinary
+    # characters on Linux/macOS and stay part of that name.
+    text = _TOKEN_RE.sub(lambda m: values[m.group(1)], template.replace("\\", "/"))
+    parts = [p for p in text.split("/") if p]
     if not parts or any(p in (".", "..") for p in parts):
         raise ConfigError(f"the layout {template!r} produced an unusable path for {rel!r}")
     return "/".join(parts)
@@ -267,7 +269,7 @@ def plan_merge(diff: DiffResult, options: MergeOptions | None = None) -> MergePl
 
         previous = item.others[0] if (item.kind is Kind.CHANGED and default_layout and item.others) else None
         if previous is not None:
-            action = _conflict(item, previous, target, options, tag, taken, key)
+            action = _conflict(item, previous, target, options, tag, taken, key, windows)
             if action is None:
                 reason = "conflict" if options.on_conflict == "skip" else "dest-newer"
                 detail = "different file at the same path (policy: skip)" if reason == "conflict" else \
@@ -298,7 +300,7 @@ def plan_merge(diff: DiffResult, options: MergeOptions | None = None) -> MergePl
 
 
 def _conflict(item: DiffItem, previous: FileEntry, target: str, options: MergeOptions, tag: str,
-              taken: set[str], key: Callable[[str], str]) -> MergeAction | None:
+              taken: set[str], key: Callable[[str], str], windows: bool = False) -> MergeAction | None:
     entry = item.entry
     policy = options.on_conflict
     if policy == "newer":
@@ -316,7 +318,10 @@ def _conflict(item: DiffItem, previous: FileEntry, target: str, options: MergeOp
         return MergeAction("replace", entry, previous.rel, "different file at the same path (old version kept)",
                            "previous version is kept in .duplio-versions", previous=previous)
     stamp = datetime.fromtimestamp(max(entry.mtime_ns, 0) / 1e9, tz=UTC).strftime("%Y-%m-%d")
-    renamed = _unique(_with_suffix(target, f" (from {tag} {stamp})"), taken, key)
+    renamed = _with_suffix(target, f" (from {tag} {stamp})")
+    if windows:  # the source folder's name goes into the new name and may hold characters the destination refuses
+        renamed = fix_rel(renamed, windows=True)
+    renamed = _unique(renamed, taken, key)
     return MergeAction("rename", entry, renamed, "different file at the same path: both kept",
                        previous=previous)
 
@@ -470,11 +475,14 @@ def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
 
     dest_rel = action.dest_rel
     archived: str | None = None
+    planned_archive = None
+    if action.kind == "replace" and action.previous is not None:
+        planned_archive = db.join(dest.path, f"{VERSIONS_DIR}/{apply_id}/{action.previous.rel}")
     seq = journal.intent(
         op="merge-replace" if action.kind == "replace" else "merge-copy",
         src_root=src.location.uri, src=entry.path, rel=entry.rel,
         dst_root=dest.location.uri, dst=db.join(dest.path, dest_rel), dest_rel=dest_rel,
-        size=entry.size, mtime_ns=entry.mtime_ns, kind=action.kind,
+        size=entry.size, mtime_ns=entry.mtime_ns, kind=action.kind, archived=planned_archive,
     )  # fmt: skip
     try:
         if action.kind == "replace":
@@ -485,7 +493,8 @@ def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
             if current is None or current.size != prev.size or current.mtime_ns != prev.mtime_ns:
                 journal.event(seq, "skipped", reason="destination file changed since the comparison")
                 return MergeResult(action, "skipped", "the destination file changed since the comparison")
-            archived = db.join(dest.path, f"{VERSIONS_DIR}/{apply_id}/{prev.rel}")
+            archived = planned_archive
+            assert archived is not None
             db.makedirs(db.parent(archived))
             db.rename(target, archived)
             try:
