@@ -22,10 +22,12 @@ from duplio.compare.model import DuplicateGroup, EngineStats, SimilarGroup
 from duplio.compare.scheduler import Job, run_jobs
 from duplio.events import CancelToken, ProgressSink
 from duplio.hashing.cache import HashCache
+from duplio.preview.service import PreviewItem, PreviewService, Unavailable
 from duplio.scan.filters import IMAGE_EXTENSIONS, extension
 from duplio.scan.inventory import FileEntry, Inventory
 
 DHASH_KIND = "dhash:v1"
+THUMB_DHASH_KIND = "dhash:thumb:v1"  # from a small embedded preview; kept apart because it is a slightly different hash
 MAX_IMAGE_BYTES = 256 * 1024 * 1024
 
 
@@ -35,6 +37,15 @@ def have_pillow() -> bool:
     except ImportError:
         return False
     return True
+
+
+def _hash_pixels(pixels: bytes) -> int:
+    value = 0
+    for row in range(8):
+        base = row * 9
+        for col in range(8):
+            value = (value << 1) | (1 if pixels[base + col] > pixels[base + col + 1] else 0)
+    return value
 
 
 def dhash(handle) -> tuple[int, int, int]:  # type: ignore[no-untyped-def]
@@ -50,12 +61,32 @@ def dhash(handle) -> tuple[int, int, int]:  # type: ignore[no-untyped-def]
         img = ImageOps.exif_transpose(img) or img
         small = img.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
         pixels = small.tobytes()  # one byte per pixel in mode 'L'
-    value = 0
-    for row in range(8):
-        base = row * 9
-        for col in range(8):
-            value = (value << 1) | (1 if pixels[base + col] > pixels[base + col + 1] else 0)
-    return value, width, height
+    return _hash_pixels(pixels), width, height
+
+
+_ORIENTATION = {2: "FLIP_LEFT_RIGHT", 3: "ROTATE_180", 4: "FLIP_TOP_BOTTOM", 5: "TRANSPOSE", 6: "ROTATE_270",
+                7: "TRANSVERSE", 8: "ROTATE_90"}
+
+
+def dhash_thumbnail(data: bytes, orientation: int, original: tuple[int, int] | None) -> tuple[int, int, int]:
+    """dHash from a small stored thumbnail instead of the whole picture (so a slow drive is not read again).
+
+    The pixel size reported is the picture's own when its header said, otherwise 0 x 0 ("unknown").
+    """
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(data)) as img:
+        method = _ORIENTATION.get(orientation)
+        if method:
+            img = img.transpose(getattr(Image.Transpose, method))
+        small = img.convert("L").resize((9, 8), Image.Resampling.LANCZOS)
+        pixels = small.tobytes()
+    width, height = original if original else (0, 0)
+    if original and orientation in (5, 6, 7, 8):
+        width, height = height, width
+    return _hash_pixels(pixels), width, height
 
 
 def hamming(a: int, b: int) -> int:
@@ -109,7 +140,16 @@ def find_similar_images(
     progress: ProgressSink,
     cancel: CancelToken,
     stats: EngineStats,
+    previews: PreviewService | None = None,
+    full_read: bool = False,
 ) -> list[SimilarGroup]:
+    """Group visually similar images.
+
+    On slow, remote and cloud drives the hash is taken from the picture's small embedded preview (a few kilobytes read, kept
+    in the preview cache) rather than from the whole image, unless ``full_read``: reading a photo library over a slow link
+    just to fingerprint it is what makes these scans take hours. Images without a small preview there are not compared, and
+    a message says how many.
+    """
     if not have_pillow():
         progress.message("Similar-image search needs Pillow: pip install 'duplio[media]'", level="warning")
         return []
@@ -127,26 +167,44 @@ def find_similar_images(
     lock = threading.Lock()
     jobs: list[Job] = []
 
+    skipped = {"count": 0}
     for entry in candidates:
         root = inventory.roots[entry.root]
-        cached = cache.get(root.backend.id, entry.path, DHASH_KIND, entry.size, entry.mtime_ns)
+        use_preview = previews is not None and not full_read and root.caps.read_cost > 0
+        kind = THUMB_DHASH_KIND if use_preview else DHASH_KIND
+        cached = cache.get(root.backend.id, entry.path, kind, entry.size, entry.mtime_ns)
         if cached is not None:
             h, w, ht = (int(x, 16) for x in cached.split(":"))
             hashes[entry.id] = (h, w, ht)
             progress.advance(items=1)
             continue
 
-        def job(entry: FileEntry = entry) -> None:
+        def job(entry: FileEntry = entry, use_preview: bool = use_preview, kind: str = kind) -> None:
             root = inventory.roots[entry.root]
+            read = 0
             try:
-                with root.backend.open_read(entry.path) as handle:
-                    seekable = getattr(handle, "seekable", None)
-                    if seekable is not None and seekable():
-                        value = dhash(handle)
-                    else:  # device streams: buffer the image so Pillow can seek
-                        import io
+                if use_preview:
+                    assert previews is not None
+                    item = PreviewItem(root.backend, entry.path, entry.size, entry.mtime_ns, entry.rel, entry.offline)
+                    try:
+                        preview = previews.get(item, cancel=cancel)
+                    except Unavailable:
+                        with lock:
+                            skipped["count"] += 1
+                        progress.advance(items=1)
+                        return
+                    value = dhash_thumbnail(preview.thumb.data, preview.thumb.orientation, preview.thumb.original)
+                    read = preview.bytes_read
+                else:
+                    with root.backend.open_read(entry.path) as handle:
+                        seekable = getattr(handle, "seekable", None)
+                        if seekable is not None and seekable():
+                            value = dhash(handle)
+                        else:  # device streams: buffer the image so Pillow can seek
+                            import io
 
-                        value = dhash(io.BytesIO(handle.read()))
+                            value = dhash(io.BytesIO(handle.read()))
+                    read = entry.size
             except Exception:
                 # Not an image Pillow understands (or unreadable): simply not compared.
                 progress.advance(items=1)
@@ -156,17 +214,23 @@ def find_similar_images(
             cache.put(
                 root.backend.id,
                 entry.path,
-                DHASH_KIND,
+                kind,
                 entry.size,
                 entry.mtime_ns,
                 f"{value[0]:x}:{value[1]:x}:{value[2]:x}",
                 mtime_resolution_ns=root.caps.mtime_resolution_ns,
             )
-            progress.advance(items=1, nbytes=entry.size)
+            progress.advance(items=1, nbytes=read)
 
         caps = root.caps
         jobs.append(Job(root.backend.device_key(entry.path), caps.max_parallel_reads, job))
     run_jobs(jobs, cancel=cancel)
+    if skipped["count"]:
+        progress.message(
+            f"{skipped['count']:,} images on slow, remote or cloud drives have no small preview inside them and were not "
+            "compared (--similar-full-read reads them in full).",
+            level="warning",
+        )
 
     by_id = {e.id: e for e in candidates}
     tree = BKTree()

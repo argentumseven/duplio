@@ -36,6 +36,7 @@ from duplio.plan.rules import parse_rules
 from duplio.scan.filters import ScanFilter
 from duplio.scan.inventory import RootRole
 from duplio.tui.job import JobScreen
+from duplio.tui.preview import PreviewPane, preview_items
 from duplio.tui.widgets import ConfirmDialog, location_suggestions, ptext, short
 from duplio.util.fmt import format_ns, human_size, parse_size, plural
 from duplio.vfs.location import location_kind
@@ -47,6 +48,12 @@ def _storage_label(text: str) -> str:
         return "SMB share (native)"
     if kind == "adb":
         return "Android device (ADB)"
+    if kind == "dav":
+        return "WebDAV server" + ("" if text.lower().startswith(("davs://", "https://")) else " (not encrypted)")
+    if kind == "ftp":
+        return "FTP server" + (" (encrypted)" if text.lower().startswith("ftps://") else " (NOT encrypted)")
+    if kind == "sftp":
+        return "SFTP server (encrypted)"
     try:
         import os
 
@@ -82,7 +89,7 @@ class SetupScreen(Screen[None]):
                         "Add the locations to CHECK (e.g. your phone) and the locations to check AGAINST "
                         "(your backups). Duplio lists every file that has no identical copy in the backups."
                         if compare
-                        else "Add folders, mounted phones, SMB shares (smb://user@server/share) or Android devices "
+                        else "Add folders, mounted phones, network drives (smb://, sftp://, davs://, ftps://) or Android devices "
                         "(adb:/sdcard/DCIM). Mark a location as reference to protect it: it is used for "
                         "matching but never changed."
                     ),
@@ -90,7 +97,8 @@ class SetupScreen(Screen[None]):
                 )
                 yield DataTable(id="locations", cursor_type="row", zebra_stripes=True)
                 with Horizontal(classes="row"):
-                    yield Input(placeholder="Path, smb://server/share/folder or adb:/sdcard/DCIM", id="loc-input")
+                    yield Input(placeholder="Path, smb://server/share/folder, sftp://user@host/path, davs://host/path or adb:/sdcard/DCIM", id="loc-input", classes="path-input")
+                    yield Button("Browse…", id="browse")
                     yield Button("Check this" if compare else "Add", id="add-normal", variant="primary")
                     yield Button("Against this" if compare else "Add as reference", id="add-ref")
                 with Horizontal(classes="row"):
@@ -177,6 +185,10 @@ class SetupScreen(Screen[None]):
         field.value = ""
         self._refresh_table()
 
+    @on(Button.Pressed, "#browse")
+    def _browse(self) -> None:
+        self.app.browse_for(self.query_one("#loc-input", Input))  # type: ignore[attr-defined]
+
     @on(Button.Pressed, "#add-normal")
     def add_normal(self) -> None:
         self._add(RootRole.NORMAL)
@@ -237,7 +249,8 @@ class SetupScreen(Screen[None]):
             inventory = scan(roots, scan_filter, progress=progress, cancel=cancel, one_file_system=options.one_file_system)
             # "Is it backed up?" must reflect what is on disk now, so it never trusts remembered digests.
             cache = app.fresh_cache if options.mode is Mode.UNIQUE else app.cache
-            result = compare(inventory, options, cache=cache, progress=progress, cancel=cancel)
+            result = compare(inventory, options, cache=cache, progress=progress, cancel=cancel,
+                             previews=app.previews)
             try:
                 save_session(result, app.dirs)
             except OSError:
@@ -299,6 +312,8 @@ class ReviewScreen(Screen[None]):
         Binding("x", "exclude_group", "Skip group"),
         Binding("r", "reapply", "Re-apply rules"),
         Binding("p", "plan", "Review plan"),
+        Binding("f", "fetch_preview", "Fetch picture"),
+        Binding("o", "open_preview", "Open picture"),
         Binding("escape", "app.home", "Home"),
     ]
 
@@ -333,13 +348,16 @@ class ReviewScreen(Screen[None]):
                     with Vertical(id="members-pane"):
                         yield DataTable(id="members", cursor_type="row", zebra_stripes=True)
                         yield Static("", id="member-detail")
+                        yield PreviewPane(id="preview")
             if res.similar:
                 with TabPane(f"Similar images ({len(res.similar):,})", id="tab-similar"):
                     yield Static(Text("Similar images are not identical. Nothing is selected for removal unless you "
                                       "mark it (space). Marked images can only be quarantined.", style="yellow"))
                     with Horizontal(classes="split"):
                         yield DataTable(id="sgroups", cursor_type="row", zebra_stripes=True)
-                        yield DataTable(id="smembers", cursor_type="row", zebra_stripes=True)
+                        with Vertical():
+                            yield DataTable(id="smembers", cursor_type="row", zebra_stripes=True)
+                            yield PreviewPane(id="spreview")
                     yield Button("Quarantine marked similar images…", id="similar-plan", variant="warning")
             problems = len(res.inventory.errors) + len(res.stats.errors) + len(res.unverified)
             with TabPane(f"Problems ({problems:,})", id="tab-problems"):
@@ -436,6 +454,35 @@ class ReviewScreen(Screen[None]):
                           ptext(", ".join(notes), style="dim"), key=str(m.id))
         if table.row_count:
             table.move_cursor(row=min(cursor, table.row_count - 1))
+        self._show_picture_for_group(gid)
+
+    def _group_items(self, gid: int):  # type: ignore[no-untyped-def]
+        return preview_items(self.groups_by_id[gid].members, self.result.inventory.roots)
+
+    def _show_picture_for_group(self, gid: int) -> None:
+        """One picture serves the whole group (identical contents): the copy that is cheapest to read."""
+        items = self._group_items(gid)
+        pane = self.query_one("#preview", PreviewPane)
+        if not items:
+            pane.clear()
+            return
+        pane.show_group(items)
+        self._prefetch_after(gid)
+
+    def _prefetch_after(self, gid: int) -> None:
+        """Start fetching the pictures of the groups that come next, while the user looks at this one."""
+        service = self.app.previews  # type: ignore[attr-defined]
+        groups = self.result.groups
+        index = next((i for i, g in enumerate(groups) if g.id == gid), None)
+        if index is None or service.settings.prefetch <= 0:
+            return
+        upcoming = []
+        for g in groups[index + 1 : index + 1 + service.settings.prefetch]:
+            items = self._group_items(g.id)
+            if items:
+                upcoming.append(service.pick_source(items))
+        if upcoming:
+            service.prefetch(upcoming)
 
     def _update_summary(self) -> None:
         files = nbytes = 0
@@ -503,7 +550,37 @@ class ReviewScreen(Screen[None]):
         for m, dist, dim in zip(g.members, g.distances, g.dimensions, strict=True):
             marked = m.id in self.similar_remove[gid]
             mark = Text("✗", style="bold red") if marked else Text("·", style="dim")
-            table.add_row(mark, str(m.root + 1), ptext(m.rel), f"{dim[0]}×{dim[1]}", human_size(m.size), str(dist), key=str(m.id))
+            pixels = f"{dim[0]}×{dim[1]}" if dim[0] and dim[1] else "?"
+            table.add_row(mark, str(m.root + 1), ptext(m.rel), pixels, human_size(m.size), str(dist), key=str(m.id))
+        service = self.app.previews  # type: ignore[attr-defined]
+        if g.members:
+            service.prefetch(preview_items(g.members, self.result.inventory.roots))
+            first = preview_items(g.members[:1], self.result.inventory.roots)
+            if first:
+                self.query_one("#spreview", PreviewPane).show_item(first[0])
+
+    @on(DataTable.RowHighlighted, "#smembers")
+    def similar_member_highlighted(self, event: DataTable.RowHighlighted) -> None:
+        if event.row_key is None or event.row_key.value is None or self.current_similar is None:
+            return
+        entry_id = int(event.row_key.value)
+        member = next((m for m in self.similar_by_id[self.current_similar].members if m.id == entry_id), None)
+        if member is not None:
+            items = preview_items([member], self.result.inventory.roots)
+            if items:
+                self.query_one("#spreview", PreviewPane).show_item(items[0])
+
+    def _active_pane(self) -> PreviewPane:
+        focused = self.focused
+        if isinstance(focused, DataTable) and focused.id in ("sgroups", "smembers"):
+            return self.query_one("#spreview", PreviewPane)
+        return self.query_one("#preview", PreviewPane)
+
+    def action_fetch_preview(self) -> None:
+        self._active_pane().refetch()
+
+    def action_open_preview(self) -> None:
+        self.notify(self._active_pane().open_in_viewer())
 
     @on(DataTable.RowSelected, "#members")
     def member_selected(self) -> None:
@@ -791,7 +868,7 @@ class CompareResultScreen(Screen[None]):
             yield Static(summary)
             yield DataTable(id="unique", cursor_type="row", zebra_stripes=True)
             with Horizontal(classes="row"):
-                yield Input(placeholder="Copy the missing files to… (folder, smb://…, adb:/…)", id="copy-dest")
+                yield Input(placeholder="Copy the missing files to… (folder, smb://…, sftp://…, davs://…, adb:/…)", id="copy-dest", classes="path-input")
                 yield Button("Copy missing files", id="copy", variant="success", disabled=not res.unique)
                 yield Button("Export HTML report", id="export")
                 yield Button("Home", id="home")

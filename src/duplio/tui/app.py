@@ -11,14 +11,17 @@ from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
 from textual.screen import Screen
 from textual.theme import Theme
-from textual.widgets import Button, DataTable, Footer, Header, Label, Static
+from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Static
 
 from duplio import __version__
 from duplio.config import Settings, load_settings
 from duplio.hashing.cache import HashCache, NullCache
+from duplio.preview.service import PreviewService
+from duplio.tui.picker import FolderPicker
 from duplio.tui.widgets import HelpScreen, Logo, threaded_password_provider
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.text import printable
+from duplio.vfs.listing import ListingCache
 from duplio.vfs.location import BackendRegistry
 
 DUPLIO_DARK = Theme(
@@ -168,6 +171,7 @@ class DuplioApp(App[None]):
         Binding("ctrl+q", "quit", "Quit", priority=True),
         Binding("question_mark", "help", "Help"),
         Binding("f2", "toggle_theme", "Light/Dark"),
+        Binding("ctrl+o", "browse", "Browse folders"),
         Binding("ctrl+h", "home", "Home", show=False),
     ]
 
@@ -176,8 +180,10 @@ class DuplioApp(App[None]):
         self.dirs = (dirs or get_app_dirs()).ensure()
         self.settings: Settings = load_settings(self.dirs)
         self.registry = BackendRegistry(credential_provider=threaded_password_provider(self))
+        self.listings = ListingCache()  # folder lists for the browser only; scans always read the drive itself
         self._cache: HashCache | None = None
         self._cache_lock = threading.Lock()
+        self._previews: PreviewService | None = None
 
     @property
     def cache(self) -> HashCache:
@@ -188,6 +194,14 @@ class DuplioApp(App[None]):
                 except Exception:
                     self._cache = NullCache()
             return self._cache
+
+    @property
+    def previews(self) -> PreviewService:
+        """Pictures of files on slow and remote drives, fetched once and kept for the session (or longer, by setting)."""
+        with self._cache_lock:
+            if self._previews is None:
+                self._previews = PreviewService(self.dirs, self.settings.previews)
+            return self._previews
 
     @property
     def fresh_cache(self) -> HashCache:
@@ -207,6 +221,22 @@ class DuplioApp(App[None]):
     def action_help(self) -> None:
         self.push_screen(HelpScreen())
 
+    def action_browse(self) -> None:
+        """Open the folder browser for the path box that has the cursor."""
+        box = self.focused
+        if not isinstance(box, Input) or not box.has_class("path-input"):
+            self.notify("Click a folder box first, then press Ctrl+O to browse for a folder.")
+            return
+        self.browse_for(box)
+
+    def browse_for(self, box: Input) -> None:
+        def chosen(result: str | None) -> None:
+            if result:
+                box.value = result
+                box.focus()
+
+        self.push_screen(FolderPicker(self.registry, self.listings, start=box.value), chosen)
+
     def action_toggle_theme(self) -> None:
         self.theme = "duplio-light" if self.theme == "duplio" else "duplio"
 
@@ -219,6 +249,11 @@ class DuplioApp(App[None]):
 
     def on_unmount(self) -> None:
         with self._cache_lock:
+            if self._previews is not None:
+                try:
+                    self._previews.close()
+                except Exception:
+                    pass
             if self._cache is not None:
                 try:
                     self._cache.close()

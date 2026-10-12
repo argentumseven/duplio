@@ -57,9 +57,9 @@ class CompareMergeScreen(_SuggestMixin, Screen[None]):
                               "'Merge' copies into B everything A has that B lacks; nothing in B is overwritten "
                               "silently and everything can be undone.", style="dim"))
             with Horizontal(classes="row"):
-                yield Input(placeholder="Folder A (the source)", id="a")
+                yield Input(placeholder="Folder A (the source)", id="a", classes="path-input")
                 yield Select([], prompt="Quick pick", id="suggest")
-            yield Input(placeholder="Folder B (the destination)", id="b")
+            yield Input(placeholder="Folder B (the destination)", id="b", classes="path-input")
             yield Label("If B has a different file at the same path", classes="field-label")
             yield Select(CONFLICT_CHOICES, value="rename", allow_blank=False, id="conflict")
             with Horizontal(classes="switch-row"):
@@ -178,9 +178,9 @@ class SyncScreen(_SuggestMixin, Screen[None]):
                               "on one side is moved to the quarantine on the other — never destroyed. Replaced files "
                               "are kept in .duplio-versions and 'undo' reverses a whole sync.", style="dim"))
             with Horizontal(classes="row"):
-                yield Input(placeholder="Folder A", id="a")
+                yield Input(placeholder="Folder A", id="a", classes="path-input")
                 yield Select([], prompt="Quick pick", id="suggest")
-            yield Input(placeholder="Folder B", id="b")
+            yield Input(placeholder="Folder B", id="b", classes="path-input")
             yield Label("Changed on both sides", classes="field-label")
             yield Select(SYNC_CONFLICT_CHOICES, value="keep-both", allow_blank=False, id="conflict")
             yield Label("A file deleted on one side", classes="field-label")

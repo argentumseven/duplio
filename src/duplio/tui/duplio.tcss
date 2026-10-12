@@ -201,6 +201,10 @@ Screen {
     height: 1fr;
 }
 
+#preview, #spreview {
+    height: auto;
+}
+
 #member-detail {
     height: auto;
     padding: 1 1;

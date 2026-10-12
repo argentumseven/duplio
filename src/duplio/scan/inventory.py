@@ -72,6 +72,7 @@ class FileEntry:
     nlink: int = 1
     protected: bool = False
     ctime_ns: int | None = None  # inode change time where the storage reports a real one
+    offline: bool = False  # a cloud-only placeholder: reading it downloads it
 
 
 @dataclass
@@ -209,6 +210,7 @@ def scan(
                     nlink=raw.nlink,
                     protected=scan_filter.is_protected(raw.rel),
                     ctime_ns=raw.ctime_ns,
+                    offline=raw.offline,
                 )
             )
             pending += 1

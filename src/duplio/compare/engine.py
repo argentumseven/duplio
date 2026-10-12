@@ -49,6 +49,7 @@ from duplio.events import CancelToken, NullProgress, ProgressSink
 from duplio.hashing.algorithms import get_algorithm
 from duplio.hashing.cache import HashCache, NullCache
 from duplio.hashing.core import SampleLayout, files_identical, hash_file, layout_for, sample_file
+from duplio.preview.service import PreviewService
 from duplio.scan.inventory import FileEntry, Inventory, Root
 from duplio.util.text import name_key
 from duplio.vfs.base import MediaKind, Sampling
@@ -96,9 +97,11 @@ class Engine:
         cache: HashCache | None = None,
         progress: ProgressSink | None = None,
         cancel: CancelToken | None = None,
+        previews: PreviewService | None = None,
     ) -> None:
         self.inv = inventory
         self.opts = options
+        self.previews = previews
         self.cache = cache or NullCache()
         self.progress = _SafeProgress(progress or NullProgress())
         self.cancel = cancel or CancelToken()
@@ -222,6 +225,8 @@ class Engine:
                     progress=self.progress,
                     cancel=self.cancel,
                     stats=self.stats,
+                    previews=self.previews,
+                    full_read=self.opts.similar_full_read,
                 ),
                 None,
             )
@@ -635,5 +640,6 @@ def compare(
     cache: HashCache | None = None,
     progress: ProgressSink | None = None,
     cancel: CancelToken | None = None,
+    previews: PreviewService | None = None,
 ) -> ScanResult:
-    return Engine(inventory, options, cache=cache, progress=progress, cancel=cancel).run()
+    return Engine(inventory, options, cache=cache, progress=progress, cancel=cancel, previews=previews).run()

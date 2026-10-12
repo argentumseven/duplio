@@ -54,6 +54,7 @@ class ScanOptions:
     within_targets: bool = False
     similar_images: bool = False
     similar_threshold: int = 6
+    similar_full_read: bool = False  # on slow drives, read whole images instead of using their small embedded previews
     one_file_system: bool = True
     local_workers: int | None = None
 
@@ -67,6 +68,7 @@ class ScanOptions:
             "within_targets": self.within_targets,
             "similar_images": self.similar_images,
             "similar_threshold": self.similar_threshold,
+            "similar_full_read": self.similar_full_read,
             "one_file_system": self.one_file_system,
         }
 
@@ -81,6 +83,7 @@ class ScanOptions:
         opts.within_targets = bool(data.get("within_targets", False))
         opts.similar_images = bool(data.get("similar_images", False))
         opts.similar_threshold = int(data.get("similar_threshold", 6))  # type: ignore[call-overload]
+        opts.similar_full_read = bool(data.get("similar_full_read", False))
         opts.one_file_system = bool(data.get("one_file_system", True))
         return opts
 

@@ -33,7 +33,7 @@ SESSION_FORMAT = "duplio-session"
 
 def _entry(e: FileEntry) -> list[Any]:
     return [e.id, e.root, e.path, e.rel, e.size, e.mtime_ns, list(e.inode) if e.inode else None, e.nlink, e.protected,
-            e.ctime_ns]
+            e.ctime_ns, e.offline]
 
 
 def _unentry(row: list[Any]) -> FileEntry:
@@ -48,6 +48,7 @@ def _unentry(row: list[Any]) -> FileEntry:
         nlink=int(row[7]),
         protected=bool(row[8]),
         ctime_ns=row[9] if len(row) > 9 else None,
+        offline=bool(row[10]) if len(row) > 10 else False,
     )
 
 

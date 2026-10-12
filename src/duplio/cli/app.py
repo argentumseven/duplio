@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import importlib.util
 import sys
 from collections.abc import Callable
 from typing import Any
@@ -47,7 +48,8 @@ class DuplioGroup(click.Group):
         ("Compare, merge & sync folders", ["diff", "merge", "sync"]),
         ("Safety net", ["undo", "history", "quarantine", "recover", "sessions", "versions"]),
         ("Back up", ["backup", "snapshot", "mirror", "ingest", "manifest"]),
-        ("Network drives", ["probe", "sentinel"]),
+        ("Network drives", ["drives", "probe", "sentinel"]),
+        ("Pictures", ["preview", "previews"]),
         ("Automation", ["profile", "run", "schedule", "watch", "notify"]),
         ("Devices & setup", ["ui", "devices", "doctor", "rules", "config", "cache"]),
     )
@@ -80,7 +82,7 @@ def cli(ctx: click.Context, quiet: bool, verbose: bool, no_color: bool) -> None:
 
     \b
     Quick start:
-      duplio ui                                  guided terminal interface
+      duplio                                     guided terminal interface (same as: duplio ui)
       duplio scan ~/Pictures /media/phone        see what is duplicated
       duplio dedupe ~/Pictures                   clean up (quarantine, undoable)
       duplio compare adb:/sdcard/DCIM --against ~/Pictures   what's not backed up?
@@ -98,6 +100,11 @@ def cli(ctx: click.Context, quiet: bool, verbose: bool, no_color: bool) -> None:
     ctx.obj = app
     ctx.call_on_close(app.close)
     if ctx.invoked_subcommand is None:
+        # At a terminal, a bare `duplio` (or double-clicking the launcher) opens the guided interface; the command list
+        # stays one `duplio --help` away, and is what scripts and pipes get.
+        if sys.stdin.isatty() and sys.stdout.isatty() and importlib.util.find_spec("textual") is not None:
+            ctx.invoke(cli.commands["ui"])
+            return
         from duplio.cli.render import banner
 
         banner(console)
@@ -161,6 +168,9 @@ def scan_options(fn: Callable[..., Any]) -> Callable[..., Any]:
         click.option("--similar-images", is_flag=True, help="Also find visually similar images (needs Pillow)."),
         click.option("--similar-threshold", type=click.IntRange(0, 32), default=6, show_default=True,
                      help="Max dHash distance for similar images."),
+        click.option("--similar-full-read", is_flag=True,
+                     help="With --similar-images: on slow, remote and cloud drives read whole images instead of their small "
+                          "embedded previews (slower, covers files without an embedded preview)."),
         click.option("--within-targets", is_flag=True, help="Reference mode: also report duplicates among non-reference locations."),
         click.option("--workers", type=click.IntRange(1, 64), default=None, help="Parallel reads per local disk."),
         click.option("--no-cache", is_flag=True, help="Ignore and do not update the hash cache."),
@@ -226,6 +236,7 @@ def build_options(app: AppContext, kw: dict[str, Any], *, refs: bool, mode: Mode
     opts.use_sampling = not kw.get("no_sample")
     opts.similar_images = bool(kw.get("similar_images"))
     opts.similar_threshold = int(kw.get("similar_threshold") or 6)
+    opts.similar_full_read = bool(kw.get("similar_full_read"))
     opts.within_targets = bool(kw.get("within_targets"))
     opts.one_file_system = not kw.get("cross_filesystems") and app.settings.one_file_system
     opts.local_workers = kw.get("workers")

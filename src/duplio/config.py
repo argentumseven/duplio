@@ -37,6 +37,7 @@ from typing import Any
 from duplio.errors import ConfigError
 from duplio.plan.model import ActionType
 from duplio.plan.rules import DEFAULT_RULES, parse_rules
+from duplio.preview.settings import PreviewSettings
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.atomic import atomic_write_text
 from duplio.util.fmt import parse_size
@@ -84,6 +85,7 @@ class Settings:
     one_file_system: bool = True
     profiles: dict[str, dict[str, Any]] = field(default_factory=dict)
     notify_smtp: dict[str, Any] = field(default_factory=dict)
+    previews: PreviewSettings = field(default_factory=PreviewSettings)
     path: Path | None = None
 
 
@@ -178,6 +180,10 @@ def load_settings(dirs: AppDirs | None = None, path: Path | None = None) -> Sett
     if not isinstance(notify, dict) or not isinstance(notify.get("smtp", {}), dict):
         raise ConfigError("[notify.smtp] must be a table")
     settings.notify_smtp = dict(notify.get("smtp", {}))
+    previews = data.get("previews", {})
+    if not isinstance(previews, dict):
+        raise ConfigError("[previews] must be a table")
+    settings.previews = PreviewSettings.from_table(dict(previews))
     for name, profile in data.get("profiles", {}).items():
         if not isinstance(profile, dict):
             raise ConfigError(f"profile {name!r} must be a table")
@@ -247,6 +253,17 @@ def save_settings(settings: Settings, dirs: AppDirs | None = None) -> Path:
     }
     if settings.notify_smtp:
         data["notify"] = {"smtp": settings.notify_smtp}
+    previews = settings.previews
+    data["previews"] = {
+        "mode": previews.mode,
+        "keep": previews.keep,
+        "max_size": previews.max_bytes,
+        "size_px": previews.size_px,
+        "prefetch": previews.prefetch,
+        "small_download": previews.small_download,
+        "max_download": previews.max_download,
+        "online_only": previews.online_only,
+    }
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, "# Duplio configuration — see 'duplio config --help'\n\n" + dump_toml(data))
     return path

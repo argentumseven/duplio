@@ -27,7 +27,8 @@ from duplio.vfs.guards import (
     looks_like_mount_point,
     write_sentinel,
 )
-from duplio.vfs.location import Location
+from duplio.vfs.location import Location, location_kind
+from duplio.vfs.mounts import DriveInfo
 from duplio.vfs.probe import probe_location
 
 
@@ -80,6 +81,75 @@ def _resolution(ns: int | None) -> str:
     if ns >= 1_000:
         return f"{ns // 1_000} µs"
     return f"{ns} ns"
+
+
+def _describe_remote(location: Location) -> DriveInfo:
+    caps = location.caps
+    notes = [f"A network connection ({location.backend.scheme}); Duplio talks to the server directly, with no mount."]
+    if "NOT encrypted" in caps.label or "not encrypted" in caps.label:
+        notes.append(
+            "NOT ENCRYPTED: the password and every file cross the network in the clear. Use an encrypted address "
+            "(ftps://, davs://, sftp://) whenever the server allows it."
+        )
+    notes.append("Reading is slow or costs bandwidth here; pictures are cached so they are fetched only once.")
+    return DriveInfo(location.display, caps, "", location.display, tuple(notes))
+
+
+@cli.command("drives")
+@click.argument("location", required=False)
+@handle_errors
+def drives_cmd(location: str | None) -> None:
+    """Show how Duplio sees your drives: what kind each is, and whether reading it is slow.
+
+    With a LOCATION, explains that one drive in detail, including how it was recognised. This is the way to find out what a
+    cloud drive such as Tresorit's really is on your computer: its drive type, file system name and, if it is a mapped
+    network drive, the server it is connected to.
+
+    \b
+    duplio drives
+    duplio drives T:\\
+    duplio drives /Volumes/Tresorit
+    """
+    from duplio.vfs.mounts import describe_location, list_drives
+
+    app = get_app()
+    if location:
+        opened = app.registry.open(location)
+        if location_kind(location) != "local":
+            info = _describe_remote(opened)  # described from what the address says; nothing is connected to
+        else:
+            info = describe_location(str(opened.path))
+        caps = info.caps
+        cost = {0: "fast", 1: "slower than an internal disk", 2: "slow or costly (network, phone or cloud)"}[caps.read_cost]
+        rows = [
+            ("Location", info.path),
+            ("Kind", f"{caps.label} ({caps.kind.value})"),
+            ("File system", caps.fstype or "unknown"),
+            ("Volume name", caps.volume or "-"),
+            ("Connected to", info.remote_name or "-"),
+            ("Virtual / cloud drive", "yes" if caps.virtual else "no"),
+            ("Reading files", cost),
+            ("File times are exact to", _resolution(caps.mtime_resolution_ns)),
+            ("Parallel reads used", str(caps.max_parallel_reads)),
+        ]
+        table = Table(box=box.SIMPLE, show_header=False)
+        table.add_column(style="bold")
+        table.add_column()
+        for key, value in rows:
+            table.add_row(t(key), t(value))
+        app.console.print(table)
+        for note in info.notes:
+            app.console.print(Text("• " + note))
+        return
+    table = Table(box=box.SIMPLE_HEAD, expand=True)
+    for col in ("Where", "Kind", "File system", "Reading", "Virtual"):
+        table.add_column(col)
+    for info in list_drives():
+        cost = ("fast", "slower", "slow / costly")[info.caps.read_cost]
+        table.add_row(t(info.mount_point), t(info.caps.label), t(info.caps.fstype or "-"), t(cost),
+                      t("yes" if info.caps.virtual else ""))
+    app.console.print(table)
+    app.console.print(Text("Details for one drive: duplio drives PATH", style="dim"))
 
 
 @cli.command()

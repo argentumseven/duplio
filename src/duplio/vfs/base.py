@@ -63,9 +63,21 @@ class Capabilities:
     remote_hash_algorithms: tuple[str, ...] = ()  # hashes computed on the far side
     fstype: str = ""
     windows_names: bool = False  # NTFS/FAT/SMB/Android rules: no ``<>:"|?*``, no trailing dots, reserved names
+    virtual: bool = False  # a cloud or virtual drive: listing may be cached locally, reading may download the file
+    volume: str = ""  # the volume's own name, where the system reports one
 
     def with_(self, **changes: object) -> Capabilities:
         return replace(self, **changes)  # type: ignore[arg-type]
+
+    @property
+    def read_cost(self) -> int:
+        """How expensive it is to read file contents here: 0 cheap (internal disk), 1 slow (USB, spinning disk),
+        2 costly (network, phone, cloud or virtual drive). Used to decide what is worth caching and where to read from."""
+        if self.kind in (MediaKind.NETWORK, MediaKind.DEVICE) or self.virtual:
+            return 2
+        if self.kind in (MediaKind.REMOVABLE, MediaKind.ROTATIONAL):
+            return 1
+        return 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +91,7 @@ class StatInfo:
     nlink: int = 1
     mode: int | None = None
     ctime_ns: int | None = None  # inode change time where it is a real change time (POSIX); it cannot be set by users
+    offline: bool = False  # a placeholder whose contents are in the cloud: reading it downloads it
 
 
 def same_state(before: StatInfo, after: StatInfo) -> bool:
@@ -113,6 +126,7 @@ class RawEntry:
     inode: tuple[int, int] | None = None
     nlink: int = 1
     ctime_ns: int | None = None
+    offline: bool = False
 
 
 class WalkFilter(Protocol):

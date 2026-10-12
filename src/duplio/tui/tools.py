@@ -181,10 +181,10 @@ class BackupScreen(_SuggestMixin, Screen[None]):
                               "once, every chunk is verified on restore. The repository can live on a USB drive, "
                               "another disk or an SMB share.", style="dim"))
             with Horizontal(classes="row"):
-                yield Input(placeholder="What to back up (folder, adb:/sdcard, smb://…)", id="source")
+                yield Input(placeholder="What to back up (folder, adb:/sdcard, smb://…, sftp://…)", id="source", classes="path-input")
                 yield Select([], prompt="Quick pick", id="suggest")
             with Horizontal(classes="row"):
-                yield Input(placeholder="Repository location", id="repo")
+                yield Input(placeholder="Repository location", id="repo", classes="path-input")
                 yield Input(placeholder="Label (e.g. phone, laptop)", id="label")
             with Horizontal(classes="row"):
                 yield Button("Create repository", id="init")
@@ -193,7 +193,7 @@ class BackupScreen(_SuggestMixin, Screen[None]):
                 yield Button("List snapshots", id="list")
             yield DataTable(id="snapshots", cursor_type="row", zebra_stripes=True)
             with Horizontal(classes="row"):
-                yield Input(placeholder="Restore selected snapshot into… (folder)", id="target")
+                yield Input(placeholder="Restore selected snapshot into… (folder)", id="target", classes="path-input")
                 yield Button("Restore", id="restore", variant="primary")
             with Horizontal(classes="row"):
                 yield Label("Keep", classes="bar-label")
@@ -427,9 +427,9 @@ class MirrorScreen(_SuggestMixin, Screen[None]):
                               "are moved into .duplio-versions — never deleted. A safety brake stops the run if the "
                               "source looks empty (a locked phone!) or most of the destination would change.", style="dim"))
             with Horizontal(classes="row"):
-                yield Input(placeholder="Source", id="source")
+                yield Input(placeholder="Source", id="source", classes="path-input")
                 yield Select([], prompt="Quick pick", id="suggest")
-            yield Input(placeholder="Destination", id="dest")
+            yield Input(placeholder="Destination", id="dest", classes="path-input")
             with Horizontal(classes="switch-row"):
                 yield Switch(value=False, id="delete")
                 yield Label("Retire files that are no longer in the source (moved to versions)", markup=False)
@@ -514,9 +514,9 @@ class IngestScreen(_SuggestMixin, Screen[None]):
                               "anything already in the library — or imported before, even if you deleted it since.",
                               style="dim"))
             with Horizontal(classes="row"):
-                yield Input(placeholder="Phone or card folder (e.g. adb:/sdcard/DCIM or a mounted DCIM)", id="source")
+                yield Input(placeholder="Phone or card folder (e.g. adb:/sdcard/DCIM or a mounted DCIM)", id="source", classes="path-input")
                 yield Select([], prompt="Detected devices", id="suggest")
-            yield Input(placeholder="Library folder", id="library")
+            yield Input(placeholder="Library folder", id="library", classes="path-input")
             yield Label("Folder layout  — tokens: " + ", ".join("{" + t + "}" for t in LAYOUT_TOKENS), classes="field-label")
             yield Input(value=DEFAULT_LAYOUT, id="layout")
             with Horizontal(classes="switch-row"):

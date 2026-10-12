@@ -12,6 +12,7 @@ from rich.console import Console
 
 from duplio.config import Settings, load_settings
 from duplio.hashing.cache import HashCache, NullCache
+from duplio.preview.service import PreviewService
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.vfs.location import BackendRegistry
 
@@ -35,6 +36,14 @@ class AppContext:
     _settings: Settings | None = None
     _registry: BackendRegistry | None = None
     _caches: list[HashCache] = field(default_factory=list)
+    _previews: PreviewService | None = None
+
+    @property
+    def previews(self) -> PreviewService:
+        """Pictures of files on slow or remote drives (see :mod:`duplio.preview`)."""
+        if self._previews is None:
+            self._previews = PreviewService(self.dirs, self.settings.previews)
+        return self._previews
 
     @property
     def settings(self) -> Settings:
@@ -66,6 +75,9 @@ class AppContext:
             except Exception:
                 pass
         self._caches.clear()
+        if self._previews is not None:
+            self._previews.close()
+            self._previews = None
         if self._registry is not None:
             self._registry.close()
 

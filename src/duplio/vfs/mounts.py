@@ -324,8 +324,12 @@ def _windows_caps(path: str) -> Capabilities:  # pragma: no cover - exercised on
     kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
     drive_type = kernel32.GetDriveTypeW(ctypes.c_wchar_p(drive))
     fs_buf = ctypes.create_unicode_buffer(64)
-    kernel32.GetVolumeInformationW(ctypes.c_wchar_p(drive), None, 0, None, None, None, fs_buf, 64)
+    volume_buf = ctypes.create_unicode_buffer(256)
+    kernel32.GetVolumeInformationW(ctypes.c_wchar_p(drive), volume_buf, 256, None, None, None, fs_buf, 64)
     fstype = fs_buf.value.lower()
+    volume = volume_buf.value
+    remote = _windows_remote_name(os.path.splitdrive(os.path.abspath(path))[0])
+    virtual = looks_virtual(volume, fstype, remote)
     caps = Capabilities(
         label=f"Local disk ({fstype or 'unknown'})",
         windows_names=True,
@@ -334,20 +338,135 @@ def _windows_caps(path: str) -> Capabilities:  # pragma: no cover - exercised on
         can_reflink=fstype == "refs",
         mtime_resolution_ns=2 * SECOND_NS if "fat" in fstype else 100,
         fstype=fstype,
+        volume=volume,
+        virtual=virtual,
     )
+    if virtual and drive_type not in (2, 4, 5):
+        caps = caps.with_(
+            label=f"Virtual/cloud drive ({volume or fstype or 'unknown'})",
+            can_hardlink=False,
+            can_reflink=False,
+            stable_inodes=False,
+            mtime_resolution_ns=SECOND_NS,
+            max_parallel_reads=2,
+        )
     if drive_type == 2:  # DRIVE_REMOVABLE
         return caps.with_(kind=MediaKind.REMOVABLE, label=f"Removable drive ({fstype})", max_parallel_reads=2)
     if drive_type == 4:  # DRIVE_REMOTE
         return caps.with_(
             kind=MediaKind.NETWORK,
-            label="Network drive",
+            label="WebDAV drive" if "davwwwroot" in remote.lower() else "Network drive",
             can_hardlink=False,
             stable_inodes=False,
             mtime_resolution_ns=SECOND_NS,
+            virtual=virtual,
         )
     if drive_type == 5:  # DRIVE_CDROM
         return caps.with_(kind=MediaKind.READONLY, label="Optical media", can_write=False, can_delete=False)
     return caps
+
+
+_STANDARD_WINDOWS_FS = {"ntfs", "refs", "fat", "fat32", "exfat", "udf", "cdfs", "ext2", "ext3", "ext4", "hfs", "apfs"}
+_VIRTUAL_WORDS = (
+    "tresorit", "dropbox", "onedrive", "google drive", "googledrive", "drivefs", "pcloud", "cryptomator", "webdav",
+    "dokan", "winfsp", "fuse", "rclone", "nextcloud", "owncloud", "mega", "sync.com", "icedrive", "proton", "filen",
+    "box drive", "cbfs", "cloud", "davwwwroot",
+)  # fmt: skip
+
+
+def looks_virtual(volume: str, fstype: str, remote: str = "") -> bool:
+    """Is this volume a virtual or cloud drive rather than a real disk?
+
+    Cloud clients (Tresorit, Dropbox, OneDrive, pCloud…) and tools such as Cryptomator present a drive letter that is
+    really a program: the folder listing may come from a local cache and *reading a file can download it*. Windows gives
+    away what it is through the volume's name or through a file system name that no real disk uses.
+    """
+    words = f"{volume} {fstype} {remote}".lower()
+    if any(word in words for word in _VIRTUAL_WORDS):
+        return True
+    return bool(fstype) and fstype.lower() not in _STANDARD_WINDOWS_FS and not fstype.lower().startswith(("ntfs", "fat"))
+
+
+def is_cloud_storage_path(path: str) -> bool:
+    """macOS File Provider locations (iCloud Drive, OneDrive, Google Drive, Dropbox, Tresorit…)."""
+    normalized = path.replace("\\", "/")
+    return "/Library/CloudStorage/" in normalized or "/Library/Mobile Documents/" in normalized
+
+
+@dataclass(frozen=True)
+class DriveInfo:
+    path: str
+    caps: Capabilities
+    mount_point: str
+    remote_name: str = ""
+    notes: tuple[str, ...] = ()
+
+
+def describe_location(path: str, table: MountTable | None = None) -> DriveInfo:
+    """What Duplio makes of the storage a path lives on, and why (for ``duplio drives PATH``)."""
+    caps, mount_point = capabilities_for_local_path(path, table)
+    notes: list[str] = []
+    remote = ""
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        remote = _windows_remote_name(os.path.splitdrive(os.path.abspath(path))[0])
+        if remote:
+            notes.append(f"Windows says this drive is connected to {remote}.")
+        if "davwwwroot" in remote.lower():
+            notes.append("That is the Windows WebDAV redirector: the drive is a WebDAV server.")
+        elif remote.startswith("\\\\") and caps.kind is MediaKind.NETWORK:
+            notes.append("That is a normal Windows network share (SMB).")
+    if caps.virtual:
+        notes.append(
+            "This looks like a virtual or cloud drive: the program that provides it may keep the folder listing locally, "
+            "but reading a file can download it. Duplio treats reading here as costly and avoids reading more than needed."
+        )
+    if is_cloud_storage_path(path):
+        notes.append("This is a macOS cloud-storage location (File Provider); files marked 'dataless' download when read.")
+    if caps.read_cost == 2 and not caps.virtual:
+        notes.append("Reading is slow or costs bandwidth here; pictures are cached so they are fetched only once.")
+    if caps.read_cost == 1:
+        notes.append("Reading is slower than an internal disk (USB or spinning disk); pictures are cached.")
+    if caps.read_cost == 0:
+        notes.append("Fast local storage: nothing special is done.")
+    return DriveInfo(path, caps, mount_point, remote, tuple(notes))
+
+
+_PSEUDO_FS = {
+    "proc", "sysfs", "devtmpfs", "devpts", "cgroup", "cgroup2", "securityfs", "debugfs", "tracefs", "pstore", "bpf",
+    "configfs", "fusectl", "mqueue", "hugetlbfs", "autofs", "binfmt_misc", "overlay", "tmpfs", "ramfs", "nsfs", "efivarfs",
+    "squashfs", "devfs", "fdescfs", "rpc_pipefs", "selinuxfs",
+}  # fmt: skip
+
+
+def list_drives(table: MountTable | None = None) -> list[DriveInfo]:
+    """The drives and mounts worth knowing about, with what Duplio makes of each."""
+    if sys.platform == "win32":  # pragma: no cover - Windows only
+        import ctypes
+
+        mask = ctypes.windll.kernel32.GetLogicalDrives()  # type: ignore[attr-defined]
+        return [describe_location(f"{chr(65 + i)}:\\") for i in range(26) if mask & (1 << i)]
+    table = table or MOUNTS
+    out = []
+    for entry in table.entries:
+        fstype = entry.fstype.lower()
+        if fstype in _PSEUDO_FS or entry.mount_point.startswith(("/proc", "/sys", "/dev", "/run/lock", "/snap")):
+            continue
+        out.append(describe_location(entry.mount_point, table))
+    return out
+
+
+def _windows_remote_name(drive: str) -> str:  # pragma: no cover - Windows only
+    import ctypes
+
+    if not drive:
+        return ""
+    buf = ctypes.create_unicode_buffer(1024)
+    size = ctypes.c_ulong(1024)
+    try:
+        result = ctypes.windll.mpr.WNetGetConnectionW(ctypes.c_wchar_p(drive), buf, ctypes.byref(size))  # type: ignore[attr-defined]
+    except (AttributeError, OSError):
+        return ""
+    return buf.value if result == 0 else ""
 
 
 def capabilities_for_local_path(path: str, table: MountTable | None = None) -> tuple[Capabilities, str]:
@@ -358,4 +477,7 @@ def capabilities_for_local_path(path: str, table: MountTable | None = None) -> t
     table = table or MOUNTS
     entry = table.find(path)
     caps = classify(entry, os.path.abspath(path))
+    if is_cloud_storage_path(os.path.abspath(path)):
+        caps = caps.with_(virtual=True, label=f"Cloud storage ({caps.fstype or 'File Provider'})", can_hardlink=False,
+                          stable_inodes=False, mtime_resolution_ns=SECOND_NS, max_parallel_reads=2)
     return caps, entry.mount_point if entry else os.sep

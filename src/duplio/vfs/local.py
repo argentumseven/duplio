@@ -58,6 +58,18 @@ def _load_libc() -> ctypes.CDLL | None:
 _LIBC = _load_libc()
 
 
+_WIN_OFFLINE = 0x1000 | 0x40000 | 0x400000  # OFFLINE, RECALL_ON_OPEN, RECALL_ON_DATA_ACCESS
+_MAC_DATALESS = 0x40000000  # SF_DATALESS
+
+
+def _is_offline(st: os.stat_result) -> bool:
+    """Is this a placeholder whose contents live in the cloud, so that reading it downloads it?"""
+    attributes = getattr(st, "st_file_attributes", 0)  # Windows (OneDrive, Dropbox, Tresorit… use these flags)
+    if attributes & _WIN_OFFLINE:
+        return True
+    return bool(getattr(st, "st_flags", 0) & _MAC_DATALESS)  # macOS "dataless" files (iCloud Drive, File Provider)
+
+
 def _change_time(st: os.stat_result) -> int | None:
     """The inode change time. On Windows ``st_ctime`` is the creation time, which says nothing about changes."""
     return None if os.name == "nt" else st.st_ctime_ns
@@ -246,6 +258,7 @@ class LocalBackend(Backend):
                     inode=(st.st_dev, st.st_ino) if st.st_ino else None,
                     nlink=st.st_nlink,
                     ctime_ns=_change_time(st),
+                    offline=_is_offline(st),
                 )
             # Reverse so traversal order is alphabetical-ish and deterministic.
             subdirs.sort(reverse=True)
@@ -266,6 +279,7 @@ class LocalBackend(Backend):
             nlink=st.st_nlink,
             mode=stat_mod.S_IMODE(st.st_mode),
             ctime_ns=_change_time(st),
+            offline=_is_offline(st),
         )
 
     def open_read(self, path: str) -> IO[bytes]:

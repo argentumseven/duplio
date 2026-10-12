@@ -56,7 +56,8 @@ def do_scan(app: AppContext, roots: tuple[str, ...], refs: tuple[str, ...], kw: 
         with progress_for(app) as progress:
             inventory = scan(scan_roots, scan_filter, progress=progress, cancel=cancel,
                              one_file_system=options.one_file_system)
-            return run_compare(inventory, options, cache=cache, progress=progress, cancel=cancel)
+            return run_compare(inventory, options, cache=cache, progress=progress, cancel=cancel,
+                               previews=app.previews)
 
     result: ScanResult = run_cancellable(work)
     try:
