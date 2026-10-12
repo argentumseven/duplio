@@ -685,7 +685,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the parts fit together 
 
 ```bash
 pip install -e ".[all,dev]"
-pytest              # 570+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, merge, sync, CLI, TUI, crash sweeps
+pytest              # 560+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, merge, sync, CLI, TUI, crash sweeps
 DUPLIO_SWEEP=full pytest tests/test_crash_sweep.py   # kill every operation at every durable step (the release gate)
 python benchmarks/scale.py --files 300000 --dir /big/disk   # time and memory on a large tree
 ruff check src tests && mypy src
