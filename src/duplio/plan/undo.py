@@ -1,0 +1,290 @@
+"""Reverse an applied plan, list and purge quarantine, recover from crashes."""
+
+from __future__ import annotations
+
+import contextlib
+import os
+import secrets
+import shutil
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+from duplio.errors import DuplioError, SafetyError
+from duplio.events import CancelToken, NullProgress, ProgressSink
+from duplio.hashing.algorithms import default_full_algorithm
+from duplio.plan.journal import (
+    Journal,
+    JournalSummary,
+    OpState,
+    exclusive_lock,
+    list_journals,
+    summarize,
+)
+from duplio.transfer import copy_verified
+from duplio.util.appdirs import AppDirs, get_app_dirs
+from duplio.util.fmt import parse_duration
+from duplio.vfs.location import BackendRegistry
+
+
+@dataclass
+class UndoLine:
+    seq: int
+    op: str
+    path: str
+    status: str  # restored | conflict | not-undoable | failed | already-undone | would-restore
+    message: str = ""
+
+
+@dataclass
+class UndoReport:
+    apply_id: str
+    lines: list[UndoLine] = field(default_factory=list)
+    dry_run: bool = False
+
+    def count(self, status: str) -> int:
+        return sum(1 for line in self.lines if line.status == status)
+
+
+def find_journal(dirs: AppDirs, apply_id: str | None) -> Path:
+    journals = list_journals(dirs.journals)
+    if not journals:
+        raise DuplioError("no applied plans found in the history")
+    if apply_id is None:
+        return journals[0]
+    matches = [j for j in journals if j.stem == apply_id or j.stem.startswith(apply_id)]
+    if not matches:
+        raise DuplioError(f"no applied plan matches {apply_id!r} (see 'duplio history')")
+    if len(matches) > 1:
+        raise DuplioError(f"{apply_id!r} is ambiguous: {', '.join(m.stem for m in matches)}")
+    return matches[0]
+
+
+def _restore_quarantine(op: OpState, registry: BackendRegistry, dry_run: bool) -> UndoLine:
+    intent, done = op.intent, op.done_record or {}
+    src_loc = registry.open(intent["src_root"])
+    backend = src_loc.backend
+    original = intent["src"]
+    dst = done.get("dst")
+    if not dst:
+        return UndoLine(op.seq, "quarantine", original, "failed", "journal lacks the quarantine path")
+    fallback = bool(done.get("fallback"))
+    q_backend = registry.local() if fallback else backend
+    if q_backend.stat(dst) is None:
+        return UndoLine(op.seq, "quarantine", original, "failed", "quarantined copy no longer exists (purged?)")
+    if backend.stat(original) is not None:
+        return UndoLine(op.seq, "quarantine", original, "conflict", "a file now exists at the original path; left both")
+    if dry_run:
+        return UndoLine(op.seq, "quarantine", original, "would-restore")
+    if fallback:
+        copy_verified(
+            (q_backend, dst),
+            (backend, original),
+            algorithm=default_full_algorithm(),
+            expected_size=int(intent["size"]),
+            mtime_ns=int(intent["mtime_ns"]),
+        )
+        q_backend.remove(dst)
+    else:
+        backend.rename(dst, original)
+        with contextlib.suppress(Exception):
+            backend.remove_empty_dirs(backend.parent(dst), src_loc.path)
+    return UndoLine(op.seq, "quarantine", original, "restored")
+
+
+def _unshare(op: OpState, registry: BackendRegistry, dry_run: bool) -> UndoLine:
+    """Turn a hard link / clone back into an independent file with its old metadata."""
+    intent = op.intent
+    path = intent["src"]
+    backend = registry.open(intent["src_root"]).backend
+    info = backend.stat(path)
+    if info is None:
+        return UndoLine(op.seq, intent["op"], path, "failed", "file no longer exists")
+    if dry_run:
+        return UndoLine(op.seq, intent["op"], path, "would-restore")
+    tmp = os.path.join(os.path.dirname(path), f".duplio-link-{secrets.token_hex(4)}")
+    try:
+        with open(path, "rb") as src, open(tmp, "xb") as dst:
+            shutil.copyfileobj(src, dst, 1 << 20)
+            dst.flush()
+            os.fsync(dst.fileno())
+        if intent.get("mode") is not None:
+            os.chmod(tmp, int(intent["mode"]))
+        os.utime(tmp, ns=(int(intent["mtime_ns"]), int(intent["mtime_ns"])))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    return UndoLine(op.seq, intent["op"], path, "restored", "independent copy re-created")
+
+
+def undo(
+    apply_id: str | None,
+    registry: BackendRegistry,
+    *,
+    dirs: AppDirs | None = None,
+    dry_run: bool = False,
+    progress: ProgressSink | None = None,
+    cancel: CancelToken | None = None,
+) -> UndoReport:
+    dirs = (dirs or get_app_dirs()).ensure()
+    progress = progress or NullProgress()
+    cancel = cancel or CancelToken()
+    path = find_journal(dirs, apply_id)
+    summary = summarize(path)
+    report = UndoReport(summary.session, dry_run=dry_run)
+    ops = [op for op in reversed(summary.ops)]
+    progress.stage("Undoing", total_items=len(ops))
+    with exclusive_lock(dirs.state / "apply.lock", purpose="undo"):
+        journal = None if dry_run else Journal(path)
+        try:
+            for op in ops:
+                cancel.check()
+                kind = op.intent.get("op", "")
+                status = op.status
+                src = str(op.intent.get("src", ""))
+                if status == "undone":
+                    report.lines.append(UndoLine(op.seq, kind, src, "already-undone"))
+                elif status == "purged":
+                    report.lines.append(UndoLine(op.seq, kind, src, "failed", "the quarantined copy was purged"))
+                elif status != "done":
+                    continue
+                elif kind == "quarantine":
+                    line = _safe(lambda op=op: _restore_quarantine(op, registry, dry_run), op, kind, src)
+                    report.lines.append(line)
+                elif kind in ("hardlink", "reflink"):
+                    line = _safe(lambda op=op: _unshare(op, registry, dry_run), op, kind, src)
+                    report.lines.append(line)
+                elif kind == "trash":
+                    report.lines.append(UndoLine(op.seq, kind, src, "not-undoable", "restore it from the system trash"))
+                elif kind == "delete":
+                    report.lines.append(UndoLine(op.seq, kind, src, "not-undoable", "permanently deleted"))
+                if journal is not None and report.lines and report.lines[-1].seq == op.seq:
+                    last = report.lines[-1]
+                    if last.status == "restored":
+                        journal.event(op.seq, "undone")
+                    elif last.status == "failed":
+                        journal.event(op.seq, "undo-failed", error=last.message)
+                progress.advance(items=1)
+        finally:
+            if journal is not None:
+                journal.close()
+    return report
+
+
+def _safe(fn, op: OpState, kind: str, src: str) -> UndoLine:  # type: ignore[no-untyped-def]
+    try:
+        return fn()  # type: ignore[no-any-return]
+    except (OSError, DuplioError) as exc:
+        return UndoLine(op.seq, kind, src, "failed", str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Quarantine management
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class QuarantineSession:
+    apply_id: str
+    created: str
+    files: int
+    bytes: int
+    journal: Path
+
+
+def list_quarantine(dirs: AppDirs | None = None) -> list[QuarantineSession]:
+    dirs = (dirs or get_app_dirs()).ensure()
+    sessions = []
+    for path in list_journals(dirs.journals):
+        summary = summarize(path)
+        held = [op for op in summary.ops if op.intent.get("op") == "quarantine" and op.status == "done"]
+        if held:
+            sessions.append(
+                QuarantineSession(
+                    apply_id=summary.session,
+                    created=str(summary.header.get("created", "")),
+                    files=len(held),
+                    bytes=sum(int(op.intent.get("size", 0)) for op in held),
+                    journal=path,
+                )
+            )
+    return sessions
+
+
+def purge_quarantine(
+    registry: BackendRegistry,
+    *,
+    apply_id: str | None = None,
+    older_than: str | None = None,
+    dirs: AppDirs | None = None,
+    dry_run: bool = False,
+) -> tuple[int, int, list[str]]:
+    """Permanently delete quarantined files. Returns ``(files, bytes, errors)``."""
+    import time
+    from datetime import datetime
+
+    dirs = (dirs or get_app_dirs()).ensure()
+    if apply_id is None and older_than is None:
+        raise SafetyError("say which quarantine to purge: a session id or --older-than")
+    cutoff = time.time() - parse_duration(older_than) if older_than else None
+    files = nbytes = 0
+    errors: list[str] = []
+    with exclusive_lock(dirs.state / "apply.lock", purpose="purge"):
+        for session in list_quarantine(dirs):
+            if apply_id is not None and not session.apply_id.startswith(apply_id):
+                continue
+            if cutoff is not None:
+                try:
+                    created = datetime.fromisoformat(session.created).timestamp()
+                except ValueError:
+                    continue
+                if created > cutoff:
+                    continue
+            summary: JournalSummary = summarize(session.journal)
+            journal = None if dry_run else Journal(session.journal)
+            try:
+                for op in summary.ops:
+                    if op.intent.get("op") != "quarantine" or op.status != "done":
+                        continue
+                    done: dict[str, Any] = op.done_record or {}
+                    dst = done.get("dst")
+                    if not dst:
+                        continue
+                    try:
+                        backend = registry.local() if done.get("fallback") else registry.open(op.intent["src_root"]).backend
+                        if backend.stat(dst) is None:
+                            continue
+                        if not dry_run:
+                            backend.remove(dst)
+                            if journal is not None:
+                                journal.event(op.seq, "purged")
+                            stop = str(dirs.quarantine) if done.get("fallback") else registry.open(op.intent["src_root"]).path
+                            with contextlib.suppress(Exception):
+                                backend.remove_empty_dirs(backend.parent(dst), stop)
+                        files += 1
+                        nbytes += int(op.intent.get("size", 0))
+                    except (OSError, DuplioError) as exc:
+                        errors.append(f"{dst}: {exc}")
+            finally:
+                if journal is not None:
+                    journal.close()
+    return files, nbytes, errors
+
+
+def inspect_incomplete(registry: BackendRegistry, dirs: AppDirs | None = None) -> list[tuple[Path, OpState, str]]:
+    """Operations that were in flight when Duplio stopped, with their real state."""
+    dirs = (dirs or get_app_dirs()).ensure()
+    findings = []
+    for path in list_journals(dirs.journals):
+        for op in summarize(path).incomplete:
+            intent = op.intent
+            try:
+                backend = registry.open(intent["src_root"]).backend
+                exists = backend.stat(intent["src"]) is not None
+                state = "original still in place (nothing happened)" if exists else "original is gone: check the quarantine folder"
+            except DuplioError as exc:
+                state = f"cannot check: {exc}"
+            findings.append((path, op, state))
+    return findings

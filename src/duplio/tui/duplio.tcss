@@ -1,0 +1,276 @@
+/* Duplio terminal UI */
+
+Screen {
+    background: $background;
+}
+
+.screen-title {
+    text-style: bold;
+    color: $primary;
+    margin: 1 0 0 0;
+}
+
+.section-title {
+    text-style: bold;
+    color: $secondary;
+    margin: 1 0 0 0;
+}
+
+.muted {
+    color: $text-muted;
+}
+
+.field-label {
+    color: $text-muted;
+    margin-top: 1;
+}
+
+.row {
+    height: auto;
+    margin-top: 1;
+}
+
+.row Input {
+    width: 1fr;
+}
+
+.row Button {
+    margin-left: 1;
+}
+
+.row Select {
+    width: 1fr;
+    margin-left: 1;
+}
+
+.switch-row {
+    height: auto;
+    margin-top: 1;
+}
+
+.switch-row Label {
+    padding: 1 1;
+}
+
+/* ---- Home ---------------------------------------------------------- */
+
+#home {
+    height: 1fr;
+}
+
+#home-left {
+    width: 2fr;
+    padding: 0 1;
+}
+
+#home-right {
+    width: 1fr;
+    min-width: 36;
+    padding: 0 1;
+    border-left: tall $panel;
+}
+
+#logo {
+    margin: 1 0;
+}
+
+#cards {
+    grid-size: 3 2;
+    grid-gutter: 1 2;
+    height: auto;
+    margin-top: 1;
+}
+
+.card {
+    height: auto;
+    padding: 1;
+    border: round $panel;
+    background: $surface;
+}
+
+.card:focus-within {
+    border: round $primary;
+}
+
+.card-button {
+    width: 100%;
+}
+
+.card-desc {
+    color: $text-muted;
+    margin-top: 1;
+}
+
+#devices {
+    height: 12;
+    margin-top: 1;
+}
+
+#refresh-devices {
+    margin-top: 1;
+}
+
+/* ---- Setup --------------------------------------------------------- */
+
+#setup {
+    height: 1fr;
+    padding: 0 1;
+}
+
+#setup-left {
+    width: 3fr;
+    padding-right: 2;
+}
+
+#setup-right {
+    width: 2fr;
+    min-width: 40;
+    padding: 0 1;
+    border-left: tall $panel;
+}
+
+#locations {
+    height: 1fr;
+    min-height: 6;
+    margin-top: 1;
+}
+
+#start {
+    margin-top: 2;
+    width: 100%;
+}
+
+/* ---- Jobs ---------------------------------------------------------- */
+
+#job {
+    padding: 0 2;
+}
+
+#job-title {
+    text-style: bold;
+    color: $primary;
+    margin: 1 0;
+}
+
+#job-subtitle {
+    color: $text-muted;
+    margin-bottom: 1;
+}
+
+#job-result-wrap {
+    height: 1fr;
+    margin-top: 1;
+}
+
+#job-buttons {
+    height: auto;
+    align-horizontal: right;
+    margin: 1 0;
+}
+
+#job-buttons Button {
+    margin-left: 1;
+}
+
+/* ---- Review -------------------------------------------------------- */
+
+#review-summary {
+    padding: 0 2;
+    height: auto;
+    margin: 1 0 0 0;
+}
+
+#review-tabs {
+    height: 1fr;
+}
+
+.split {
+    height: 1fr;
+}
+
+#groups, #sgroups {
+    width: 2fr;
+}
+
+#members-pane {
+    width: 3fr;
+    margin-left: 1;
+}
+
+#members {
+    height: 1fr;
+}
+
+#member-detail {
+    height: auto;
+    padding: 1 1;
+    border-top: tall $panel;
+}
+
+#smembers {
+    width: 3fr;
+    margin-left: 1;
+}
+
+#review-legend {
+    padding: 0 2;
+    height: auto;
+}
+
+#review-bar {
+    height: auto;
+    padding: 0 1;
+    border-top: tall $panel;
+}
+
+#review-bar Select {
+    width: 18;
+}
+
+#review-bar Input {
+    width: 1fr;
+}
+
+#review-bar Button {
+    margin-left: 1;
+}
+
+.bar-label {
+    padding: 1 1;
+    color: $text-muted;
+}
+
+#problems {
+    height: 1fr;
+}
+
+/* ---- Confirm / compare / history / tools --------------------------- */
+
+#confirm, #compare, #history {
+    padding: 0 2;
+}
+
+#confirm-body {
+    height: 1fr;
+    border: round $panel;
+    padding: 1 2;
+    margin-top: 1;
+}
+
+#unique, #journals {
+    height: 1fr;
+    margin-top: 1;
+}
+
+#backup, #mirror, #ingest {
+    padding: 0 2;
+}
+
+#snapshots {
+    height: 12;
+    margin-top: 1;
+}
+
+Input.num {
+    width: 7;
+}
