@@ -190,7 +190,7 @@ def test_the_launcher_prefers_a_python_that_can_open_the_window(tmp_path: Path) 
     def shim(name: str, has_tk: bool) -> None:
         path = tools / name
         path.write_text(f'#!/bin/sh\ncase "$*" in *"import tkinter"*) exit {0 if has_tk else 1};; esac\n'
-                        f'case "$1" in -m) echo {name} > "{marker}";; esac\nexec "{sys.executable}" "$@"\n')
+                        f'case "$1" in -m) echo {name} > "{marker}";; esac\nexec "{sys.executable}" -S "$@"\n')  # -S: only what the launcher provides
         path.chmod(0o755)
 
     def run() -> str:
