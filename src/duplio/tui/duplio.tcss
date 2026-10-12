@@ -75,7 +75,7 @@ Screen {
 }
 
 #cards {
-    grid-size: 3 2;
+    grid-size: 3 3;
     grid-gutter: 1 2;
     height: auto;
     margin-top: 1;
@@ -262,7 +262,7 @@ Screen {
     margin-top: 1;
 }
 
-#backup, #mirror, #ingest {
+#backup, #mirror, #ingest, #compare-merge, #sync {
     padding: 0 2;
 }
 

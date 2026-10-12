@@ -33,7 +33,9 @@ def tree(tmp_path: Path) -> Path:
 
 def test_help_lists_sections() -> None:
     out = invoke("--help").output
-    for word in ("Find & clean duplicates", "Safety net", "Back up", "dedupe", "ingest", "mirror"):
+    for word in ("Find & clean duplicates", "Safety net", "Back up", "dedupe", "ingest", "mirror",
+                 "Compare, merge & sync folders", "Network drives", "Automation", "diff", "merge", "sync", "snapshot",
+                 "manifest", "versions", "probe", "sentinel", "watch", "notify"):
         assert word in out
 
 
@@ -221,3 +223,10 @@ def test_schedules(platform: str) -> None:
     assert "run" in text and "job" in text
     with pytest.raises(ConfigError):
         make_schedule("job", "fortnightly")
+
+
+def test_every_registered_command_is_listed_in_the_help() -> None:
+    out = invoke("--help").output
+    for name, command in cli.commands.items():  # type: ignore[attr-defined]
+        if not command.hidden:
+            assert name in out, f"'{name}' is registered but missing from the top-level help"

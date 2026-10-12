@@ -44,9 +44,12 @@ class DuplioGroup(click.Group):
 
     SECTIONS = (
         ("Find & clean duplicates", ["scan", "dedupe", "compare", "similar", "plan", "apply"]),
-        ("Safety net", ["undo", "history", "quarantine", "recover", "sessions"]),
-        ("Back up", ["backup", "mirror", "ingest"]),
-        ("Devices & setup", ["ui", "devices", "doctor", "rules", "config", "profile", "run", "schedule", "cache"]),
+        ("Compare, merge & sync folders", ["diff", "merge", "sync"]),
+        ("Safety net", ["undo", "history", "quarantine", "recover", "sessions", "versions"]),
+        ("Back up", ["backup", "snapshot", "mirror", "ingest", "manifest"]),
+        ("Network drives", ["probe", "sentinel"]),
+        ("Automation", ["profile", "run", "schedule", "watch", "notify"]),
+        ("Devices & setup", ["ui", "devices", "doctor", "rules", "config", "cache"]),
     )
 
     def list_commands(self, ctx: click.Context) -> list[str]:
@@ -82,6 +85,8 @@ def cli(ctx: click.Context, quiet: bool, verbose: bool, no_color: bool) -> None:
       duplio dedupe ~/Pictures                   clean up (quarantine, undoable)
       duplio compare adb:/sdcard/DCIM --against ~/Pictures   what's not backed up?
       duplio ingest adb:/sdcard/DCIM ~/Pictures/Library      import phone photos
+      duplio diff ~/Photos smb://me@nas/photos   compare two folders by content
+      duplio merge ~/Photos smb://me@nas/photos  copy over only what is missing
 
     Nothing is ever removed without a plan you approve, fresh re-verification,
     and a journal entry. Default action: quarantine (instantly reversible).

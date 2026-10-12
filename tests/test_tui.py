@@ -9,7 +9,9 @@ pytest.importorskip("textual")
 
 from textual.widgets import DataTable, Input
 
+from duplio.compare.diff import Kind
 from duplio.tui.app import DuplioApp, HomeScreen
+from duplio.tui.compare import CompareMergeScreen, SyncScreen
 from duplio.tui.dedupe import (
     CompareResultScreen,
     ConfirmPlanScreen,
@@ -70,7 +72,8 @@ def test_every_screen_opens() -> None:
     async def flow(app, pilot):  # type: ignore[no-untyped-def]
         assert isinstance(app.screen, HomeScreen)
         for key, screen_type in (("1", SetupScreen), ("2", SetupScreen), ("3", IngestScreen), ("4", MirrorScreen),
-                                 ("5", BackupScreen), ("6", HistoryScreen)):
+                                 ("5", BackupScreen), ("6", HistoryScreen), ("7", CompareMergeScreen),
+                                 ("8", SyncScreen)):
             await pilot.press(key)
             await pilot.pause()
             assert isinstance(app.screen, screen_type), (key, app.screen)
@@ -239,5 +242,61 @@ def test_backup_and_ingest_screens(tree: Path, tmp_path: Path) -> None:
         await pilot.click("#run")
         await wait_for(pilot, lambda: isinstance(app.screen, JobScreen) and app.screen.finished)
         assert app.screen.result.count("imported") == 1
+
+    run_app(flow)
+
+
+def test_compare_and_merge_screen(tmp_path: Path) -> None:
+    a, b = tmp_path / "A", tmp_path / "B"
+    write(a / "new.bin", rand_bytes(3000, 1), mtime=1_600_000_000)
+    write(a / "pic.jpg", rand_bytes(4000, 2), mtime=1_600_000_000)
+    write(b / "other-name.jpg", (a / "pic.jpg").read_bytes(), mtime=1_600_000_000)  # already there, renamed
+    b.mkdir(exist_ok=True)
+
+    async def flow(app, pilot):  # type: ignore[no-untyped-def]
+        await pilot.press("7")
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#a", Input).value = str(a)
+        screen.query_one("#b", Input).value = str(b)
+        await pilot.click("#compare")
+        await wait_for(pilot, lambda: isinstance(app.screen, JobScreen) and app.screen.finished)
+        assert app.screen.result.count(Kind.MOVED, 0) == 1
+        await pilot.click("#job-done")
+        await pilot.pause(0.3)
+        await pilot.click("#merge")
+        await wait_for(pilot, lambda: isinstance(app.screen, JobScreen) and app.screen.finished)
+        assert [x.dest_rel for x in app.screen.result.actions] == ["new.bin"]  # the renamed photo is not copied again
+        await pilot.click("#job-done")
+        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmDialog))
+        await pilot.click("#cd-ok")
+        await wait_for(pilot, lambda: isinstance(app.screen, JobScreen) and app.screen.finished
+                       and getattr(app.screen.result, "apply_id", None))
+        assert (b / "new.bin").read_bytes() == (a / "new.bin").read_bytes()
+        assert sorted(p.name for p in b.iterdir()) == ["new.bin", "other-name.jpg"]
+
+    run_app(flow)
+
+
+def test_sync_screen(tmp_path: Path) -> None:
+    a, b = tmp_path / "A", tmp_path / "B"
+    write(a / "from-a.txt", b"A", mtime=1_600_000_000)
+    write(b / "from-b.txt", b"B", mtime=1_600_000_000)
+
+    async def flow(app, pilot):  # type: ignore[no-untyped-def]
+        await pilot.press("8")
+        await pilot.pause()
+        screen = app.screen
+        screen.query_one("#a", Input).value = str(a)
+        screen.query_one("#b", Input).value = str(b)
+        await pilot.click("#run")
+        await wait_for(pilot, lambda: isinstance(app.screen, JobScreen) and app.screen.finished)
+        assert app.screen.result.first_run
+        await pilot.click("#job-done")
+        await wait_for(pilot, lambda: isinstance(app.screen, ConfirmDialog))
+        await pilot.click("#cd-ok")
+        await wait_for(pilot, lambda: isinstance(app.screen, JobScreen) and app.screen.finished
+                       and getattr(app.screen.result, "apply_id", None))
+        assert (a / "from-b.txt").exists() and (b / "from-a.txt").exists()
 
     run_app(flow)

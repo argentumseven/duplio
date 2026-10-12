@@ -100,6 +100,7 @@ def doctor(benchmark: bool) -> None:
         ("smbclient", "native smb:// access", "smb"),
         ("PIL", "similar images, EXIF dates", "media"),
         ("send2trash", "system trash action", "trash"),
+        ("cryptography", "encrypted backup repositories", "encrypt"),
         ("keyring", "stored SMB passwords", "-"),
     ):
         present = importlib.util.find_spec(module) is not None

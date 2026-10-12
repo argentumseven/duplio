@@ -15,7 +15,8 @@ in one scan.
       │ engine       │ rules        │ repository       │
       │ scheduler    │ planner      │ retention        │
       │ similar      │ executor     │ mirror / ingest  │
-      │ session      │ journal/undo │                  │
+      │ session      │ journal/undo │ merge / sync     │
+      │ diff         │              │ snapshots        │
       └──────┬───────┴──────┬───────┴────────┬─────────┘
              │       scan (filters, roots, inventory)  │
              │     hashing (algorithms, core, cache)   │  shared services
@@ -67,6 +68,15 @@ disk each get the right profile automatically.
 3. If the far side can hash, implement `remote_hash` and list the algorithms in `Capabilities.remote_hash_algorithms`. The engine negotiates one algorithm per group.
 4. Add a fake to `tests/fakes.py` and run the engine/executor tests against it, as `test_remote_backends.py` does for ADB and SMB.
 
+### Cross-cutting services for network storage
+
+- `vfs/guards.py`: checks run before anything is written to a destination: a really mounted file system (not the empty mount point), a sentinel marker file, a hung server (the probe runs in a daemon thread with a timeout), and free space with a reserve.
+- `vfs/retry.py` and `transfer.copy_verified`: transient errors (stale handle, dropped session, timeout) are retried with backoff and `Backend.recover()` (SMB drops its connection cache); each retry restarts the file, so partial copies are never kept.
+- `util/throttle.py`: one token bucket shared by all workers (copies, read-back verification, repository uploads).
+- `util/names.py`: Windows/SMB/exFAT name rules (illegal characters, trailing dots, reserved names, 255-unit limit) as `rel_issues` / `fix_rel`; `Capabilities.windows_names` says when they apply.
+- `util/timecmp.py`: modification-time equality within the coarser drive's resolution, plus the single exact one-hour DST offset.
+- `vfs/probe.py`: measures a drive's real behaviour instead of trusting its file-system name.
+
 ## File names: `duplio.util.text`
 
 File names are untrusted bytes, not text. Every persistence path goes through
@@ -97,6 +107,11 @@ comes from the backend, for example `local:/mount/point` or `adb:SERIAL`.
 `session.py` serialises results, so review and apply can happen later or in
 another process.
 
+`diff.py` classifies every file of two locations (same / moved / changed / only / unreadable) by running the
+engine in `all` mode over the pair, after a free pass that recognises hard links between the two sides. The
+non-content bases decide by path, size and time first and only hand the leftovers to the engine, to find
+moves. `merge` and `sync` are built on it.
+
 ## Planning and applying: `duplio.plan`
 
 - `rules.py`: ordered keep rules, used as a lexicographic sort.
@@ -111,6 +126,20 @@ another process.
 - `retention.py`: restic-style keep policies with extra safety rules.
 - `mirror.py`: a plan/run split, so the mass-change brake and previews work.
 - `ingest.py` and `media.py`: phone import with a local SQLite ledger.
+- `merge.py`: plan from a `DiffResult` (conflict policy, name rewriting, layout, copy-once for identical sources), then run with the shared `execute_action` (verify, archive, no-clobber). `--move` builds a normal quarantine `Plan` with the destination as a reference root and runs the existing `Executor` under the same journal, so one `undo` reverses everything.
+- `sync.py` and `syncstate.py`: a per-pair SQLite history of the last identical state; the decision table, safety brakes, and the journaled steps (copy, replace, quarantine, conflict rename).
+- `snapshots.py`: hard-link snapshot folders with sidecar records, built in a hidden folder and renamed into place.
+- `crypto.py`: AES-256-GCM sealing with the object identity as associated data, HMAC object ids, scrypt-wrapped master key; `repository.py` seals objects, file lists and summaries through it.
+- `manifest.py`, `versions.py`, `export.py`: checksum manifests, `.duplio-versions` housekeeping, snapshot export to archives.
+
+Journal operations understood by `undo`: `quarantine`, `trash`, `delete`, `hardlink`, `reflink`, `merge-copy`,
+`merge-replace`, `sync-rename`. Undoing a sync also deletes the pair's history.
+
+## Automation
+
+`notify.py` delivers webhook, command and e-mail notifications and never raises; `watch.py` is a polling loop over a
+folder fingerprint with a settle period; `cli/hooks.py` runs a profile's `pre`/`post`/`on_failure` commands and applies
+its notification policy around `duplio run`.
 
 ## Presentation
 

@@ -57,6 +57,8 @@ CARDS = [
     ("mirror", "4", "Mirror a folder", "Keep an exact copy elsewhere; older versions are kept."),
     ("backup", "5", "Snapshot backup", "Versioned, deduplicated backups with retention and restore."),
     ("history", "6", "History & undo", "Every change Duplio made — undo, or empty the quarantine."),
+    ("merge", "7", "Compare & merge", "Compare two folders by content; copy over what the other lacks."),
+    ("sync", "8", "Two-way sync", "Keep two folders identical in both directions, with safe deletions."),
 ]
 
 
@@ -68,6 +70,8 @@ class HomeScreen(Screen[None]):
         Binding("4", "open('mirror')", "Mirror", show=False),
         Binding("5", "open('backup')", "Backup", show=False),
         Binding("6", "open('history')", "History", show=False),
+        Binding("7", "open('merge')", "Compare & merge", show=False),
+        Binding("8", "open('sync')", "Sync", show=False),
         Binding("f5", "refresh_devices", "Refresh devices"),
     ]
 
@@ -139,6 +143,7 @@ class HomeScreen(Screen[None]):
             self.action_refresh_devices()
 
     def action_open(self, key: str) -> None:
+        from duplio.tui.compare import CompareMergeScreen, SyncScreen
         from duplio.tui.dedupe import SetupScreen
         from duplio.tui.tools import BackupScreen, HistoryScreen, IngestScreen, MirrorScreen
 
@@ -149,6 +154,8 @@ class HomeScreen(Screen[None]):
             "mirror": MirrorScreen,
             "backup": BackupScreen,
             "history": HistoryScreen,
+            "merge": CompareMergeScreen,
+            "sync": SyncScreen,
         }
         self.app.push_screen(screens[key]())
 
