@@ -1,0 +1,32 @@
+DUPLIO - START HERE
+===================
+
+Duplio finds duplicate files and keeps copies of your files safe. It never deletes anything
+without showing you first, and everything it moves can be put back.
+
+You do not need to install anything except Python (free), if your computer does not have it yet.
+The launcher below tells you if Python is missing and how to get it.
+
+WINDOWS
+  1. If you downloaded a ZIP file: right-click it, choose "Extract All...", and open the new folder.
+  2. Double-click  Duplio.bat
+
+MAC
+  1. If you downloaded a ZIP file: double-click it to unpack it, and open the new folder.
+  2. Double-click  Duplio.command
+     (The first time, macOS may say it cannot be opened. Right-click the file, choose Open,
+      then click Open again. You only have to do this once.)
+
+LINUX
+  1. Unpack the download and open a terminal in the new folder.
+  2. Run:  ./duplio.sh
+     (If it says "permission denied":  chmod +x duplio.sh   and try again.)
+
+A window opens with big numbered buttons. Use the arrow keys and Enter, or press a number.
+Press  ?  for help at any time, and  Ctrl+Q  to leave.
+
+Looking at pictures on a slow or far-away drive (a NAS, a cloud drive, a USB stick)? Duplio
+fetches only the small preview built into each photo and remembers it, so browsing stays quick.
+You can read how in README.md ("Pictures on slow drives").
+
+More commands (for people who like typing):   Duplio.bat --help   /   ./duplio.sh --help

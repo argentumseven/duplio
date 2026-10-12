@@ -1,0 +1,5 @@
+# Launchers must keep the line endings their operating system's shell needs.
+*.bat   -text
+*.cmd   -text
+*.sh    text eol=lf
+*.command text eol=lf
