@@ -52,6 +52,7 @@ from duplio.events import CancelToken, NullProgress, ProgressSink
 from duplio.scan.filters import ScanFilter, extension
 from duplio.util.fmt import iso_now, utc_stamp_ms
 from duplio.util.text import json_dumps
+from duplio.util.throttle import RateLimiter
 from duplio.vfs.base import RawEntry
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import Location
@@ -190,6 +191,7 @@ class Repository:
         self.compression = str(config.get("compression", "auto"))
         self._index: set[str] | None = None
         self._index_lock = threading.Lock()
+        self.limiter: RateLimiter | None = None  # set by the caller to cap upload speed
 
     # ------------------------------------------------------------------ setup
     def p(self, rel: str) -> str:
@@ -332,6 +334,8 @@ class Repository:
                 return oid, 0, False
         blob = encode_object(data, compress)
         path = self.object_path(oid)
+        if self.limiter is not None:
+            self.limiter.acquire(len(blob))
         try:
             with self.b.open_write(path) as handle:
                 handle.write(blob)

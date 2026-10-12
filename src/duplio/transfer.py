@@ -15,7 +15,9 @@ from duplio.errors import VerificationError
 from duplio.events import CancelToken
 from duplio.hashing.algorithms import get_algorithm
 from duplio.hashing.core import READ_BUFFER, SizeMismatch, hash_file
+from duplio.util.throttle import RateLimiter
 from duplio.vfs.base import Backend
+from duplio.vfs.retry import retry_transient
 
 
 def copy_verified(
@@ -30,13 +32,45 @@ def copy_verified(
     verify: bool = True,
     cancel: CancelToken | None = None,
     on_bytes: Callable[[int], None] | None = None,
+    limiter: RateLimiter | None = None,
+    attempts: int = 3,
 ) -> str:
     """Copy ``src`` to ``dst``; return the content digest.
 
     Raises :class:`~duplio.errors.VerificationError` (and removes the
     destination) if the copy does not match what was read, or does not match
-    ``expected_digest`` when one is given.
+    ``expected_digest`` when one is given. Transient network errors (stale
+    handle, dropped session, timeout) are retried with backoff; each retry
+    starts the file again from scratch, so a partial copy is never kept.
+    ``limiter`` caps the transfer rate, including the read-back verification.
     """
+
+    def once() -> str:
+        return _copy_once(src, dst, algorithm=algorithm, expected_size=expected_size,
+                          expected_digest=expected_digest, mtime_ns=mtime_ns, overwrite=overwrite,
+                          verify=verify, cancel=cancel, on_bytes=on_bytes, limiter=limiter)
+
+    def recover() -> None:
+        src[0].recover()
+        dst[0].recover()
+
+    return retry_transient(once, attempts=attempts, cancel=cancel, recover=recover)
+
+
+def _copy_once(
+    src: tuple[Backend, str],
+    dst: tuple[Backend, str],
+    *,
+    algorithm: str,
+    expected_size: int | None,
+    expected_digest: str | None,
+    mtime_ns: int | None,
+    overwrite: bool,
+    verify: bool,
+    cancel: CancelToken | None,
+    on_bytes: Callable[[int], None] | None,
+    limiter: RateLimiter | None,
+) -> str:
     src_backend, src_path = src
     dst_backend, dst_path = dst
     hasher = get_algorithm(algorithm).new()
@@ -60,6 +94,8 @@ def copy_verified(
                 n = len(data)
                 chunk = memoryview(data)
             hasher.update(chunk)
+            if limiter is not None:
+                limiter.acquire(n, cancel)
             writer.write(chunk)
             total += n
             if on_bytes is not None:
@@ -71,7 +107,10 @@ def copy_verified(
             raise VerificationError(f"{src_path}: content no longer matches the scanned digest")
     if verify:
         try:
-            written = hash_file(dst_backend, dst_path, algorithm, expected_size=total, cancel=cancel)
+            written = hash_file(
+                dst_backend, dst_path, algorithm, expected_size=total, cancel=cancel,
+                on_bytes=(lambda n: limiter.acquire(n, cancel)) if limiter is not None else None,
+            )
         except Exception:
             with contextlib.suppress(Exception):
                 dst_backend.remove(dst_path)

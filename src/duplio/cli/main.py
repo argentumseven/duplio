@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import sys
 
-from duplio.cli import cmd_backup, cmd_misc, cmd_plan, cmd_scan  # noqa: F401  (register commands)
+from duplio.cli import (  # noqa: F401  (register commands)
+    cmd_backup,
+    cmd_drive,
+    cmd_misc,
+    cmd_plan,
+    cmd_scan,
+)
 from duplio.cli.app import cli
 
 

@@ -16,6 +16,7 @@ from duplio.backup.mirror import MirrorOptions, plan_mirror, run_mirror
 from duplio.backup.repository import DEFAULT_CHUNK, Repository
 from duplio.backup.retention import RetentionPolicy, apply_policy
 from duplio.cli.app import SIZE, cli, get_app, handle_errors, progress_for, run_cancellable
+from duplio.cli.cmd_drive import guard_destination, guard_options, make_limiter
 from duplio.cli.render import t
 from duplio.errors import ConfigError
 from duplio.scan.filters import ScanFilter
@@ -62,12 +63,17 @@ def backup_init(repo: str, chunk_size: int, compression: str) -> None:
 @click.option("-i", "--include", multiple=True, metavar="GLOB")
 @click.option("--rehash", is_flag=True, help="Read every file even if unchanged since the last snapshot.")
 @click.option("--cross-filesystems", is_flag=True)
+@guard_options
 @handle_errors
 def backup_run(source: str, repo: str, label: str, tags: tuple[str, ...], exclude: tuple[str, ...],
-               include: tuple[str, ...], rehash: bool, cross_filesystems: bool) -> None:
+               include: tuple[str, ...], rehash: bool, cross_filesystems: bool, bwlimit: str | None,
+               expect_mounted: bool | None, sentinel: str | None) -> None:
     """Snapshot SOURCE into REPO (only new data is stored)."""
     app = get_app()
-    r = _repo(app, repo)
+    repo_loc = app.registry.open(repo)
+    guard_destination(app, repo_loc, expect_mounted=expect_mounted, sentinel=sentinel)
+    r = Repository.open(repo_loc)
+    r.limiter = make_limiter(bwlimit)
     src = app.registry.open(source)
     flt = ScanFilter.for_backup(include=list(include), exclude=list(app.settings.exclude) + list(exclude))
 
@@ -310,9 +316,11 @@ def backup_unlock(repo: str) -> None:
 @click.option("--force", is_flag=True, help="Override the safety brake.")
 @click.option("--dry-run", is_flag=True)
 @click.option("-y", "--yes", is_flag=True)
+@guard_options
 @handle_errors
 def mirror(source: str, dest: str, delete_extraneous: bool, checksum: bool, no_verify: bool, keep_versions: str | None,
-           exclude: tuple[str, ...], max_change: float, force: bool, dry_run: bool, yes: bool) -> None:
+           exclude: tuple[str, ...], max_change: float, force: bool, dry_run: bool, yes: bool, bwlimit: str | None,
+           expect_mounted: bool | None, sentinel: str | None) -> None:
     """Keep DEST an exact, verified copy of SOURCE — with old versions kept.
 
     \b
@@ -321,8 +329,10 @@ def mirror(source: str, dest: str, delete_extraneous: bool, checksum: bool, no_v
     """
     app = get_app()
     src, dst = app.registry.open(source), app.registry.open(dest)
+    guard_destination(app, dst, expect_mounted=expect_mounted, sentinel=sentinel)
     options = MirrorOptions(delete_extraneous=delete_extraneous, checksum=checksum, verify=not no_verify,
-                            dry_run=dry_run, max_change_ratio=max_change, force=force, keep_versions=keep_versions)
+                            dry_run=dry_run, max_change_ratio=max_change, force=force, keep_versions=keep_versions,
+                            limiter=make_limiter(bwlimit))
     flt = ScanFilter.for_backup(exclude=list(app.settings.exclude) + list(exclude))
     cache = app.cache()
 
@@ -347,6 +357,7 @@ def mirror(source: str, dest: str, delete_extraneous: bool, checksum: bool, no_v
         app.console.print(Text(f" … {len(mplan.actions) - 15:,} more", style="dim"))
     if dry_run:
         return
+    guard_destination(app, dst, expect_mounted=False, sentinel=None, needed_bytes=mplan.bytes_to_copy, probe_timeout=None)
     disruptive = mplan.count("update") + mplan.count("archive")
     if disruptive and not yes:
         if not sys.stdin.isatty():
@@ -380,9 +391,11 @@ def mirror(source: str, dest: str, delete_extraneous: bool, checksum: bool, no_v
 @click.option("--free-source", is_flag=True, help="Afterwards delete from SOURCE every file verified in the library.")
 @click.option("--dry-run", is_flag=True)
 @click.option("-y", "--yes", is_flag=True)
+@guard_options
 @handle_errors
 def ingest_cmd(source: str, library: str, layout: str, all_files: bool, device_label: str, reimport_deleted: bool,
-               free_source: bool, dry_run: bool, yes: bool) -> None:
+               free_source: bool, dry_run: bool, yes: bool, bwlimit: str | None, expect_mounted: bool | None,
+               sentinel: str | None) -> None:
     """Import new photos/videos from a phone into a dated library, skipping anything already there.
 
     \b
@@ -392,13 +405,15 @@ def ingest_cmd(source: str, library: str, layout: str, all_files: bool, device_l
     """
     app = get_app()
     src, lib = app.registry.open(source), app.registry.open(library)
+    guard_destination(app, lib, expect_mounted=expect_mounted, sentinel=sentinel)
     if free_source and not dry_run and not yes:
         if not sys.stdin.isatty():
             raise ConfigError("--free-source deletes files on the source; confirm interactively or pass --yes")
         if not click.confirm(f"After importing, delete from {src.display} every file verified in the library?", default=False):
             free_source = False
     options = IngestOptions(layout=layout, media_only=not all_files, dry_run=dry_run, free_source=free_source,
-                            reimport_deleted=reimport_deleted, device_label=device_label)
+                            reimport_deleted=reimport_deleted, device_label=device_label,
+                            limiter=make_limiter(bwlimit))
     cache = app.cache()
 
     def work(cancel):  # type: ignore[no-untyped-def]

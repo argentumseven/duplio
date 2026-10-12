@@ -191,6 +191,18 @@ class SMBBackend(Backend):
                 raise LocationError(f"cannot connect to SMB server {self.target.server}: {exc}") from exc
             self._registered = True
 
+    def recover(self) -> None:
+        """Drop the cached (possibly dead) SMB session; the next call reconnects."""
+        with self._session_lock:
+            self._registered = False
+            if self._client is not None:
+                reset = getattr(self._client, "reset_connection_cache", None)
+                if reset is not None:
+                    try:
+                        reset()
+                    except Exception:
+                        pass
+
     def close(self) -> None:
         if self._registered and self._client is not None:
             with contextlib.suppress(Exception):
@@ -214,6 +226,7 @@ class SMBBackend(Backend):
             sampling=Sampling.RANDOM,
             max_parallel_reads=4,
             fstype="smb",
+            windows_names=True,
         )
 
     def uri(self, path: str) -> str:

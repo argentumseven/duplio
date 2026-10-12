@@ -194,6 +194,7 @@ class ADBBackend(Backend):
             max_parallel_reads=2,
             remote_hash_algorithms=("sha256", "sha1", "md5"),
             fstype="adb",
+            windows_names=True,
         )
 
     def uri(self, path: str) -> str:

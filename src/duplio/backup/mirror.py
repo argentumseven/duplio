@@ -31,6 +31,7 @@ from duplio.scan.filters import ScanFilter
 from duplio.transfer import copy_verified
 from duplio.util.fmt import parse_duration, utc_stamp
 from duplio.util.text import name_key, printable
+from duplio.util.throttle import RateLimiter
 from duplio.vfs.base import RawEntry, WalkStats
 from duplio.vfs.location import Location
 
@@ -47,6 +48,7 @@ class MirrorOptions:
     max_change_ratio: float = 0.5
     force: bool = False
     keep_versions: str | None = None  # e.g. "90d": prune older version folders after the run
+    limiter: RateLimiter | None = None
 
 
 @dataclass
@@ -268,7 +270,7 @@ def run_mirror(
         except OSError:
             info = db.stat(src)
             copy_verified((db, src), (db, dst), algorithm=algo, expected_size=info.size if info else None,
-                          mtime_ns=info.mtime_ns if info else None, cancel=cancel)
+                          mtime_ns=info.mtime_ns if info else None, cancel=cancel, limiter=options.limiter)
             db.remove(src)
         return dst
 
@@ -279,7 +281,7 @@ def run_mirror(
             if action.kind == "copy" and src_raw is not None:
                 copy_verified((sb, src_raw.path), (db, db.join(plan.dest.path, action.rel)), algorithm=algo,
                               expected_size=src_raw.size, mtime_ns=src_raw.mtime_ns, verify=options.verify,
-                              cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n))
+                              cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n), limiter=options.limiter)
                 report.bytes_copied += src_raw.size
             elif action.kind == "update" and src_raw is not None:
                 target_rel = action.dest_rel or action.rel
@@ -287,7 +289,7 @@ def run_mirror(
                 try:
                     copy_verified((sb, src_raw.path), (db, db.join(plan.dest.path, action.rel)), algorithm=algo,
                                   expected_size=src_raw.size, mtime_ns=src_raw.mtime_ns, verify=options.verify,
-                                  cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n))
+                                  cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n), limiter=options.limiter)
                 except BaseException:
                     # Put the previous version back so the destination is never left without the file.
                     with contextlib.suppress(Exception):

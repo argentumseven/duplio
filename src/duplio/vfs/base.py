@@ -62,6 +62,7 @@ class Capabilities:
     max_parallel_reads: int = 4
     remote_hash_algorithms: tuple[str, ...] = ()  # hashes computed on the far side
     fstype: str = ""
+    windows_names: bool = False  # NTFS/FAT/SMB/Android rules: no ``<>:"|?*``, no trailing dots, reserved names
 
     def with_(self, **changes: object) -> Capabilities:
         return replace(self, **changes)  # type: ignore[arg-type]
@@ -264,6 +265,9 @@ class Backend(ABC):
         if sa is None or sb is None or sa.inode is None or sb.inode is None:
             return None
         return sa.inode == sb.inode
+
+    def recover(self) -> None:
+        """Re-establish a dropped connection after a transient failure (no-op for local storage)."""
 
     def close(self) -> None:
         """Release connections and sessions."""

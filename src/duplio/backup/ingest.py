@@ -40,6 +40,7 @@ from duplio.scan.filters import MEDIA_EXTENSIONS, ScanFilter, extension
 from duplio.transfer import copy_verified
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.text import fs_bytes, fs_str
+from duplio.util.throttle import RateLimiter
 from duplio.vfs.base import RawEntry, WalkStats
 from duplio.vfs.location import Location
 
@@ -56,6 +57,7 @@ class IngestOptions:
     free_source: bool = False
     reimport_deleted: bool = False
     device_label: str = ""
+    limiter: RateLimiter | None = None
 
 
 @dataclass
@@ -295,7 +297,7 @@ def _import_one(raw, source, library, options, algo, ledger, key, library_match,
     tmp = lb.join(library.path, f"{INCOMING_DIR}/{secrets.token_hex(8)}.part")
     digest = copy_verified(
         (sb, raw.path), (lb, tmp), algorithm=algo, expected_size=raw.size, mtime_ns=raw.mtime_ns,
-        cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n),
+        cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n), limiter=options.limiter,
     )
     try:
         previous = ledger.imported(digest)

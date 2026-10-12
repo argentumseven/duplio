@@ -153,8 +153,19 @@ _MTP_CAPS = Capabilities(
 )
 
 
+_WINDOWS_NAME_FS = {"cifs", "smb3", "smbfs", "vfat", "msdos", "fat", "fat32", "exfat", "ntfs", "ntfs3", "fuseblk", "fuse.exfat"}
+
+
 def classify(entry: MountEntry | None, path: str) -> Capabilities:
     """Turn a mount entry plus a path into a capabilities profile."""
+    caps = _classify(entry, path)
+    fstype = (entry.fstype.lower() if entry else "")
+    if fstype in _WINDOWS_NAME_FS or "exfat" in fstype or "ntfs" in fstype or caps.kind is MediaKind.DEVICE or "smb-share" in path:
+        caps = caps.with_(windows_names=True)
+    return caps
+
+
+def _classify(entry: MountEntry | None, path: str) -> Capabilities:
     if entry is None:
         return Capabilities(label="Local disk")
 
@@ -302,6 +313,7 @@ def _windows_caps(path: str) -> Capabilities:  # pragma: no cover - exercised on
         return Capabilities(
             kind=MediaKind.NETWORK,
             label="Network share (UNC)",
+            windows_names=True,
             can_hardlink=False,
             stable_inodes=False,
             case_insensitive=True,
@@ -316,6 +328,7 @@ def _windows_caps(path: str) -> Capabilities:  # pragma: no cover - exercised on
     fstype = fs_buf.value.lower()
     caps = Capabilities(
         label=f"Local disk ({fstype or 'unknown'})",
+        windows_names=True,
         case_insensitive=True,
         can_hardlink=fstype == "ntfs",
         can_reflink=fstype == "refs",
