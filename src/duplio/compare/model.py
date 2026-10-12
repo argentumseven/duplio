@@ -150,6 +150,7 @@ class ScanResult:
     similar: list[SimilarGroup] = field(default_factory=list)
     unique: list[FileEntry] = field(default_factory=list)
     unverified: list[FileEntry] = field(default_factory=list)
+    failed: list[FileEntry] = field(default_factory=list)  # files that could not be read while comparing
     stats: EngineStats = field(default_factory=EngineStats)
     session_id: str = field(default_factory=new_session_id)
     created: str = field(default_factory=iso_now)

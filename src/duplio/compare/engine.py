@@ -207,6 +207,7 @@ class Engine:
             self.unique.sort(key=lambda e: (e.root, e.rel))
             result.unique = self.unique
         result.unverified = sorted(self.unverified, key=lambda e: (e.root, e.rel))
+        result.failed = [e for e in entries if e.id in self._failed]
 
         if self.opts.similar_images and self.opts.mode is not Mode.UNIQUE:
             from duplio.compare.similar import find_similar_images

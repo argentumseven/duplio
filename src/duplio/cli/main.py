@@ -6,6 +6,7 @@ import sys
 
 from duplio.cli import (  # noqa: F401  (register commands)
     cmd_backup,
+    cmd_diff,
     cmd_drive,
     cmd_misc,
     cmd_plan,
