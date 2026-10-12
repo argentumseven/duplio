@@ -13,6 +13,7 @@ from typing import Any
 from duplio.errors import DuplioError, SafetyError
 from duplio.events import CancelToken, NullProgress, ProgressSink
 from duplio.hashing.algorithms import default_full_algorithm
+from duplio.hashing.core import hash_file
 from duplio.plan.journal import (
     Journal,
     JournalSummary,
@@ -119,6 +120,67 @@ def _unshare(op: OpState, registry: BackendRegistry, dry_run: bool) -> UndoLine:
     return UndoLine(op.seq, intent["op"], path, "restored", "independent copy re-created")
 
 
+def _merge_still_safe(op: OpState, registry: BackendRegistry) -> tuple[str, str] | UndoLine:
+    """Check that a merged copy is untouched and the source still holds the same content.
+
+    Returns ``(dst, digest)`` when it is safe to remove the copy, else the line to report.
+    """
+    intent, done = op.intent, op.done_record or {}
+    kind = str(intent.get("op"))
+    src = str(intent["src"])
+    dst, digest, algorithm = done.get("dst"), done.get("digest"), done.get("algorithm")
+    if not dst or not digest or not algorithm:
+        return UndoLine(op.seq, kind, src, "failed", "the journal lacks the copy's details")
+    db = registry.open(intent["dst_root"]).backend
+    sb = registry.open(intent["src_root"]).backend
+    size = int(done.get("size", intent.get("size", 0)))
+    info = db.stat(dst)
+    if info is None:
+        return UndoLine(op.seq, kind, src, "failed", "the copy no longer exists")
+    if info.size != size or hash_file(db, dst, algorithm, expected_size=size) != digest:
+        return UndoLine(op.seq, kind, src, "conflict", "the copy was modified after the merge; left in place")
+    sinfo = sb.stat(src)
+    if sinfo is None or sinfo.size != size or hash_file(sb, src, algorithm, expected_size=size) != digest:
+        return UndoLine(op.seq, kind, src, "conflict",
+                        "the source no longer holds this content, so the copy is the only one; left in place")
+    return str(dst), str(digest)
+
+
+def _undo_merge_copy(op: OpState, registry: BackendRegistry, dry_run: bool) -> UndoLine:
+    checked = _merge_still_safe(op, registry)
+    if isinstance(checked, UndoLine):
+        return checked
+    dst, _ = checked
+    src = str(op.intent["src"])
+    if dry_run:
+        return UndoLine(op.seq, "merge-copy", src, "would-restore", f"remove the copy {dst}")
+    dst_loc = registry.open(op.intent["dst_root"])
+    dst_loc.backend.remove(dst)
+    with contextlib.suppress(Exception):
+        dst_loc.backend.remove_empty_dirs(dst_loc.backend.parent(dst), dst_loc.path)
+    return UndoLine(op.seq, "merge-copy", src, "restored", "copy removed")
+
+
+def _undo_merge_replace(op: OpState, registry: BackendRegistry, dry_run: bool) -> UndoLine:
+    checked = _merge_still_safe(op, registry)
+    if isinstance(checked, UndoLine):
+        return checked
+    dst, _ = checked
+    src = str(op.intent["src"])
+    archived = (op.done_record or {}).get("archived")
+    dst_loc = registry.open(op.intent["dst_root"])
+    db = dst_loc.backend
+    if not archived or db.stat(str(archived)) is None:
+        return UndoLine(op.seq, "merge-replace", src, "failed", "the previous version is no longer in .duplio-versions")
+    if dry_run:
+        return UndoLine(op.seq, "merge-replace", src, "would-restore", f"bring back the previous version of {dst}")
+    db.remove(dst)
+    db.rename(str(archived), dst)
+    with contextlib.suppress(Exception):
+        db.remove_empty_dirs(db.parent(str(archived)), dst_loc.path)
+    return UndoLine(op.seq, "merge-replace", src, "restored", "previous version put back")
+
+
 def undo(
     apply_id: str | None,
     registry: BackendRegistry,
@@ -153,6 +215,10 @@ def undo(
                 elif kind == "quarantine":
                     line = _safe(lambda op=op: _restore_quarantine(op, registry, dry_run), op, kind, src)
                     report.lines.append(line)
+                elif kind == "merge-copy":
+                    report.lines.append(_safe(lambda op=op: _undo_merge_copy(op, registry, dry_run), op, kind, src))
+                elif kind == "merge-replace":
+                    report.lines.append(_safe(lambda op=op: _undo_merge_replace(op, registry, dry_run), op, kind, src))
                 elif kind in ("hardlink", "reflink"):
                     line = _safe(lambda op=op: _unshare(op, registry, dry_run), op, kind, src)
                     report.lines.append(line)
