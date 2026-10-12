@@ -101,6 +101,7 @@ def doctor(benchmark: bool) -> None:
         ("PIL", "similar images, EXIF dates", "media"),
         ("send2trash", "system trash action", "trash"),
         ("cryptography", "encrypted backup repositories", "encrypt"),
+        ("numpy", "content-defined chunking for backups", "cdc"),
         ("keyring", "stored SMB passwords", "-"),
     ):
         present = importlib.util.find_spec(module) is not None

@@ -367,7 +367,8 @@ def _print_prune(app, report) -> None:  # type: ignore[no-untyped-def]
               help="Keep set-aside data in the repository's trash this long before deleting it (0 = delete at once).")
 @click.option("--min-age", default="1d", show_default=True,
               help="Never touch data written more recently than this (protects a backup that is still running; 0 = off).")
-@click.option("--immediate", is_flag=True, help="Same as --grace 0 --min-age 0: free the space now, no recovery.")
+@click.option("--immediate", is_flag=True,
+              help="Same as --grace 0 --min-age 0: free the space now, no recovery (also deletes what earlier runs set aside).")
 @handle_errors
 def backup_prune(repo: str, dry_run: bool, grace: str, min_age: str, immediate: bool) -> None:
     """Set aside chunks no snapshot uses; later runs delete them for good.
@@ -390,7 +391,11 @@ def _seconds(text: str) -> float:
 @click.argument("repo")
 @handle_errors
 def backup_repair(repo: str) -> None:
-    """Bring back snapshots whose summary file was lost (their file list is still there)."""
+    """Bring back snapshots whose summary file was lost (their file list is still there).
+
+    This also brings back a snapshot whose 'forget' was interrupted after its summary was removed; forget it again if
+    that is not wanted.
+    """
     app = get_app()
     ids = _repo(app, repo).repair()
     if ids:
@@ -484,6 +489,9 @@ def backup_stats(repo: str) -> None:
     ratio = (s["logical_bytes"] / s["stored_bytes"]) if s["stored_bytes"] else 0
     app.console.print(f"{s['snapshots']:,} snapshots protect {human_size(s['logical_bytes'])} using {human_size(s['stored_bytes'])} "
                       f"in {s['objects']:,} chunks (×{ratio:.1f} efficiency)")
+    if s["trash_bytes"]:
+        app.console.print(Text(f"{human_size(s['trash_bytes'])} more is set aside in the trash "
+                               "('duplio backup trash list'; deleted by a later prune).", style="dim"))
 
 
 @backup.command("find")

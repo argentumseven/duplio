@@ -44,11 +44,9 @@ Duplio's snapshot store keeps the parts of that design that matter for safety:
 - mark-and-sweep pruning;
 - restic-style retention.
 
-It uses **fixed-size chunks** instead of content-defined chunking. CDC in pure
-Python costs tens of MB/s per core, which would make phone and NAS backups
-CPU-bound. Fixed chunks still deduplicate whole files across machines and in-place
-edits of large files. The repository format is versioned so a chunker can be added
-later. Encryption is opt-in (AES-256-GCM, keyed ids), added in the spirit of restic and Kopia: a random master key wrapped by a password-derived key, so a password change is instant.
+It uses **fixed-size chunks by default** and offers content-defined chunking as an opt-in (`backup init --chunker cdc`;
+see "Chunking" below). Fixed chunks deduplicate whole files across machines and in-place edits of large files; they do not
+survive bytes being *inserted* into a big file. Encryption is opt-in (AES-256-GCM, keyed ids), added in the spirit of restic and Kopia: a random master key wrapped by a password-derived key, so a password change is instant.
 
 ## Phones on the desktop
 
@@ -110,3 +108,85 @@ drive can store. `duplio probe` measures all of this on the actual drive.
 | Corruption checks (CCC) | `duplio manifest verify`, `backup check --read-data` |
 | Version history and file search across backups (Arq, Time Machine) | `backup find`, `backup history`, `backup export` |
 | Filters by type and age | `--type`, `--newer-than`, `--older-than` |
+
+
+## A second look at repositories, after an independent review
+
+An independent review of the first version raised five problems in the backup repository and three design questions.
+Before changing anything each was checked against the code, and the fix was designed from how the established tools
+solve the same problem rather than from the review's suggestion alone.
+
+**Garbage collection.** Kopia's maintainers explain why its garbage collection does not simply delete whatever nothing
+references: several computers can write to one repository, a backup can run for days, and its snapshot record only exists at
+the end, so data that looks unreferenced may be in use ([discussion](https://kopia.discourse.group/t/how-to-immediately-gc-unused-blobs/295),
+[another](https://kopia.discourse.group/t/unreferenced-content-does-nor-get-deleted/84)); it applies a minimum age and keeps
+`--safety=none` for people who accept the risk. Duplio does the same (default one day) and adds what restic and Kopia do not
+have for an offline, single-writer repository: a trash with a grace period, so that even a wrong decision is reversible.
+References are read from the file list of every snapshot (including those whose summary is missing or damaged), and any file list
+that cannot be read stops the run. The summary of a snapshot is embedded in its file list, so a lost summary can be rebuilt exactly.
+
+**Locks.** restic refreshes its lock about every five minutes and treats one that is 30 minutes old (or whose process is gone) as stale
+([forum](https://forum.restic.net/t/restic-unlock-automation/5511)); since 0.15 it also cancels a command that cannot refresh its lock in time, because a
+backup that slept could otherwise carry on while a prune removed its data
+([changelog](https://git.0l.de/Mirrors/restic/src/branch/master/changelog/0.15.0_2023-01-12/issue-2715)). Duplio's lock is a lease on the same model
+(refresh every minute, abandoned after twenty), with two differences. Age is measured on the share (the lock file against a probe file
+written moments ago on the same share), because the time written inside the lock comes from another computer's clock. And the owner fences
+itself: it re-reads the lock right before publishing a snapshot or moving data, and a machine that woke up after sleeping re-confirms the lock
+instead of assuming it.
+
+**Change detection.** Borg's default is to treat a file as unchanged only if its change time (ctime), size and inode match
+([docs](https://borgbackup.readthedocs.io/en/latest/usage/create.html)): the change time cannot be set by users, whereas the modification
+time can be set back after an edit. The cost is that a metadata change alone looks like a change, which in a deduplicating backup
+costs a re-read and no storage. Duplio now does the same for backups and sync on file systems that keep these reliably, with `--ignore-ctime` for jobs that change
+attributes in bulk (restic has the same switch).
+
+**Files that change during a backup.** Borg reports "file changed while we backed it up" as a warning and exits with status 1
+([discussion](https://www.python.org/pipermail/borgbackup/2023q2/002217.html)), and the recommended answer to live data is to back up a
+file-system snapshot. Duplio flags the file in the snapshot rather than only in that run's output, so the information is still there when
+the backup is restored or thinned months later, and refuses to treat a snapshot of a moving target as the last good one.
+
+**Chunking.** Content-defined chunking cuts where a rolling hash of the last few dozen bytes meets a condition, so after an insertion
+the cut points re-synchronise. Duplio's is FastCDC-style (Xia et al., 2016): a gear hash, a minimum size, and "normalised" cutting that
+keeps sizes near the average. Python packages exist ([fastcdc-py](https://github.com/titusz/fastcdc-py), optional Cython;
+[PyFastCDC](https://pypi.org/project/pyfastcdc/), Cython); this one is written against numpy instead so that the gear table can be **keyed** by
+the repository (and, when encrypted, by its secret key), which stops chunk boundaries from being used to recognise a known file, and so that
+it has no compiler requirement. It evaluates the 64-byte window in six vectorised doubling passes instead of one Python step per byte.
+
+Measured on one core of the benchmark machine below (128 MiB of random data, chunking plus BLAKE2b hashing): fixed 4 MiB blocks 406 MB/s
+(hash-bound), content-defined 51 MB/s for an average chunk of 1 MiB or 4 MiB alike, so it costs roughly an eighth of the speed. With a 3 MiB file and 100 bytes
+inserted near its start, the second backup stored over 2.5 MiB of new data in a fixed-block repository and under 0.3 MiB in a content-defined one
+(`test_an_insertion_into_a_big_file_costs_little_with_cdc_and_everything_with_fixed`). Pick content-defined chunking for files that are edited by
+insertion (databases, mailboxes, documents, disk images); leave the default for photos, video and archives, which are written once.
+
+**Testing for crashes.** ALICE ([summary](https://blog.acolyer.org/2016/02/11/fs-not-equal/)) found 60 crash-consistency vulnerabilities in 11 widely used programs
+(LevelDB, SQLite, Git among them) by replaying the file-system calls of a workload and checking an invariant after every possible interruption.
+CrashMonkey and ACE ([paper](https://arxiv.org/pdf/1810.02904)) found that most bugs need only a few operations, so exhaustive tests of small workloads are
+effective. Duplio applies the same idea one level up, to its own steps (`tests/test_crash_sweep.py`): each operation is run on a small tree, every durable step is
+numbered, and the operation is replayed once per step in a process that is killed there (or made to fail with an I/O error, including "the change happened but the answer
+was lost"). It found real defects that the earlier hand-written tests had not: an interrupted run whose changes `undo` and `recover` could not see, a failure recorded as
+failed although the change had happened, an ambiguous commit that left a duplicate on retry, a torn journal line that hid everything written after it, and a phone import that
+did not free space after being interrupted.
+
+**Scale.** `benchmarks/scale.py` generates a tree and times the real command line, in a clean process each, with the child's peak memory. Run on 300,000
+files (4.33 GB, median file about 4 KiB, a long tail to 4 MiB, 10 % duplicates; a second tree of hard links with 1 % of the files changed), on a 4-core Linux virtual machine
+with a local disk, Python 3.13:
+
+| Command | Time | Peak memory |
+|---|---|---|
+| `scan` one tree for duplicates | 62 s | 553 MiB |
+| `backup run`, first run | 486 s (about 620 files/s, 8.9 MB/s) | 526 MiB |
+| `backup run`, second run, nothing changed | 19 s (about 16,000 files/s) | 656 MiB |
+| `backup check` | 8 s | 534 MiB |
+| `diff` of two trees, 1 % changed | 105 s | 1,141 MiB |
+| `sync --dry-run`, first run | 56 s | 554 MiB |
+
+The repository held 3.93 GB for the 4.33 GB tree. What this shows, and what it does not:
+
+- Memory grows with the number of files (roughly 2 to 4 KiB per file for these commands). Extrapolated linearly, a few million files fit in 16 GB and tens of millions do not; that is an
+  inference from one measurement, not a tested limit. Past it, an on-disk index would be needed.
+- The first backup of many small files is limited by the file system, not the CPU. Every chunk is its own file, written, flushed and renamed; on a 20,000-file sample the same backup ran at
+  577 files/s with flushing and 1,447 files/s without it, so durability accounts for about 60 % of the time. restic and Kopia bundle small blobs into pack files to avoid this. Duplio does not, and a first
+  backup of a photo library (few, large files) is far less affected than a source tree.
+- An unchanged tree is cheap to back up again (19 s for 300,000 files), which is what scheduled runs mostly do.
+- Not measured: network shares (round trips dominate there), spinning disks, trees beyond 300,000 files, and concurrent writers (a repository has one writer at a time by design).
+

@@ -75,6 +75,7 @@ pip install duplio               # core only (CLI; standard-library hashing)
 | `media`  | similar-image search, EXIF dates       | Pillow                 |
 | `trash`  | the system-trash action                | Send2Trash             |
 | `encrypt`| encrypted backup repositories          | cryptography           |
+| `cdc`    | content-defined chunking for backups   | numpy                  |
 
 Run `duplio doctor` to see what is installed, which phone tools (`adb`, `jmtpfs`,
 `gio`) are available, and how fast each hash runs on your machine.
@@ -216,6 +217,11 @@ cache:
 Measure on your own hardware with `duplio doctor`. It benchmarks every available
 hash; BLAKE3 and XXH3 typically run at several GiB/s per core.
 
+At larger scale (300,000 files, 4.3 GB, on a 4-core virtual machine with a local disk): `scan` took 62 s using 553 MiB; `diff` of two such
+trees 105 s using 1.1 GiB; an unchanged `backup run` 19 s; the *first* backup 8 minutes (about 620 files/s, limited by flushing each small
+chunk file to disk). The full table, what it does and does not show, and `python benchmarks/scale.py` to repeat it are in
+[docs/DESIGN-NOTES.md](docs/DESIGN-NOTES.md#a-second-look-at-repositories-after-an-independent-review).
+
 ## What counts as "the same file"
 
 **Names never decide.** Duplicates are found by content, so `holiday.jpg`,
@@ -275,8 +281,15 @@ timestamp" rule: a file modified within a few seconds of the moment it was recor
 drive, whichever is longer) is compared by content, because an edit in the same step keeps the same size and time. Times are
 compared within what both drives can store, and `--ignore-dst` forgives an exact one-hour shift.
 
-What no size-and-time tool can see is a change that kept both, on a file that had long settled (silent corruption, or a tool
-that restores timestamps). For that, ask for content: `backup run --rehash`, `mirror --checksum`, `snapshot create
+`backup` and `sync` also compare the file's **change time and inode** wherever the file system keeps them reliably (local
+POSIX file systems; not SMB, MTP or most network mounts). Users and tools can set the modification time but not the change time, so
+an edit that restored the old size and modification time (`touch -r`, `rsync -t`, a restore tool, a deliberate disguise) is still
+noticed, as is a file replaced by another with the same size and time. Borg's default works the same way. A permission change
+moves the change time too; in a backup that costs one re-read (the chunks are already stored), in a sync one comparison and
+no copy. `--ignore-ctime` turns this off for jobs that touch attributes in bulk.
+
+What a size-and-time tool cannot see, where those are unavailable, is a change that kept both on a file that had long settled
+(silent corruption, or a tool that restores timestamps). For that, ask for content: `backup run --rehash`, `mirror --checksum`, `snapshot create
 --verify-links`, `sync --basis content` (which avoids needless copies; it does not make sync read everything), and the
 read-everything checkers `manifest verify` and `backup check --read-data`.
 
@@ -338,7 +351,10 @@ The rest of the system follows the same rules:
 - Scan roots that overlap, directly or through symlinks and bind mounts, are refused.
 - Plans are checked by an independent invariant pass: every group keeps at least one copy, no reference location is targeted, and no kept copy is also removed.
 - Writes go to a temporary file plus a no-clobber rename. Copies are verified by re-reading the destination, with the page cache dropped where the OS allows. Existing files are never overwritten unless you explicitly ask.
-- Only one apply, undo or purge runs at a time. Stale locks from crashed processes are reclaimed safely, and `duplio recover` explains any interrupted operation.
+- Only one apply, undo or purge runs at a time. Stale locks from crashed processes are reclaimed safely.
+- Every journal entry names the files the step will create. After a crash or power loss, `duplio recover` settles each interrupted step from what is actually on disk (finished, not started, or rolled back by putting a file back; nothing is deleted), and `duplio undo` does the same before it reverses a run.
+- A kept copy is verified again for every irreversible step; a verdict from earlier in the run is reused only for undoable steps, and only while the file's size, times and identity are unchanged.
+- It is tested by killing it: `tests/test_crash_sweep.py` stops each operation at every durable step (and makes each step fail with an I/O error) and checks that nothing is lost and that a rerun or `undo` puts things right. See [docs/SAFETY.md](docs/SAFETY.md#interrupted-anywhere).
 
 ## Compare, merge and sync two folders
 
@@ -439,19 +455,47 @@ support, latency and read/write speed, followed by plain recommendations.
 
 ## Backups
 
+**Scope.** Duplio's core is finding duplicates and comparing, merging and syncing folders safely; those paths get the most
+scrutiny. The backup features exist so that the same tool can keep a verified, versioned copy of the folders, phones and
+shares it already understands. They are deliberately simpler than a dedicated system such as restic, Borg or Kopia: no
+symbolic links, ownership or extended attributes are stored, repositories are single-writer, and the numbers under
+[Performance](#performance) and in [docs/DESIGN-NOTES.md](docs/DESIGN-NOTES.md) say how far they have been measured. For
+a fleet of machines, or data where those properties matter, use one of those tools; for a personal archive, a phone or a
+NAS share, this is built to be safe first.
+
 ### Snapshots: `duplio backup …`
 
 These are content-addressed, deduplicated and versioned, and the repository can
 live on any writable location: a USB drive, another disk, or `smb://` storage.
 
-- **Deduplicated** across files, snapshots and machines: a photo backed up from the phone and from the laptop is stored once. Data is split into fixed 4 MiB chunks, so in-place edits of large files are deduplicated too.
-- **Incremental**: files whose size and time match the previous snapshot are not re-read.
+- **Deduplicated** across files, snapshots and machines: a photo backed up from the phone and from the laptop is stored once. Data is split into fixed 4 MiB chunks by default, so in-place edits of large files are deduplicated too. `backup init --chunker cdc` (needs `pip install "duplio[cdc]"`) cuts chunks where the content says instead, so data *inserted* into a big file (a database, a disk image, a document that grows at the top) is shared as well; it is slower, see [docs/DESIGN-NOTES.md](docs/DESIGN-NOTES.md).
+- **Incremental**: files whose size, times and inode match the previous snapshot are not re-read.
 - **Compressed** with zlib, except formats that are already compressed (JPEG, video, archives…).
 - **Self-verifying**: every chunk is re-hashed whenever it is read. `backup check --read-data [--subset 0.1]` detects bit rot.
 - **Crash-safe**: a snapshot only exists once all its data is durable.
-- **Retention**: `forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 [--keep-within 14d] --apply --prune`. Forget is a dry run until you pass `--apply`. An empty policy is refused, and the newest snapshot of each series is always kept.
+- **Retention**: `forget --keep-daily 7 --keep-weekly 4 --keep-monthly 12 [--keep-within 14d] --apply --prune`. Forget is a dry run until you pass `--apply`. An empty policy is refused, and the newest snapshot of each series is always kept, together with the newest one without problems.
+- **Pruning is cautious.** What is in use is read from every snapshot's file list, and a missing or unreadable one stops the run. Unused data goes to the repository's `trash/` and is deleted by a later `backup prune` once it has sat there for a day (`--grace`); data written in the last day is never touched (`--min-age`). `backup trash list/restore/purge` manages the trash, `backup repair` rebuilds a lost snapshot summary from its file list, and `backup prune --immediate` frees space at once without any of this protection.
+- **Locks are leases.** A running backup refreshes its lock every minute; another machine treats it as abandoned only after twenty minutes, judged by the share's own clock. A backup that finds its lock taken over (or cannot confirm it) stops before publishing anything.
 - **Restore** a whole snapshot or `--include` globs. Restore never overwrites a different existing file unless you ask; `--conflict rename` writes the restored file next to it.
 - **Portable**: BLAKE2b ids come from the standard library, so restoring never depends on optional packages.
+
+#### Files that change while they are backed up
+
+Duplio looks at each file before and after reading it (size, modification time, change time, inode) and reads it again if
+it moved. A file that never holds still (a log being appended, a database in use) is stored as read but **flagged**: the
+run lists it and exits with status 1, the snapshot counts it as a problem in `backup snapshots` and in retention, `restore`
+warns that the file may be internally inconsistent, and the next run reads it again. A set of files that belong together (a database and its log, a VM
+disk) cannot be made consistent by any tool that copies it while it is running. Back it up from a file-system snapshot
+instead (LVM, ZFS, btrfs, APFS, VSS) with a profile's `pre` and `post` commands:
+
+```toml
+[profiles.home]
+type = "backup"
+source = "/tank/home/.zfs/snapshot/duplio"       # the frozen copy, not the live folder
+repo = "smb://me@nas/backup"
+pre  = ["zfs snapshot tank/home@duplio"]
+post = ["zfs destroy tank/home@duplio"]
+```
 
 ```bash
 duplio backup init /mnt/usb/duplio
@@ -584,7 +628,7 @@ of file; `--newer-than 30d` and `--older-than 1y` limit all but sync by age. The
 | Safety net | `undo`, `history`, `quarantine list/purge`, `recover`, `sessions` |
 | Two folders | `diff`, `merge`, `sync` |
 | Network drives | `probe`, `sentinel create/check`; `--bwlimit`, `--expect-mounted`, `--sentinel` on every command that writes |
-| Backups | `backup init/run/snapshots/ls/restore/check/forget/prune/diff/stats/unlock/find/history/export/passwd`, `snapshot create/list/forget`, `mirror`, `ingest` |
+| Backups | `backup init/run/snapshots/ls/restore/check/forget/prune/trash/repair/diff/stats/unlock/find/history/export/passwd`, `snapshot create/list/forget`, `mirror`, `ingest` |
 | Integrity | `manifest create/verify`, `versions list/prune` |
 | Automation | `profile list/add/remove`, `run`, `schedule`, `notify`, `watch` |
 | Setup | `ui`, `devices`, `doctor`, `rules`, `config [init]`, `cache stats/clear/prune` |
@@ -617,9 +661,10 @@ src/duplio/
   hashing/      algorithm registry, streaming & sampled hashing, SQLite digest cache
   scan/         filters (exclude / include / protect), roots, inventory, overlap detection
   compare/      staged engine, device-aware scheduler, similar images, result model, sessions, folder diff
-  plan/         keep rules, planner + invariants, plan files, journal, executor, undo/quarantine
-  backup/       snapshot repository (+ encryption), retention, mirror, phone ingest, media dates,
-                merge, sync (+ history), hard-link snapshots, manifests, version housekeeping
+  plan/         keep rules, planner + invariants, plan files, journal, executor, undo/quarantine, crash reconciliation
+  backup/       snapshot repository (+ encryption, chunkers, leased locks, garbage collection and trash),
+                retention, mirror, phone ingest, media dates, merge, sync (+ history), hard-link snapshots,
+                manifests, version housekeeping
   devices/      phone / share / drive discovery
   reporting/    JSON / CSV / HTML exports
   cli/          click commands and Rich rendering
@@ -627,6 +672,8 @@ src/duplio/
   transfer.py   the single verified-copy primitive (retry + bandwidth limit)
   notify.py     webhook / command / e-mail notifications
   watch.py      polling change detection
+  util/faults.py crash and error injection points used by the crash sweeps
+benchmarks/     scale.py: time and memory on a large synthetic tree
   config.py     TOML settings and profiles
   schedule.py   systemd / launchd / Task Scheduler / cron generation
 ```
@@ -638,7 +685,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the parts fit together 
 
 ```bash
 pip install -e ".[all,dev]"
-pytest              # 440+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, merge, sync, CLI, TUI
+pytest              # 570+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, merge, sync, CLI, TUI, crash sweeps
+DUPLIO_SWEEP=full pytest tests/test_crash_sweep.py   # kill every operation at every durable step (the release gate)
+python benchmarks/scale.py --files 300000 --dir /big/disk   # time and memory on a large tree
 ruff check src tests && mypy src
 ```
 

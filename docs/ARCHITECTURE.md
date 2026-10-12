@@ -72,7 +72,8 @@ disk each get the right profile automatically.
 
 - `vfs/guards.py`: checks run before anything is written to a destination: a really mounted file system (not the empty mount point), a sentinel marker file, a hung server (the probe runs in a daemon thread with a timeout), and free space with a reserve.
 - `vfs/retry.py` and `transfer.copy_verified`: transient errors (stale handle, dropped session, timeout) are retried with backoff and `Backend.recover()` (SMB drops its connection cache); each retry restarts the file, so partial copies are never kept.
-- `backup/lockfile.py`: the lock file used by repositories and snapshot folders (exclusive create, owner pid/host/time, reclaimed only when the owner is provably gone).
+- `backup/lockfile.py`: the lock used by repositories and snapshot folders, held as a lease: exclusive create with an owner token, a heartbeat that rewrites it every minute, staleness judged by the share's own clock, `Lease.check()` while working and `Lease.verify()` right before an irreversible step (a lost lease raises `LockLostError`), and a stale lock is renamed away and checked rather than deleted.
+- `util/faults.py`: crash and error injection points. Durable steps call `crashpoint(name)`; a test can kill the process or raise `EIO` at the n-th one. Free when unused.
 - `util/throttle.py`: one token bucket shared by all workers (copies, read-back verification, repository uploads).
 - `util/names.py`: Windows/SMB/exFAT name rules (illegal characters, trailing dots, reserved names, 255-unit limit) as `rel_issues` / `fix_rel`; `Capabilities.windows_names` says when they apply.
 - `util/timecmp.py`: modification-time equality within the coarser drive's resolution, plus the single exact one-hour DST offset.
@@ -119,11 +120,14 @@ moves. `merge` and `sync` are built on it.
 - `planner.py`: turns groups into `PlanItem`s. It applies the hard constraints first (reference, protected, read-only, capability), then the rules or the user's own choices, then runs an independent invariant check.
 - `model.py`: `Plan` / `PlanItem` / `FileRef`, versioned JSON.
 - `executor.py`: the last-moment verification and action protocol (see `docs/SAFETY.md`), with a write-ahead `journal.py`.
-- `undo.py`: reverses journals, lists and purges quarantines, and inspects interrupted operations.
+- `undo.py`: reverses journals and lists and purges quarantines.
+- `reconcile.py`: settles operations that a crash left without an outcome, from the files their journal intent names (finished, not started, or rolled back by a rename); `record_failure` journals an error as done when the change had in fact taken effect.
 
 ## Backups: `duplio.backup`
 
-- `repository.py`: a content-addressed chunk store on any backend, with a snapshot/tree split for cheap listing, a lock file, check, prune, diff and restore.
+- `repository.py`: a content-addressed chunk store on any backend, with a snapshot/tree split for cheap listing (every file list embeds a copy of its summary), a leased lock, check, repair, diff and restore.
+- `repo_gc.py`: pruning. References are read from every file list; unused data goes to `trash/` and is deleted by a later run; data younger than a safety margin is never touched.
+- `chunker.py`: fixed blocks, or keyed FastCDC-style content-defined chunks (numpy, optional), chosen per repository.
 - `retention.py`: restic-style keep policies with extra safety rules.
 - `mirror.py`: a plan/run split, so the mass-change brake and previews work.
 - `ingest.py` and `media.py`: phone import with a local SQLite ledger.

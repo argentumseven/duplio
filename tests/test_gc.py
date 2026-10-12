@@ -252,3 +252,17 @@ def test_a_file_list_made_before_summaries_were_embedded_can_still_be_adopted(re
     assert repo.repair() == [first.id]
     recovered = {s.id: s for s in repo.snapshots()}[first.id]
     assert "recovered" in recovered.tags and recovered.files == 1
+
+
+def test_stats_show_what_is_waiting_in_the_trash(registry: BackendRegistry, tmp_path: Path) -> None:
+    repo = make(registry, tmp_path)
+    first, _ = two_snapshots(registry, tmp_path, repo)
+    with repo.lock("forget"):
+        repo.delete_snapshot(first.id)
+    age_everything(tmp_path / "repo")
+    before = repo.stats()
+    assert before["trash_bytes"] == 0
+    report = repo.prune(min_age_s=0)
+    after = repo.stats()
+    assert after["trash_bytes"] == report.bytes > 0
+    assert after["stored_bytes"] == before["stored_bytes"] - report.bytes

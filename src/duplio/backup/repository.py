@@ -1069,6 +1069,7 @@ class Repository:
             "objects": len(index),
             "stored_bytes": total,
             "logical_bytes": sum(s.bytes for s in snaps),
+            "trash_bytes": sum(batch.bytes for batch in trash_batches(self)),
         }
 
 

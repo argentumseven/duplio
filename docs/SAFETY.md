@@ -47,13 +47,15 @@ code that enforces it and the test that proves it.
 | A file changed after the scan is skipped | `Executor._process_inner` | `test_changed_victim_is_skipped` |
 | A content change hidden behind an unchanged size and time is caught | fresh re-hash | `test_same_size_same_mtime_content_change_is_caught` |
 | A changed or missing kept copy blocks its group | `_verify_content` | `test_changed_keeper_blocks_group`, `test_missing_keeper_blocks_group` |
+| A kept copy is checked again for every irreversible step (delete, link); for undoable steps an earlier check is reused only while the file's size, times and identity are unchanged | `Executor._keeper_verified` | `test_a_kept_copy_that_changes_during_the_run_stops_later_removals`, `test_an_unchanged_kept_copy_is_hashed_once_for_reversible_steps_and_every_time_for_deletes` |
 | Two names for one file are never acted on | `same_file` and the post-action keeper check | `test_alias_paths_are_never_both_acted_on` |
 | Permanent deletion needs explicit confirmation everywhere | `Executor.run`, CLI `--i-understand`, TUI typed `DELETE` | `test_delete_requires_confirmation`, `test_delete_needs_explicit_acknowledgement`, `test_delete_needs_typed_confirmation` |
 | A dry run changes nothing and writes no journal | `ApplyOptions.dry_run` | `test_dry_run_changes_nothing` |
 | Renames never overwrite | `vfs/local.py::rename_noreplace` (`renameat2`) | `test_rename_noreplace_never_clobbers` |
 | Writes are atomic: a failure leaves nothing behind | `LocalBackend.open_write`, `SMBBackend.open_write` | `test_open_write_is_atomic_and_no_clobber`, `test_smb_write_semantics` |
 | Storage that cannot rename gets copy → verify → delete | `Executor._quarantine` fallback | `test_quarantine_fallback_when_rename_impossible` |
-| Every change is journaled before it happens; crashes are diagnosable | `plan/journal.py`, `undo.inspect_incomplete` | `test_interrupted_operation_is_detected` |
+| Every change is journaled before it happens, with the names of the files it will create; a crash is settled from the facts on disk (`duplio recover`), and `undo` does so first | `plan/journal.py`, `plan/reconcile.py` | `test_interrupted_operation_is_detected`, `test_recover_settles_a_quarantine_that_happened_but_was_never_recorded`, `test_recover_puts_back_a_file_that_a_delete_had_set_aside`, `test_a_torn_last_line_does_not_swallow_the_records_written_after_it` |
+| An error that arrives after a change took effect is journaled as done, not failed, so `undo` still reverses it | `reconcile.record_failure` | the `error` sweeps below |
 | Quarantine, hard links and clones can be undone, with metadata restored | `plan/undo.py` | `test_quarantine_apply_and_undo`, `test_hardlink_apply_and_undo` |
 
 ## Backups protect, never destroy
@@ -63,11 +65,11 @@ code that enforces it and the test that proves it.
 | Snapshots appear only after their data is durable | `Repository._write_snapshot` ordering | `test_backup_restore_roundtrip` |
 | Corruption is detected and never restored silently | `Repository.get` re-hash | `test_check_detects_corruption_and_missing` |
 | Restore never overwrites a different file unless asked | `Repository.restore(conflict=…)` | `test_restore_conflicts` |
-| Concurrent writers are locked out; stale locks are reclaimed | `Repository.lock` | `test_lock_blocks_concurrent_writers` |
+| Concurrent writers are locked out; a lock is a lease (see below) | `Repository.lock` | `test_lock_blocks_concurrent_writers` |
 | A retention policy cannot delete everything; the newest snapshot is always kept | `retention.apply_policy` | `test_retention_keeps_newest_and_refuses_empty` |
 | A mirror never deletes: replaced and removed files go to versions | `run_mirror` | `test_mirror_archives_instead_of_deleting` |
 | A mirror stops when the source looks empty (locked phone) or most of the destination would change | `plan_mirror` brake | `test_mirror_brake_on_empty_or_massive_change` |
-| A phone import frees space only for files verified in the library during the same run | `ingest._free_source` | `test_ingest_never_frees_files_only_known_from_ledger` |
+| A phone import frees space only for files verified in the library during the same run, and reads the library copy again right before each deletion | `ingest._free_source` | `test_ingest_never_frees_files_only_known_from_ledger`, `test_ingest_rechecks_the_library_copy_right_before_deleting_the_original` |
 
 ## Network drives are checked before they are trusted
 
@@ -139,10 +141,66 @@ code that enforces it and the test that proves it.
 | Guarantee | Where | Test |
 |---|---|---|
 | A file edited within the same timestamp step as the last backup, snapshot, mirror run or sync is compared by content instead of being assumed unchanged | `util/timecmp.py::is_racy` in `Repository.backup`, `SnapshotSet.create`, `plan_mirror`, `plan_sync` | `test_backup_reads_again_a_file_edited_in_the_same_timestamp_step`, `test_snapshot_copies_a_file_edited_in_the_same_timestamp_step`, `test_mirror_compares_recent_files_by_content`, `test_sync_compares_by_content_a_file_edited_in_the_same_timestamp_step` |
-| For long-settled files, content checks are available on request (`--rehash`, `--checksum`, `--verify-links`) | | `test_backup_trusts_old_files_and_rehash_distrusts_them`, `test_mirror_checksum_is_the_answer_for_old_files`, `test_snapshot_verify_links_catches_edits_that_kept_size_and_time` |
-| The limit is stated and tested, not hidden: sync cannot see a silent edit of a settled file | | `test_sync_cannot_see_a_silent_edit_of_a_long_settled_file` |
+| An edit that put the old size and modification time back is noticed through the change time (which users cannot set) and the inode, in backups and in sync; `--ignore-ctime` opts out | `Repository.backup`, `sync.plan_sync` (`doubtful`) | `test_backup_notices_an_edit_that_put_the_old_modification_time_back`, `test_a_file_replaced_by_another_with_the_same_size_and_time_is_noticed`, `test_an_edit_that_put_the_old_modification_time_back_is_still_synced`, `test_sync_sees_a_silent_edit_of_a_long_settled_file_through_its_change_time` |
+| A change of change time alone (chmod) costs a comparison, never a copy | `plan_sync` | `test_a_permission_change_alone_is_checked_and_costs_no_copy` |
+| Both sides edited in place is a conflict, not a coin toss | `plan_sync` | `test_in_place_edits_on_both_sides_are_a_conflict_not_a_coin_toss`, `test_an_edit_on_one_side_and_an_in_place_edit_on_the_other_is_a_conflict` |
+| With the change time set aside, the old limit applies and is stated: size and time are the only clues | | `test_ignoring_the_change_time_leaves_size_and_time_as_the_only_clues`, `test_ignoring_the_change_time_restores_the_old_limit` |
+| For long-settled files, content checks are available on request (`--rehash`, `--checksum`, `--verify-links`) | | `test_mirror_checksum_is_the_answer_for_old_files`, `test_snapshot_verify_links_catches_edits_that_kept_size_and_time` |
 | A modification time in the future never wins a "newer" contest (merge, sync, diff); equal or doubtful times keep both versions | `timecmp.trusted_newer` | `test_a_time_in_the_future_never_wins_a_newer_contest`, `test_racy_and_future_rules` |
-| An older sync-history format is dropped (first run: nothing is deleted), never misread | `syncstate.py` | `test_an_older_sync_history_is_dropped_not_misread` |
+| An unknown sync-history format is dropped (first run: nothing is deleted), never misread; the previous one is upgraded in place | `syncstate.py` | `test_an_older_sync_history_is_dropped_not_misread`, `test_history_from_before_change_times_were_recorded_is_kept` |
+
+## Repository garbage collection
+
+`backup prune` decides what is unused. A mistake there loses backups silently, so it is the most guarded operation in the tool.
+
+| Guarantee | Where | Test |
+|---|---|---|
+| What is in use is read from every snapshot's file list, not from the summaries; a missing or unreadable file list stops the run | `backup/repo_gc.py::prune` | `test_a_deleted_summary_does_not_make_its_data_look_unused`, `test_damage_to_metadata_never_costs_data`, `test_a_flaky_read_of_a_tree_cannot_make_prune_destroy_its_data` |
+| A file list with no summary (lost file, interrupted backup, interrupted forget) keeps its data for a week; `backup repair` rebuilds the summary exactly, because every file list carries a copy of it | `repo_gc`, `Repository.adopt_orphan_trees` | `test_a_young_tree_without_a_summary_is_protected`, `test_an_old_tree_without_a_summary_is_set_aside_not_deleted`, `test_a_file_list_made_before_summaries_were_embedded_can_still_be_adopted` |
+| Data written in the last day is never touched, whatever the locks say (a backup on another machine may still be running) | `prune(min_age_s=…)` | `test_recent_data_is_never_touched` |
+| Unused data goes to `trash/` first and is deleted only by a later run after a grace period (default 1 day); `backup trash restore` undoes a run, and `backup check` points at the trash when chunks are missing | `repo_gc` | `test_prune_sets_data_aside_and_a_later_run_deletes_it`, `test_check_points_at_the_trash_when_chunks_are_missing`, `test_trash_purge_deletes_for_good`, `test_dry_run_changes_nothing` |
+| Damaged file lists (truncated, flipped, wrong shape) are reported as repository errors, never as crashes or as empty lists | `Repository._read_tree` | `test_damage_to_metadata_never_costs_data` |
+
+## Locks are leases
+
+| Guarantee | Where | Test |
+|---|---|---|
+| The owner refreshes its lock every minute; others treat it as abandoned only after 20 minutes without a refresh | `backup/lockfile.py` | `test_the_owner_keeps_refreshing_the_lock`, `test_a_lock_that_is_still_being_refreshed_is_respected`, `test_a_lock_nobody_refreshes_is_taken_over` |
+| Staleness is judged by the share's own clock (file age against a probe file written on the same share), never by the time written inside the file or by the local clock | `lockfile.lock_age_s` | `test_staleness_follows_the_file_not_the_clock_written_inside_it`, `test_a_lock_in_the_future_is_not_stale` |
+| An owner that lost its lock stops before changing anything more; a machine that slept re-confirms the lock instead of assuming it | `Lease.check` / `verify`, called while working and right before publishing, pruning and removing | `test_a_lock_taken_over_is_noticed_by_its_former_owner`, `test_a_vanished_lock_file_counts_as_lost`, `test_a_process_that_slept_reconfirms_the_lock_instead_of_assuming_it`, `test_a_backup_that_lost_its_lock_publishes_nothing`, `test_prune_stops_before_moving_anything_when_its_lock_was_lost` |
+| Breaking a stale lock moves it aside and puts back a live lock if that is what moved; an owner never removes a lock that is no longer its own | `lockfile._break_stale`, `Lease.release` | `test_breaking_a_stale_lock_never_removes_a_live_one` |
+
+## Files that change while they are backed up
+
+| Guarantee | Where | Test |
+|---|---|---|
+| A file is looked at before and after it is read (size, modification time, change time, inode) and read again if it moved; reads never go past the size first seen | `Repository._store_file` | `test_a_file_that_settles_is_read_again_and_stored_cleanly` |
+| One that never holds still is stored as read but flagged: the run exits non-zero and names it, the snapshot counts it as a problem, restore warns, and the next run reads it again | `TreeEntry.unstable`, `SnapshotMeta.unstable` | `test_a_file_that_never_holds_still_is_flagged_everywhere`, `test_the_command_exits_non_zero_and_names_the_files`, `test_an_unstable_file_is_never_trusted_as_unchanged_next_time` |
+| Retention does not count such a snapshot as the good one | `retention.apply_policy` | `test_retention_does_not_count_an_unstable_snapshot_as_the_good_one` |
+| Hard-link snapshots flag the same way | `SnapshotSet.create` | `test_hard_link_snapshot_flags_a_file_that_changed_while_copied` |
+
+## Interrupted anywhere
+
+`tests/test_crash_sweep.py` runs each operation once to find every durable step it takes (journal records, writes, renames,
+removals, state commits: `util/faults.py::crashpoint`) and then once per step in a forked process that is **killed at that
+step** (`os._exit`, no cleanup) or **made to fail with an I/O error** there, which also models "it worked but the answer
+was lost". After every interruption the invariants are checked on what is on disk, and the program has to recover. This
+checks every place a run can stop, not the few somebody thought of (the method of ALICE and CrashMonkey for storage systems).
+
+| Operation | Invariant after any interruption | After a rerun / `undo` | Test |
+|---|---|---|---|
+| dedupe: quarantine, delete, hard-link | every distinct content is still held somewhere; nothing torn under a final name | each content has one live copy / every file is back | `test_dedupe_never_loses_content_and_a_rerun_finishes`, `test_undo_after_an_interruption_restores_every_file` |
+| merge: copy, replace, move | every content from both folders is still held | everything from A is in B / both folders as they were | `test_merge_never_loses_content_and_a_rerun_finishes`, `test_undo_after_an_interrupted_merge_restores_both_folders` |
+| sync | nothing lost, nothing torn | A and B identical, and a further run has nothing to do / both as they were | `test_sync_never_loses_content_and_a_rerun_converges`, `test_undo_after_an_interrupted_sync_restores_both_folders` |
+| backup | the repository checks out; the earlier snapshot restores exactly; a visible snapshot is complete or says it is not | a new backup works, pruning afterwards harms nothing | `test_backup_interrupted_anywhere_leaves_a_sound_repository` |
+| forget + prune | the other snapshots restore exactly | prune completes | `test_forget_and_prune_interrupted_anywhere_keeps_the_other_snapshots` |
+| hard-link snapshot | the first snapshot is untouched; no partial snapshot is listed as clean | a new one completes; forgetting one harms no other | `test_hard_link_snapshots_interrupted_anywhere_never_show_a_partial_snapshot` |
+| phone import with `--free-source` | every photo is on the phone or in the library | all imported, phone freed | `test_ingest_that_frees_the_source_never_loses_a_photo` |
+| mirror | nothing lost, nothing torn | destination equals source | `test_mirror_interrupted_anywhere_loses_nothing_and_a_rerun_converges` |
+
+The default run tries every third step to keep the suite short; **`DUPLIO_SWEEP=full pytest tests/test_crash_sweep.py` tries
+every step and is the gate before a release.** Errors in `fsync` are not simulated, and neither is the order in which a file
+system persists unsynchronised writes after a power cut (the sweeps kill the process, not the machine).
 
 ## Notifications cannot hurt a job
 
@@ -156,15 +214,20 @@ reach commands through environment variables, never through the shell command li
 - **Backups store file contents, modification time and permission bits only.** Symbolic links, empty directories, ownership, extended attributes, ACLs, macOS resource forks and NTFS alternate data streams are not stored. Quarantine moves (renames) keep everything, but the copy-based fallback used on MTP does not.
 - Detection is exact. Similar-but-not-identical files are only found for images (`--similar-images`); duplicate *folders*, truncated copies and paired files (RAW+JPEG, Live Photos, sidecars) are not recognised.
 - Symbolic links are skipped when scanning, so a link is never "deduplicated" and never followed out of a root.
-- Hidden temporary files left by a killed process (`.<name>.duplio-tmp-…`) are ignored by scans but are not cleaned up automatically, except inside backup repositories by `backup prune`.
+- Hidden temporary files left by a killed process (`.<name>.duplio-tmp-…`, `.duplio-del-…`, `.duplio-link-…`) are ignored by scans. `duplio recover` removes or puts back the ones a journal names; inside backup repositories `backup prune` removes old ones.
 - On Windows, paths longer than 260 characters and reserved device names depend on the OS configuration; Duplio reports the resulting error for the affected file and carries on.
 - Hard links and clones share or replace storage. After a hard link, editing one name edits the other; reflinks do not have this problem. `duplio undo` turns them back into independent files.
 - The system trash cannot be restored programmatically; Duplio tells you where the files went.
 - A share mounted locally *and* opened as `smb://` at the same time cannot be recognised as the same storage in advance. The executor's post-action keeper check catches it and rolls the change back.
 - **A lost repository password cannot be recovered.** Encryption protects contents and names; it does not hide how many objects there are, their sizes or their timestamps. `duplio-repo.json` itself is not authenticated: a changed configuration is refused when it contradicts the stored data or its own markers, but on a repository that holds no data yet nothing can reveal that its key block was removed. Changing the password re-wraps the master key and does not rotate it, so a saved copy of the old configuration still opens with the old password.
-- Incremental backup, the default mirror, snapshot hard-link reuse and sync change detection trust size, modification time (within what the drive can store) and, for snapshots, permission bits, except for files modified around the time they were recorded (the racy-timestamp rule). A long-settled file edited without changing size or time is not noticed by them; `--rehash`, `--checksum`, `--verify-links`, `duplio manifest verify` and `backup check --read-data` are the ways to look.
+- Incremental backup, the default mirror, snapshot hard-link reuse and sync change detection trust size, modification time (within what the drive can store) and, for snapshots, permission bits, except for files modified around the time they were recorded (the racy-timestamp rule). Backups and sync also compare the change time and inode where the file system keeps them reliably (local POSIX file systems; not SMB, MTP or most network mounts), which catches an edit that restored the old modification time. Where those are unavailable, or with `--ignore-ctime`, a long-settled file edited without changing size or time is not noticed; `--rehash`, `--checksum`, `--verify-links`, `duplio manifest verify` and `backup check --read-data` are the ways to look.
 - The first sync with the default `time-size` basis treats same-size, same-time files as identical without reading them; `--basis content` reads them.
 - `merge`, `sync` and `snapshot` copy file contents and modification times only, with the same limits as backups (no symbolic links, ownership, extended attributes or empty folders). Hard-link snapshots keep permission bits.
 - `sync` does not detect renames: a renamed file is a deletion plus a new file (the content is copied again; nothing is lost). It also cannot pair names that differ only by case or Unicode form on a drive that distinguishes them; those are left alone and reported.
 - `merge --move` and `--clean-source` re-read and re-hash both copies before removing a source file, so a move reads each file about three times.
 - `watch` polls; a change that is made and reverted within one interval is not seen.
+- **A file system or database in use is not a consistent source.** Duplio detects a file that changes while it is read and flags it, but cannot make a set of files that belong together (a database and its log, a virtual-machine disk) consistent. Back those up from a file-system snapshot (LVM, ZFS, btrfs, APFS, VSS) using a `pre` and `post` hook in a profile.
+- Backup repositories hold set-aside data for a day (`backup prune --grace`), so space returns after the grace period; `--immediate` frees it at once and removes the safety margin.
+- A lock is a lease judged by the share's clock. A machine suspended longer than the lease may find its lock taken over; it then stops and the next run starts cleanly. Servers that do not set file times on writes (rare) make the lease fall back to the local clock.
+- Content-defined chunking (`backup init --chunker cdc`) is slower than fixed blocks (tens of MB/s per core) and needs numpy; it is opt-in, recorded in the repository, and restoring never needs numpy.
+- The crash sweeps cover the steps Duplio itself takes. They do not model a file system that reorders unsynchronised writes after a power cut, a disk that lies about `fsync`, or bit rot (the last is what `check --read-data` is for).
