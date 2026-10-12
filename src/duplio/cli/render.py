@@ -11,6 +11,7 @@ from rich.table import Table
 from rich.text import Text
 
 from duplio import __version__
+from duplio.assets.logo import logo_text
 from duplio.compare.model import Confidence, Mode, ScanResult
 from duplio.plan.executor import ApplyReport
 from duplio.plan.model import ACTION_HELP, ActionType, Plan
@@ -18,24 +19,17 @@ from duplio.plan.planner import decide
 from duplio.plan.rules import parse_rules
 from duplio.plan.undo import UndoReport
 from duplio.util.fmt import format_ns, human_duration, human_size, plural
+from duplio.util.text import printable
 
 ACCENT = "red3"
 
-BANNER = r"""
-   ▄▄▄▄     ▄▄▄▄
-  █ ●  █▌ ▐█  ● █    D U P L I O
-  █  ▀ █▌░▐█ ▀  █    one of them is a copy
-   ▀██▀ ▓░░▓ ▀██▀
-   ▄██▄▓▒░░▒▓▄██▄
-"""
-
-
 def t(value: object, style: str | None = None) -> Text:
-    return Text(str(value), style=style or "")
+    """Text for any value; file names are made safe to display."""
+    return Text(printable(str(value)), style=style or "")
 
 
 def banner(console: Console) -> None:
-    console.print(Text(BANNER.strip("\n"), style=ACCENT))
+    console.print(logo_text())
 
 
 def root_label(result: ScanResult, index: int) -> str:
@@ -133,7 +127,7 @@ def groups_table(console: Console, result: ScanResult, *, top: int, rules: Seque
             else:
                 lines.append("✗ ", style=ACCENT)
             lines.append(f"{m.root + 1}:", style="dim")
-            lines.append(m.rel)
+            lines.append(printable(m.rel))
             aliases = group.aliases.get(m.id)
             if aliases:
                 lines.append(f"  (+{len(aliases)} hard link{'s' if len(aliases) > 1 else ''})", style="dim")
@@ -171,7 +165,7 @@ def similar_table(console: Console, result: ScanResult, *, top: int) -> None:
                 lines.append("\n")
             lines.append("◆ " if i == 0 else "  ", style="yellow")
             lines.append(f"{m.root + 1}:", style="dim")
-            lines.append(m.rel)
+            lines.append(printable(m.rel))
             lines.append(f"  d={dist} · {dim[0]}×{dim[1]} · {human_size(m.size)}", style="dim")
         table.add_row(f"S{g.id}", lines)
     console.print(table)

@@ -30,6 +30,7 @@ from duplio.hashing.core import hash_file
 from duplio.scan.filters import ScanFilter
 from duplio.transfer import copy_verified
 from duplio.util.fmt import parse_duration, utc_stamp
+from duplio.util.text import name_key, printable
 from duplio.vfs.base import RawEntry, WalkStats
 from duplio.vfs.location import Location
 
@@ -55,6 +56,7 @@ class MirrorAction:
     size: int
     reason: str = ""
     from_rel: str | None = None  # for moves
+    dest_rel: str | None = None  # the existing destination file this action replaces (may be spelled differently)
 
 
 @dataclass
@@ -88,7 +90,7 @@ class MirrorReport:
 
 
 def _key(rel: str, fold: bool) -> str:
-    return rel.casefold() if fold else rel
+    return name_key(rel, fold=fold)
 
 
 def plan_mirror(
@@ -120,12 +122,38 @@ def plan_mirror(
     fold = source.caps.case_insensitive or dest.caps.case_insensitive
     src_stats, dst_stats = WalkStats(), WalkStats()
     for raw in sb.walk(source.path, walk_filter=scan_filter, stats=src_stats, should_stop=lambda: cancel.cancelled):
-        plan._src[_key(raw.rel, fold)] = raw
+        plan._src[raw.rel] = raw
     if db.stat(dest.path) is not None:
         for raw in db.walk(dest.path, walk_filter=scan_filter, stats=dst_stats, should_stop=lambda: cancel.cancelled):
-            plan._dst[_key(raw.rel, fold)] = raw
+            plan._dst[raw.rel] = raw
     cancel.check()
     plan.source_files, plan.dest_files = len(plan._src), len(plan._dst)
+
+    # Names are matched exactly first. Only when a source name has no exact twin is a destination
+    # file with the *same name in another spelling* (NFC/NFD accents, and case on case-insensitive
+    # storage) accepted as its counterpart. Two source files that merely collide on that looser key
+    # (legal on Linux) are therefore never merged, and no source file can silently disappear.
+    dst_by_key: dict[str, list[RawEntry]] = defaultdict(list)
+    for existing in plan._dst.values():
+        dst_by_key[_key(existing.rel, fold)].append(existing)
+    claimed: set[str] = set()
+    src_keys: dict[str, str] = {}
+    for rel in sorted(plan._src):
+        other = src_keys.setdefault(_key(rel, fold), rel)
+        if other != rel and fold:
+            plan.warnings.append(
+                f"'{printable(other)}' and '{printable(rel)}' differ only by case or Unicode form, "
+                "which this destination cannot store separately; only one of them can be copied"
+            )
+
+    def counterpart(s: RawEntry) -> RawEntry | None:
+        exact = plan._dst.get(s.rel)
+        if exact is not None:
+            return exact
+        for cand in dst_by_key.get(_key(s.rel, fold), ()):
+            if cand.rel not in plan._src and cand.rel not in claimed:  # never take a name another source file owns
+                return cand
+        return None
     for path, err in src_stats.errors[:20]:
         plan.warnings.append(f"source: {path}: {err}")
     if src_stats.errors:
@@ -148,25 +176,27 @@ def plan_mirror(
 
     progress.stage("Comparing", total_items=len(plan._src))
     new_files: list[RawEntry] = []
-    for key, s in sorted(plan._src.items()):
+    for _rel, s in sorted(plan._src.items()):
         cancel.check()
-        d = plan._dst.get(key)
+        d = counterpart(s)
+        if d is not None:
+            claimed.add(d.rel)
         if d is None:
             new_files.append(s)
         elif s.size != d.size:
-            plan.actions.append(MirrorAction("update", s.rel, s.size, "size differs"))
+            plan.actions.append(MirrorAction("update", s.rel, s.size, "size differs", dest_rel=d.rel))
         elif options.checksum:
             if digest(source, s) == digest(dest, d):
                 plan.unchanged += 1
             else:
-                plan.actions.append(MirrorAction("update", s.rel, s.size, "content differs"))
+                plan.actions.append(MirrorAction("update", s.rel, s.size, "content differs", dest_rel=d.rel))
         elif abs(s.mtime_ns - d.mtime_ns) <= tolerance:
             plan.unchanged += 1
         else:
-            plan.actions.append(MirrorAction("update", s.rel, s.size, "modified time differs"))
+            plan.actions.append(MirrorAction("update", s.rel, s.size, "modified time differs", dest_rel=d.rel))
         progress.advance(items=1)
 
-    extraneous = [d for key, d in plan._dst.items() if key not in plan._src]
+    extraneous = [d for d in plan._dst.values() if d.rel not in claimed]
     moved_from: set[str] = set()
     if options.delete_extraneous and options.detect_moves and new_files and extraneous:
         by_size: dict[int, list[RawEntry]] = defaultdict(list)
@@ -242,19 +272,17 @@ def run_mirror(
             db.remove(src)
         return dst
 
-    fold = plan.source.caps.case_insensitive or plan.dest.caps.case_insensitive
     for action in plan.actions:
         cancel.check()
         try:
-            src_raw = plan._src.get(_key(action.rel, fold))
+            src_raw = plan._src.get(action.rel)
             if action.kind == "copy" and src_raw is not None:
                 copy_verified((sb, src_raw.path), (db, db.join(plan.dest.path, action.rel)), algorithm=algo,
                               expected_size=src_raw.size, mtime_ns=src_raw.mtime_ns, verify=options.verify,
                               cancel=cancel, on_bytes=lambda n: progress.advance(nbytes=n))
                 report.bytes_copied += src_raw.size
             elif action.kind == "update" and src_raw is not None:
-                dst_raw = plan._dst.get(_key(action.rel, fold))
-                target_rel = dst_raw.rel if dst_raw is not None else action.rel
+                target_rel = action.dest_rel or action.rel
                 archived = archive(target_rel)
                 try:
                     copy_verified((sb, src_raw.path), (db, db.join(plan.dest.path, action.rel)), algorithm=algo,

@@ -16,6 +16,7 @@ from textual.widgets import Button, Footer, Header, Label, Static
 from duplio.errors import CancelledError, DuplioError
 from duplio.events import CancelToken
 from duplio.tui.progress import PolledProgress, ProgressPanel
+from duplio.tui.widgets import ptext
 
 JobFn = Callable[[PolledProgress, CancelToken], Any]
 Summarise = Callable[[Any], RenderableType]
@@ -67,10 +68,10 @@ class JobScreen(Screen[Any]):
             self.app.call_from_thread(self._finish, None, Text("Cancelled. Work already finished is kept and journaled.", style="yellow"))
             return
         except DuplioError as exc:
-            self.app.call_from_thread(self._finish, None, Text(f"Stopped: {exc}", style="bold red"))
+            self.app.call_from_thread(self._finish, None, ptext(f"Stopped: {exc}", style="bold red"))
             return
         except Exception as exc:  # unexpected: show it rather than crash the UI
-            self.app.call_from_thread(self._finish, None, Text(f"Unexpected error: {type(exc).__name__}: {exc}", style="bold red"))
+            self.app.call_from_thread(self._finish, None, ptext(f"Unexpected error: {type(exc).__name__}: {exc}", style="bold red"))
             return
         rendered = self.summarise(result) if self.summarise else Text("Finished.", style="green")
         self.app.call_from_thread(self._finish, result, rendered)

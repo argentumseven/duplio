@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sys
 from typing import Any
 
@@ -19,6 +18,7 @@ from duplio.cli.app import (
     run_cancellable,
     scan_options,
 )
+from duplio.cli.console import SafeConsole
 from duplio.cli.context import AppContext
 from duplio.cli.render import (
     apply_summary,
@@ -37,6 +37,7 @@ from duplio.plan.model import ActionType, Plan
 from duplio.plan.planner import build_plan
 from duplio.scan.inventory import RootRole, make_roots, scan
 from duplio.util.fmt import human_size, plural
+from duplio.util.text import fs_bytes, json_dumps
 
 
 def do_scan(app: AppContext, roots: tuple[str, ...], refs: tuple[str, ...], kw: dict[str, Any], *, mode: Mode | None = None) -> ScanResult:
@@ -72,7 +73,7 @@ def _export(app: AppContext, result: ScanResult, path: str | None) -> None:
 
 
 def _print_json(result: ScanResult) -> None:
-    click.echo(json.dumps(result_to_dict(result), ensure_ascii=False, indent=1))
+    click.echo(json_dumps(result_to_dict(result), indent=1))
 
 
 @cli.command("scan")
@@ -195,14 +196,15 @@ def dedupe(locations: tuple[str, ...], refs: tuple[str, ...], action: str | None
               help="Where copies should exist (repeatable). Never modified.")
 @scan_options
 @click.option("--top", type=int, default=25, show_default=True)
-@click.option("--list", "list_all", is_flag=True, help="Print every missing file path (one per line).")
+@click.option("--list", "list_all", is_flag=True, help="Print every missing file path (one per line, raw bytes).")
+@click.option("-0", "--print0", is_flag=True, help="With --list: separate paths with NUL, for 'xargs -0'.")
 @click.option("--copy-missing-to", type=str, default=None, metavar="LOCATION",
               help="Copy the missing files there (verified), keeping their folder structure.")
 @click.option("--export", "export_path", type=click.Path(dir_okay=False))
 @click.option("--json", "as_json", is_flag=True)
 @handle_errors
 def compare(sources: tuple[str, ...], against: tuple[str, ...], refs: tuple[str, ...], top: int, list_all: bool,
-            copy_missing_to: str | None, export_path: str | None, as_json: bool, **kw: Any) -> None:
+            print0: bool, copy_missing_to: str | None, export_path: str | None, as_json: bool, **kw: Any) -> None:
     """What in SOURCES is not anywhere in --against? (Is my phone backed up?)
 
     \b
@@ -212,14 +214,19 @@ def compare(sources: tuple[str, ...], against: tuple[str, ...], refs: tuple[str,
     """
     app = get_app()
     app.json_output = as_json
+    if list_all:  # stdout carries only the paths, so the summary and progress go to stderr
+        app.console = SafeConsole(stderr=True, highlight=False, no_color=app.console.no_color)
     result = do_scan(app, sources, tuple(against) + tuple(refs), kw, mode=Mode.UNIQUE)
     if as_json:
         _print_json(result)
         return
     scan_summary(app.console, result)
     if list_all:
+        sys.stdout.flush()
+        out = sys.stdout.buffer
         for e in result.unique:
-            click.echo(result.inventory.roots[e.root].backend.display(e.path))
+            out.write(fs_bytes(result.inventory.roots[e.root].backend.display(e.path)) + (b"\0" if print0 else b"\n"))
+        out.flush()
     else:
         unique_table(app.console, result, top=top)
     _export(app, result, export_path)

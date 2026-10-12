@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import html
 import io
-import json
 from pathlib import Path
 
 from duplio import __version__
@@ -13,10 +12,11 @@ from duplio.compare.model import ScanResult
 from duplio.compare.session import result_to_dict
 from duplio.util.atomic import atomic_write_text
 from duplio.util.fmt import format_ns, human_size
+from duplio.util.text import json_dumps, printable
 
 
 def to_json(result: ScanResult) -> str:
-    return json.dumps(result_to_dict(result), indent=1, ensure_ascii=False)
+    return json_dumps(result_to_dict(result), indent=1)
 
 
 def to_csv(result: ScanResult) -> str:
@@ -26,15 +26,15 @@ def to_csv(result: ScanResult) -> str:
     roots = result.inventory.roots
     for g in result.groups:
         for m in g.members:
-            writer.writerow([g.id, g.confidence.label, g.size, g.digest or "", roots[m.root].location.uri,
-                             m.path, m.rel, format_ns(m.mtime_ns), m.protected])
+            writer.writerow([g.id, g.confidence.label, g.size, g.digest or "", printable(roots[m.root].location.uri),
+                             printable(m.path), printable(m.rel), format_ns(m.mtime_ns), m.protected])
     for s in result.similar:
         for m, dist in zip(s.members, s.distances, strict=True):
-            writer.writerow([f"S{s.id}", f"similar (distance {dist})", m.size, "", roots[m.root].location.uri,
-                             m.path, m.rel, format_ns(m.mtime_ns), m.protected])
+            writer.writerow([f"S{s.id}", f"similar (distance {dist})", m.size, "", printable(roots[m.root].location.uri),
+                             printable(m.path), printable(m.rel), format_ns(m.mtime_ns), m.protected])
     for u in result.unique:
-        writer.writerow(["", "unique", u.size, "", roots[u.root].location.uri, u.path, u.rel,
-                         format_ns(u.mtime_ns), u.protected])
+        writer.writerow(["", "unique", u.size, "", printable(roots[u.root].location.uri), printable(u.path),
+                         printable(u.rel), format_ns(u.mtime_ns), u.protected])
     return buf.getvalue()
 
 
@@ -57,7 +57,9 @@ th{color:var(--muted);font-weight:500}.tag{display:inline-block;padding:0 6px;bo
 
 def to_html(result: ScanResult, *, max_groups: int = 2000) -> str:
     roots = result.inventory.roots
-    esc = html.escape
+    def esc(text: str) -> str:
+        return html.escape(printable(text))
+
     parts = [
         "<!doctype html><html lang='en'><head><meta charset='utf-8'>",
         "<meta name='viewport' content='width=device-width,initial-scale=1'>",
@@ -110,7 +112,7 @@ def to_html(result: ScanResult, *, max_groups: int = 2000) -> str:
 
 def r_label(roots, index: int) -> str:  # type: ignore[no-untyped-def]
     root = roots[index]
-    return html.escape(f"{index + 1}: {root.label or root.location.display}")
+    return html.escape(printable(f"{index + 1}: {root.label or root.location.display}"))
 
 
 def export(result: ScanResult, path: str | Path) -> Path:

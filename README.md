@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/duplio-icon-256.png" width="160" alt="Duplio icon: a pale figure screaming as its blood-red double tears itself out of its side">
+  <img src="assets/duplio-icon-256.png" width="160" alt="Duplio icon: two faceless grey silhouettes, hunched with legs apart, peeling apart from each other">
 </p>
 
 <h1 align="center">Duplio</h1>
@@ -39,6 +39,7 @@ is read again.
 - [Phones, cameras and network shares](#phones-cameras-and-network-shares)
 - [How duplicates are detected](#how-duplicates-are-detected)
 - [Performance](#performance)
+- [What counts as "the same file"](#what-counts-as-the-same-file)
 - [Choosing which copy to keep](#choosing-which-copy-to-keep)
 - [Actions](#actions)
 - [Safety model](#safety-model)
@@ -194,6 +195,44 @@ cache:
 
 Measure on your own hardware with `duplio doctor`. It benchmarks every available
 hash; BLAKE3 and XXH3 typically run at several GiB/s per core.
+
+## What counts as "the same file"
+
+**Names never decide.** Duplicates are found by content, so `holiday.jpg`,
+`IMG_0042.jpeg` and `backup-of-something.bin` are one group if their bytes are
+identical, and two files called `holiday.jpg` with different bytes are not. The same
+goes for "is my phone backed up?": a photo you renamed on the computer still counts as
+backed up. Names matter in exactly four places:
+
+| Where | How names are used |
+|---|---|
+| keep rules | `not-copy-named`, `prefer-path=…` etc. only choose *which of several proven-identical copies* survives |
+| `--verify quick` | size + name, report-only, compared after Unicode (NFC) normalisation and case folding |
+| `mirror` | files are paired by relative path (exact spelling first; then NFC/case-folded on storage that needs it); with `--delete`, a file that was merely renamed is detected by content and moved, not re-copied |
+| `ingest` | a name that is already taken by *different* content gets ` (2)`, ` (3)`… |
+
+**Odd file names are handled as data, not text.** Real names can be invalid UTF-8
+(old archives, Windows-1252, some phones), contain terminal escape sequences or
+newlines, use bidirectional overrides (a name containing U+202E can make `photo…gnp.exe` display as `photoexe.png`),
+differ only in Unicode form (`é` composed or decomposed, as macOS and some SMB servers
+store it) or be 255 bytes long. Duplio:
+
+- stores every path losslessly (ASCII-escaped JSON, byte-exact SQLite keys), so such
+  files are scanned, planned, quarantined, undone, backed up and restored byte for byte;
+- shows undecodable bytes as `\xe9` and control or bidi characters as visible escapes
+  (`\x1b[2J`, `\u202e`), so a hostile name can neither crash the screen, rewrite your
+  terminal nor spoof another name; only `compare --list [-0]` prints raw bytes, for
+  piping into `xargs`;
+- never merges two different names: `café` (composed) and `café` (decomposed) are two
+  files on Linux and stay two files, and a mirror reports, instead of silently dropping,
+  names that differ only by case when the destination cannot store both;
+- shortens its own temporary names so that even a 255-byte file name can be written.
+
+**Not detected as duplicates (yet):** files that are *similar but not identical* other
+than images (re-encoded video, audio with different tags, documents re-saved by an
+editor), whole duplicate folders, a file that is a truncated prefix of another, and
+related sets such as RAW+JPEG pairs, Live Photos or `.xmp` sidecars (Duplio treats each
+file on its own, so a keep rule can keep one half of a pair from each location).
 
 ## Choosing which copy to keep
 
@@ -365,12 +404,13 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the parts fit together 
 
 ```bash
 pip install -e ".[all,dev]"
-pytest              # 160+ tests: engine, safety, backends (fake ADB/SMB), backups, CLI, TUI
+pytest              # 180+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, CLI, TUI
 ruff check src tests && mypy src
 ```
 
-The icon (`assets/duplio-icon.svg`) shows a pale original screaming as its blood-red
-doppelgänger tears itself out of its side, still tethered by strands of flesh.
+The icon (`assets/duplio-icon.svg`) shows two faceless grey silhouettes, hunched with
+their legs apart, peeling apart from each other. The terminal logo
+(`duplio.assets.logo`) is the same mark sampled into half-block characters.
 
 ## License
 

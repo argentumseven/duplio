@@ -22,8 +22,9 @@ from duplio.plan.journal import list_journals, summarize
 from duplio.plan.undo import UndoReport, purge_quarantine, undo
 from duplio.scan.filters import ScanFilter
 from duplio.tui.job import JobScreen
-from duplio.tui.widgets import ConfirmDialog, location_suggestions, short
+from duplio.tui.widgets import ConfirmDialog, location_suggestions, ptext, short
 from duplio.util.fmt import human_size, plural
+from duplio.util.text import printable
 
 
 class _SuggestMixin:
@@ -78,8 +79,8 @@ class HistoryScreen(Screen[None]):
         for path in list_journals(app.dirs.journals):
             s = summarize(path)
             state = Text("interrupted", style="yellow") if s.incomplete else Text("")
-            table.add_row(Text(s.session), str(s.header.get("created", ""))[:19].replace("T", " "),
-                          Text(str(s.header.get("action", "?"))), str(s.count("done")), str(s.count("skipped")),
+            table.add_row(ptext(s.session), str(s.header.get("created", ""))[:19].replace("T", " "),
+                          ptext(s.header.get("action", "?")), str(s.count("done")), str(s.count("skipped")),
                           str(s.count("failed")), str(s.count("undone")), str(s.count("purged")),
                           human_size(s.reclaimed), state, key=s.session)
             self.ids.append(s.session)
@@ -289,7 +290,7 @@ class BackupScreen(_SuggestMixin, Screen[None]):
         table.clear()
         self.snapshot_ids = []
         for s in reversed(snaps):
-            table.add_row(Text(s.id), s.time[:19].replace("T", " "), Text(s.label), Text(short(s.source, 40)),
+            table.add_row(ptext(s.id), s.time[:19].replace("T", " "), ptext(s.label), Text(short(s.source, 40)),
                           f"{s.files:,}", human_size(s.bytes), human_size(s.new_bytes), key=s.id)
             self.snapshot_ids.append(s.id)
         if not snaps:
@@ -403,11 +404,11 @@ def _mirror_summary(plan: MirrorPlan) -> Text:
                 f"{plan.count('archive'):,} retired · {plan.unchanged:,} unchanged · {human_size(plan.bytes_to_copy)} to copy\n",
                 style="bold")
     for warning in plan.warnings[:10]:
-        text.append(f"{warning}\n", style="yellow")
+        text.append(printable(f"{warning}") + "\n", style="yellow")
     marks = {"copy": "+", "update": "M", "move": "→", "archive": "↓"}
     for action in plan.actions[:60]:
         extra = f"  (from {action.from_rel})" if action.from_rel else ""
-        text.append(f" {marks[action.kind]} {action.rel}{extra}\n", style="dim")
+        text.append(printable(f" {marks[action.kind]} {action.rel}{extra}") + "\n", style="dim")
     if len(plan.actions) > 60:
         text.append(f" … {len(plan.actions) - 60:,} more\n", style="dim")
     return text
@@ -489,7 +490,7 @@ class MirrorScreen(_SuggestMixin, Screen[None]):
             if report.versions_dir:
                 parts.append(Text(f"Previous versions kept in {report.versions_dir}", style="dim"))
             for rel, err in report.errors[:30]:
-                parts.append(Text(f"{rel}: {err}", style="red"))
+                parts.append(ptext(f"{rel}: {err}", style="red"))
             return Group(*parts)
 
         self.app.push_screen(JobScreen("Mirroring", job, summarise=summarise))
@@ -559,9 +560,9 @@ class IngestScreen(_SuggestMixin, Screen[None]):
             if report.freed:
                 text.append(f"\nFreed {human_size(report.freed_bytes)} on the phone ({report.freed:,} files).", style="green")
             for item in [i for i in report.items if i.status == "imported"][:40]:
-                text.append(f"\n + {item.dest_rel}  ({item.date_source})", style="dim")
+                text.append(printable(f"\n + {item.dest_rel}  ({item.date_source})", keep_newlines=True), style="dim")
             for rel, err in report.errors[:30]:
-                text.append(f"\n{rel}: {err}", style="red")
+                text.append(printable(f"\n{rel}: {err}", keep_newlines=True), style="red")
             return text
 
         screen = JobScreen("Import preview" if dry_run else "Importing", job, summarise=summarise)

@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterator
 from typing import IO
 
 from duplio.errors import UnsupportedOperation
+from duplio.util.text import temp_name
 from duplio.vfs.base import (
     Backend,
     Capabilities,
@@ -304,7 +305,7 @@ class LocalBackend(Backend):
             raise FileExistsError(errno.EEXIST, "destination exists", path)
 
         if caps.atomic_rename:
-            tmp = os.path.join(directory, f".{os.path.basename(path)}.duplio-tmp-{secrets.token_hex(4)}")
+            tmp = os.path.join(directory, temp_name(os.path.basename(path), f".duplio-tmp-{secrets.token_hex(4)}"))
             handle = open(tmp, "xb")  # noqa: SIM115
         else:
             # MTP and similar FUSE layers cannot rename reliably: write in place,

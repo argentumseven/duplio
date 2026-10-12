@@ -22,6 +22,7 @@ from typing import Any
 
 from duplio.errors import LockError
 from duplio.util.fmt import iso_now
+from duplio.util.text import json_dumps
 
 JOURNAL_FORMAT = "duplio-journal"
 
@@ -42,7 +43,7 @@ class Journal:
 
     def _write(self, record: dict[str, Any]) -> None:
         record.setdefault("ts", iso_now())
-        self._fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+        self._fh.write(json_dumps(record) + "\n")
         self._fh.flush()
         os.fsync(self._fh.fileno())
 

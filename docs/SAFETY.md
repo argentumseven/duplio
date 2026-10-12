@@ -17,6 +17,19 @@ code that enforces it and the test that proves it.
 | Cached digests never cause an action | the executor always re-reads | `test_same_size_same_mtime_content_change_is_caught` |
 | Recently modified files are not cached | `HashCache.put` racy window | `test_cache_ignores_fresh_files` |
 
+## File names are data, never trusted text
+
+| Guarantee | Where | Test |
+|---|---|---|
+| Names that are not valid UTF-8 are scanned, saved, applied, undone, backed up and restored byte for byte | `util/text.py` (`json_dumps`, `fs_bytes`), `hashing/cache.py` | `test_scan_apply_undo_with_hostile_names`, `test_hash_cache_keys_survive_undecodable_names`, `test_backup_and_restore_keep_exact_names` |
+| A name cannot crash, rewrite or spoof the terminal or TUI | `cli/console.py::SafeConsole`, `printable()`, `tui/widgets.py::ptext`, `DuplioApp.notify` | `test_safe_console_never_emits_control_sequences_from_names`, `test_printable_escapes_only_what_is_unsafe`, `test_tui_survives_hostile_names_and_bracketed_messages` |
+| Different names are never merged; none is silently dropped from a mirror | `backup/mirror.py` (exact match first) | `test_mirror_keeps_source_names_that_differ_only_by_unicode_form`, `test_mirror_reports_case_collisions_on_case_insensitive_destinations`, `test_names_are_never_lost_when_mixed_encodings_collide` |
+| Same name, different Unicode form is recognised as the same file when pairing for a mirror | `util/text.py::name_key` | `test_mirror_does_not_duplicate_nfc_and_nfd_spellings` |
+| Maximum-length names can be written (temp names are shortened) | `util/text.py::temp_name` | `test_copy_of_maximum_length_names` |
+| Content decides, not names | `compare/engine.py` | `test_identical_content_is_matched_whatever_the_names`, `test_phone_backup_check_ignores_renames` |
+| Exports are lossless (JSON) or printable (CSV/HTML) | `reporting/export.py` | `test_exports_are_safe` |
+| `compare --list` output is raw and uncontaminated, so it can feed `xargs -0` | `cli/cmd_scan.py` | `test_compare_list_prints_exact_bytes_and_keeps_stdout_clean` |
+
 ## Plans cannot be unsafe
 
 | Guarantee | Where | Test |
@@ -57,6 +70,11 @@ code that enforces it and the test that proves it.
 
 ## Known limits
 
+- **Backups store file contents, modification time and permission bits only.** Symbolic links, empty directories, ownership, extended attributes, ACLs, macOS resource forks and NTFS alternate data streams are not stored. Quarantine moves (renames) keep everything, but the copy-based fallback used on MTP does not.
+- Detection is exact. Similar-but-not-identical files are only found for images (`--similar-images`); duplicate *folders*, truncated copies and paired files (RAW+JPEG, Live Photos, sidecars) are not recognised.
+- Symbolic links are skipped when scanning, so a link is never "deduplicated" and never followed out of a root.
+- Hidden temporary files left by a killed process (`.<name>.duplio-tmp-…`) are ignored by scans but are not cleaned up automatically, except inside backup repositories by `backup prune`.
+- On Windows, paths longer than 260 characters and reserved device names depend on the OS configuration; Duplio reports the resulting error for the affected file and carries on.
 - Hard links and clones share or replace storage. After a hard link, editing one name edits the other; reflinks do not have this problem. `duplio undo` turns them back into independent files.
 - The system trash cannot be restored programmatically; Duplio tells you where the files went.
 - A share mounted locally *and* opened as `smb://` at the same time cannot be recognised as the same storage in advance. The executor's post-action keeper check catches it and rolls the change back.

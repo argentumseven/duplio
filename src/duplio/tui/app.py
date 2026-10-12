@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Grid, Horizontal, Vertical
@@ -18,6 +18,7 @@ from duplio.config import Settings, load_settings
 from duplio.hashing.cache import HashCache, NullCache
 from duplio.tui.widgets import HelpScreen, Logo, threaded_password_provider
 from duplio.util.appdirs import AppDirs, get_app_dirs
+from duplio.util.text import printable
 from duplio.vfs.location import BackendRegistry
 
 DUPLIO_DARK = Theme(
@@ -94,6 +95,10 @@ class HomeScreen(Screen[None]):
                     classes="muted",
                 )
         yield Footer()
+
+    def on_resize(self, event: events.Resize) -> None:
+        # The mark is 20 rows tall; on short terminals the workflow cards matter more.
+        self.query_one("#logo", Logo).display = event.size.height >= 42
 
     def on_mount(self) -> None:
         table = self.query_one("#devices", DataTable)
@@ -182,6 +187,10 @@ class DuplioApp(App[None]):
         self.register_theme(DUPLIO_LIGHT)
         self.theme = "duplio"
         self.push_screen(HomeScreen())
+
+    def notify(self, message: str, *, markup: bool = False, **kwargs: object) -> None:  # type: ignore[override]
+        """Messages carry file names and OS errors (``[Errno 2]``…): never parse them as markup."""
+        super().notify(printable(message, keep_newlines=True), markup=False, **kwargs)  # type: ignore[arg-type]
 
     def action_help(self) -> None:
         self.push_screen(HelpScreen())

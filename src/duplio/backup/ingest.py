@@ -39,6 +39,7 @@ from duplio.hashing.core import hash_file
 from duplio.scan.filters import MEDIA_EXTENSIONS, ScanFilter, extension
 from duplio.transfer import copy_verified
 from duplio.util.appdirs import AppDirs, get_app_dirs
+from duplio.util.text import fs_bytes, fs_str
 from duplio.vfs.base import RawEntry, WalkStats
 from duplio.vfs.location import Location
 
@@ -101,7 +102,8 @@ class Ledger:
 
     @staticmethod
     def source_key(source_uri: str, rel: str, size: int, mtime_ns: int) -> str:
-        return hashlib.blake2b(f"{source_uri}\0{rel}\0{size}\0{mtime_ns}".encode(), digest_size=16).hexdigest()
+        raw = fs_bytes(f"{source_uri}\0{rel}\0{size}\0{mtime_ns}")
+        return hashlib.blake2b(raw, digest_size=16).hexdigest()
 
     def seen_digest(self, key: str) -> str | None:
         with self._lock:
@@ -111,7 +113,7 @@ class Ledger:
     def imported(self, digest: str) -> str | None:
         with self._lock:
             row = self._db.execute("SELECT dest_rel FROM imported WHERE digest=?", (digest,)).fetchone()
-        return str(row[0]) if row else None
+        return fs_str(row[0]) if row else None
 
     def record(self, key: str, digest: str, size: int, dest_rel: str | None, source: str) -> None:
         now = int(time.time())
@@ -119,7 +121,8 @@ class Ledger:
             self._db.execute("INSERT OR REPLACE INTO seen VALUES (?,?,?)", (key, digest, now))
             if dest_rel is not None:
                 self._db.execute(
-                    "INSERT OR IGNORE INTO imported VALUES (?,?,?,?,?)", (digest, size, dest_rel, source, now)
+                    "INSERT OR IGNORE INTO imported VALUES (?,?,?,?,?)",
+                    (digest, size, fs_bytes(dest_rel), source, now),
                 )
             self._db.commit()
 

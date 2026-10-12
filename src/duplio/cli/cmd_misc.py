@@ -18,7 +18,7 @@ from rich.text import Text
 
 from duplio import __version__
 from duplio.cli.app import cli, get_app, handle_errors
-from duplio.cli.render import banner, t
+from duplio.cli.render import t
 from duplio.config import (
     PROFILE_FIELDS,
     PROFILE_TYPES,
@@ -39,6 +39,9 @@ def ui() -> None:
         from duplio.tui.app import DuplioApp
     except ImportError as exc:
         raise ConfigError("the terminal UI needs Textual: pip install 'duplio[tui]'") from exc
+    from duplio.cli.console import harden_streams
+
+    harden_streams()
     app = get_app()
     app.close()  # the TUI manages its own backends and caches
     DuplioApp(dirs=app.dirs).run()
@@ -79,7 +82,7 @@ def doctor(benchmark: bool) -> None:
     from duplio.vfs.adb import find_adb
 
     app = get_app()
-    banner(app.console)
+    app.console.print(Text(f"Duplio {__version__} — environment check", style="bold"))
     table = Table(box=box.SIMPLE_HEAD)
     table.add_column("Component")
     table.add_column("Status")
@@ -290,7 +293,7 @@ def run(ctx: click.Context, name: str, yes: bool, dry_run: bool) -> None:
                    mode=prof.get("mode"), **_scan_defaults())
     elif kind == "compare":
         ctx.invoke(cmd_scan.compare, sources=(prof["source"],), against=tuple(prof["against"]), refs=(), top=25,
-                   list_all=False, copy_missing_to=None if dry_run else prof.get("copy_missing_to"), export_path=None,
+                   list_all=False, print0=False, copy_missing_to=None if dry_run else prof.get("copy_missing_to"), export_path=None,
                    as_json=False, mode=None, **_scan_defaults())
     elif kind == "backup":
         ctx.invoke(cmd_backup.backup_run, source=prof["source"], repo=prof["repo"], label=prof.get("label", name),

@@ -9,12 +9,13 @@ never a half-written one.
 from __future__ import annotations
 
 import contextlib
-import json
 import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any
+
+from duplio.util.text import json_dumps
 
 
 def fsync_dir(path: str | os.PathLike[str]) -> None:
@@ -65,4 +66,4 @@ def atomic_write_text(path: str | os.PathLike[str], text: str) -> None:
 
 
 def atomic_write_json(path: str | os.PathLike[str], data: Any, *, indent: int | None = 2) -> None:
-    atomic_write_text(path, json.dumps(data, indent=indent, ensure_ascii=False, sort_keys=False) + "\n")
+    atomic_write_text(path, json_dumps(data, indent=indent) + "\n")

@@ -1,99 +1,43 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="t d">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="t d">
   <title id="t">Duplio</title>
-  <desc id="d">A pale figure screams as its blood-red double tears itself out of its side; the two are still joined by stretched strands of flesh across a ragged wound.</desc>
+  <desc id="d">Two faceless grey silhouettes, hunched and legs apart, seen from the front. They stand joined at the feet and lean away from each other, peeling apart, with a few stretched strands still holding them together.</desc>
   <defs>
-    <radialGradient id="bg" cx="50%" cy="42%" r="72%">
-      <stop offset="0" stop-color="#2c0b10"/>
-      <stop offset="0.55" stop-color="#140a0d"/>
-      <stop offset="1" stop-color="#060507"/>
-    </radialGradient>
-    <linearGradient id="pale" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ece6dc"/>
-      <stop offset="1" stop-color="#8f8880"/>
-    </linearGradient>
-    <linearGradient id="blood" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#ff4040"/>
-      <stop offset="0.55" stop-color="#b0111a"/>
-      <stop offset="1" stop-color="#4e050a"/>
-    </linearGradient>
-    <linearGradient id="wound" x1="0" y1="0" x2="1" y2="0">
-      <stop offset="0" stop-color="#2a0205"/>
-      <stop offset="0.5" stop-color="#7c0a12"/>
-      <stop offset="1" stop-color="#1c0103"/>
-    </linearGradient>
-    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
-      <feGaussianBlur stdDeviation="3.5" result="b"/>
-      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
-    </filter>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000" flood-opacity="0.6"/>
-    </filter>
-    <filter id="grain">
-      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="2" seed="11" result="n"/>
-      <feColorMatrix in="n" type="saturate" values="0" result="g"/>
-      <feComponentTransfer in="g"><feFuncA type="table" tableValues="0 0.07"/></feComponentTransfer>
-      <feComposite in2="SourceGraphic" operator="in"/>
-    </filter>
-    <!-- One body shape, shared by the original and its double. -->
-    <path id="body" d="M86 512 C88 438 104 384 150 356 C168 345 182 336 186 318 C160 300 140 268 136 226 C130 160 162 104 214 100 C268 96 300 150 296 222 C293 270 272 302 244 320 C250 338 266 348 286 360 C330 386 342 440 344 512 Z"/>
-    <!-- Left of the ragged seam: what remains of the original. -->
-    <mask id="left-of-seam" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
-      <path fill="white" d="M0 0 L262 0 L262 60 L248 112 L266 150 L244 196 L268 236 L246 282 L270 322 L250 366 L274 410 L262 512 L0 512 Z"/>
-    </mask>
-    <!-- Right of the seam: the part of the double that has torn free. -->
-    <mask id="right-of-seam" maskUnits="userSpaceOnUse" x="0" y="0" width="512" height="512">
-      <path fill="white" d="M292 0 L292 60 L278 112 L296 150 L274 196 L298 236 L276 282 L300 322 L280 366 L304 410 L292 512 L512 512 L512 0 Z"/>
-    </mask>
+    <!-- One hunched, faceless figure, drawn from the front. Feet at y=0, origin on its centre line. -->
+    <g id="figure" stroke-linecap="round" stroke-linejoin="round">
+      <!-- head, sunk between the shoulders -->
+      <ellipse cx="0" cy="-139" rx="19" ry="22" stroke="none"/>
+      <!-- rounded, raised shoulders tapering to the waist -->
+      <path d="M -9 -121 Q -31 -121 -45 -107 Q -51 -99 -46 -89 L -25 -52 Q -23 -43 -15 -43 L 15 -43 Q 23 -43 25 -52 L 46 -89 Q 51 -99 45 -107 Q 31 -121 9 -121 Z" stroke="none"/>
+      <!-- arms hanging forward -->
+      <path d="M -43 -100 C -57 -80 -57 -52 -49 -24" fill="none" stroke-width="13"/>
+      <path d="M 43 -100 C 57 -80 57 -52 49 -24" fill="none" stroke-width="13"/>
+      <!-- legs apart, knees slightly bent -->
+      <path d="M -10 -46 L -23 -26 L -30 -6" fill="none" stroke-width="20"/>
+      <path d="M 10 -46 L 23 -26 L 30 -6" fill="none" stroke-width="20"/>
+    </g>
   </defs>
 
-  <rect width="512" height="512" rx="96" fill="url(#bg)"/>
+  <rect width="256" height="256" rx="52" fill="#ececec"/>
 
-  <!-- The wound between them. -->
-  <path fill="url(#wound)" d="M262 60 L248 112 L266 150 L244 196 L268 236 L246 282 L270 322 L250 366 L274 410 L262 512 L292 512 L304 410 L280 366 L300 322 L276 282 L298 236 L274 196 L296 150 L278 112 L292 60 Z"/>
+  <g transform="translate(0 -14) translate(128 232) scale(1.08) translate(-128 -232)">
+    <!-- Stretched strands, drawn first so both bodies cover their ends: only the part in the gap shows. -->
+    <g fill="none" stroke="#8c8c8c" stroke-linecap="round">
+      <path d="M 70 84 Q 128 112 186 78" stroke-width="3.4"/>
+      <path d="M 72 102 Q 128 126 184 96" stroke-width="3"/>
+      <path d="M 76 121 Q 128 141 182 115" stroke-width="2.6"/>
+      <path d="M 80 140 Q 128 156 180 134" stroke-width="2.2"/>
+      <path d="M 86 160 Q 128 172 176 154" stroke-width="1.8"/>
+    </g>
 
-  <!-- The original: pale, screaming, its right eye split by the tear. -->
-  <g mask="url(#left-of-seam)" filter="url(#shadow)">
-    <use href="#body" fill="url(#pale)"/>
-    <ellipse cx="184" cy="198" rx="17" ry="25" fill="#110506"/>
-    <ellipse cx="244" cy="196" rx="15" ry="23" fill="#110506"/>
-    <ellipse cx="212" cy="268" rx="18" ry="31" fill="#110506"/>
-    <path d="M168 168 q14 -12 30 -2 M228 166 q12 -9 26 0" stroke="#5b534d" stroke-width="4" fill="none" stroke-linecap="round"/>
-    <path d="M190 226 q-4 18 -2 34" stroke="#6d655e" stroke-width="2" fill="none" opacity="0.6"/>
-  </g>
+    <!-- The one behind: lighter, leaning right. -->
+    <g transform="translate(150 232) rotate(13)" fill="#777" stroke="#777">
+      <use href="#figure"/>
+    </g>
 
-  <!-- The double: the same body, blood red, leaning away and grinning. -->
-  <g mask="url(#right-of-seam)" filter="url(#shadow)">
-    <g transform="translate(118 -4) rotate(12 216 300)">
-      <use href="#body" fill="url(#blood)"/>
-      <path d="M150 356 C176 360 196 352 214 340" stroke="#ff7a7a" stroke-width="3" fill="none" opacity="0.45"/>
-      <circle cx="190" cy="200" r="13" fill="#fff4e4" filter="url(#glow)"/>
-      <circle cx="246" cy="196" r="11" fill="#fff4e4" filter="url(#glow)"/>
-      <circle cx="193" cy="203" r="4" fill="#160002"/>
-      <circle cx="248" cy="199" r="3.5" fill="#160002"/>
-      <path d="M172 256 Q216 300 266 250 Q218 280 172 256 Z" fill="#160002"/>
-      <path d="M180 260 l6 11 l6 -8 l6 11 l6 -9 l6 11 l6 -9 l6 10 l6 -11 l6 9 l6 -10" stroke="#fff4e4" stroke-width="2.5" fill="none" stroke-linejoin="round"/>
+    <!-- The one in front: darker, leaning left. A thin light edge keeps the two readable where they overlap. -->
+    <g transform="translate(106 232) rotate(-13)">
+      <use href="#figure" fill="#ececec" stroke="#ececec" stroke-width="6"/>
+      <g fill="#1f1f1f" stroke="#1f1f1f"><use href="#figure"/></g>
     </g>
   </g>
-
-  <!-- Strands of flesh still binding them together. -->
-  <g fill="none" stroke-linecap="round">
-    <path d="M252 124 C270 112 284 138 300 124" stroke="#d3242d" stroke-width="5"/>
-    <path d="M244 170 C266 184 286 160 306 176" stroke="#8a0e16" stroke-width="3"/>
-    <path d="M250 212 C268 202 286 228 310 210" stroke="#e8424a" stroke-width="2.5"/>
-    <path d="M244 258 C264 276 290 250 312 266" stroke="#a3121b" stroke-width="7"/>
-    <path d="M254 300 C274 290 284 316 304 304" stroke="#db3039" stroke-width="2"/>
-    <path d="M246 342 C268 362 296 334 318 352" stroke="#760a11" stroke-width="4.5"/>
-    <path d="M258 392 C278 382 290 404 314 392" stroke="#d3242d" stroke-width="3"/>
-    <path d="M262 446 C280 440 286 460 300 452" stroke="#8a0e16" stroke-width="2"/>
-  </g>
-
-  <!-- Drips. -->
-  <g fill="#a3121b">
-    <path d="M270 412 c-4 18 -6 30 0 37 c6 -7 4 -19 0 -37 z"/>
-    <path d="M288 324 c-3 12 -5 22 0 27 c5 -5 3 -15 0 -27 z"/>
-    <path d="M258 238 c-2 10 -4 17 0 21 c4 -4 2 -11 0 -21 z"/>
-    <circle cx="270" cy="462" r="4"/>
-  </g>
-
-  <rect width="512" height="512" rx="96" filter="url(#grain)" fill="#ffffff"/>
 </svg>

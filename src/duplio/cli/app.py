@@ -8,10 +8,10 @@ from collections.abc import Callable
 from typing import Any
 
 import click
-from rich.console import Console
 from rich.text import Text
 
 from duplio import __version__
+from duplio.cli.console import SafeConsole, harden_streams
 from duplio.cli.context import AppContext, setup_logging
 from duplio.cli.progress import RichProgress
 from duplio.compare.model import Mode, ScanOptions, Verify
@@ -86,7 +86,8 @@ def cli(ctx: click.Context, quiet: bool, verbose: bool, no_color: bool) -> None:
     Nothing is ever removed without a plan you approve, fresh re-verification,
     and a journal entry. Default action: quarantine (instantly reversible).
     """
-    console = Console(no_color=no_color, highlight=False)
+    harden_streams()
+    console = SafeConsole(no_color=no_color, highlight=False)
     app = AppContext(console=console, quiet=quiet)
     setup_logging(app.dirs, verbose)
     ctx.obj = app
@@ -102,7 +103,7 @@ def get_app(ctx: click.Context | None = None) -> AppContext:
     ctx = ctx or click.get_current_context()
     obj = ctx.find_object(AppContext)
     if obj is None:  # pragma: no cover - only when commands are invoked oddly
-        obj = AppContext(console=Console())
+        obj = AppContext(console=SafeConsole())
         ctx.obj = obj
     return obj
 

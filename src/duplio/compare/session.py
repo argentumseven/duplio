@@ -25,6 +25,7 @@ from duplio.errors import ConfigError
 from duplio.scan.inventory import FileEntry, Inventory, Root, RootRole, make_roots
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.atomic import atomic_write_bytes
+from duplio.util.text import json_dumps
 from duplio.vfs.location import BackendRegistry
 
 SESSION_FORMAT = "duplio-session"
@@ -117,7 +118,7 @@ class SessionInfo:
 def save_session(result: ScanResult, dirs: AppDirs | None = None, path: str | Path | None = None) -> Path:
     dirs = (dirs or get_app_dirs()).ensure()
     target = Path(path) if path else dirs.sessions / f"{result.session_id}.json.gz"
-    payload = json.dumps(result_to_dict(result), ensure_ascii=False).encode()
+    payload = json_dumps(result_to_dict(result)).encode()
     atomic_write_bytes(target, gzip.compress(payload, compresslevel=6) if target.suffix == ".gz" else payload)
     return target
 

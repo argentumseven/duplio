@@ -13,6 +13,7 @@ from textual.containers import Vertical
 from textual.widgets import Label, ProgressBar, RichLog
 
 from duplio.util.fmt import human_duration, human_size
+from duplio.util.text import printable
 
 
 @dataclass
@@ -138,8 +139,8 @@ class ProgressPanel(Vertical):
         detail = snap.detail
         if len(detail) > 90:
             detail = "…" + detail[-89:]
-        self.query_one("#pp-detail", Label).update(detail)
+        self.query_one("#pp-detail", Label).update(printable(detail))
         log = self.query_one("#pp-log", RichLog)
         for level, text in snap.messages:
             style = {"warning": "yellow", "error": "bold red"}.get(level, "dim")
-            log.write(Text(text, style=style))
+            log.write(Text(printable(text), style=style))

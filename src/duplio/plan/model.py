@@ -18,6 +18,7 @@ from typing import Any
 from duplio.errors import ConfigError
 from duplio.util.atomic import atomic_write_bytes
 from duplio.util.fmt import iso_now
+from duplio.util.text import json_dumps
 
 PLAN_FORMAT = "duplio-plan"
 PLAN_VERSION = 1
@@ -159,7 +160,7 @@ class Plan:
 
     def save(self, path: str | Path) -> Path:
         path = Path(path)
-        data = json.dumps(self.to_dict(), indent=1, ensure_ascii=False).encode()
+        data = json_dumps(self.to_dict(), indent=1).encode()
         if path.suffix == ".gz":
             data = gzip.compress(data)
         atomic_write_bytes(path, data)

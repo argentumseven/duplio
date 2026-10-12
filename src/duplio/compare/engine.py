@@ -50,6 +50,7 @@ from duplio.hashing.algorithms import get_algorithm
 from duplio.hashing.cache import HashCache, NullCache
 from duplio.hashing.core import SampleLayout, files_identical, hash_file, layout_for, sample_file
 from duplio.scan.inventory import FileEntry, Inventory, Root
+from duplio.util.text import name_key
 from duplio.vfs.base import MediaKind, Sampling
 
 REMOTE_BATCH = 64
@@ -273,7 +274,7 @@ class Engine:
         for bucket in buckets:
             parts: dict[str, list[FileEntry]] = defaultdict(list)
             for m in bucket.members:
-                parts[m.rel.rsplit("/", 1)[-1].casefold()].append(m)
+                parts[name_key(m.rel.rsplit("/", 1)[-1], fold=True)].append(m)
             for members in parts.values():
                 out.append(
                     _Bucket(

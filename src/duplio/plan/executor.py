@@ -48,6 +48,7 @@ from duplio.transfer import copy_verified
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.atomic import atomic_write_json
 from duplio.util.fmt import iso_now
+from duplio.util.text import json_dumps
 from duplio.vfs.base import Backend
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import BackendRegistry, Location
@@ -478,10 +479,9 @@ class Executor:
                 "files": moves,
             }
             try:
-                import json
 
                 with b.open_write(path) as handle:
-                    handle.write(json.dumps(payload, indent=1, ensure_ascii=False).encode())
+                    handle.write(json_dumps(payload, indent=1).encode())
             except Exception as exc:
                 self.progress.message(f"could not write quarantine manifest {b.display(path)}: {exc}", level="warning")
         # Fallback quarantine on the local state disk keeps its own manifest too.

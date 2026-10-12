@@ -20,6 +20,7 @@ from duplio.cli.render import t
 from duplio.errors import ConfigError
 from duplio.scan.filters import ScanFilter
 from duplio.util.fmt import format_ns, human_duration, human_size, parse_duration, plural
+from duplio.util.text import printable
 
 
 def _repo(app, text: str) -> Repository:  # type: ignore[no-untyped-def]
@@ -126,7 +127,7 @@ def backup_ls(repo: str, snapshot: str, prefix: str) -> None:
     snap = r.find_snapshot(snapshot)
     for e in r.tree(snap.id):
         if not prefix or e.path == prefix or e.path.startswith(prefix.rstrip("/") + "/"):
-            click.echo(f"{human_size(e.size):>10}  {format_ns(e.mtime_ns)}  {e.path}")
+            click.echo(f"{human_size(e.size):>10}  {format_ns(e.mtime_ns)}  {printable(e.path)}")
 
 
 @backup.command("restore")

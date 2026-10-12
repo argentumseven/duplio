@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from typing import IO, Any
 
 from duplio.errors import BackendUnavailable, LocationError
+from duplio.util.text import temp_name
 from duplio.vfs.base import (
     Backend,
     Capabilities,
@@ -364,7 +365,7 @@ class SMBBackend(Backend):
             raise FileExistsError(errno.EEXIST, "destination exists", path)
         parent = self.parent(path)
         client.makedirs(parent, exist_ok=True)
-        tmp = f"{parent}\\.{self.basename(path)}.duplio-tmp-{secrets.token_hex(4)}"
+        tmp = f"{parent}\\{temp_name(self.basename(path), f'.duplio-tmp-{secrets.token_hex(4)}')}"
         handle = client.open_file(tmp, mode="wb")
         try:
             yield handle

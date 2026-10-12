@@ -67,6 +67,15 @@ disk each get the right profile automatically.
 3. If the far side can hash, implement `remote_hash` and list the algorithms in `Capabilities.remote_hash_algorithms`. The engine negotiates one algorithm per group.
 4. Add a fake to `tests/fakes.py` and run the engine/executor tests against it, as `test_remote_backends.py` does for ADB and SMB.
 
+## File names: `duplio.util.text`
+
+File names are untrusted bytes, not text. Every persistence path goes through
+`json_dumps` (ASCII-escaped, so lone surrogates round-trip) or `fs_bytes`
+(SQLite keys). Every display path goes through `printable` (the CLI's
+`SafeConsole` applies it to all output; the TUI uses `ptext`). Comparisons that
+use names use `name_key` (NFC, optionally case-folded) and always try the exact
+spelling first.
+
 ## Discovery: `duplio.scan`
 
 - `ScanFilter` implements the backend `WalkFilter` protocol (exclude / include, size limits, hidden files) and decides *protection*.

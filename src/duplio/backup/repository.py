@@ -51,6 +51,7 @@ from duplio.errors import LockError, RepositoryError
 from duplio.events import CancelToken, NullProgress, ProgressSink
 from duplio.scan.filters import ScanFilter, extension
 from duplio.util.fmt import iso_now, utc_stamp_ms
+from duplio.util.text import json_dumps
 from duplio.vfs.base import RawEntry
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import Location
@@ -383,9 +384,9 @@ class Repository:
     def _write_snapshot(self, meta: SnapshotMeta, entries: list[TreeEntry]) -> None:
         tree = {"format": "duplio-tree", "version": 1, "snapshot": meta.id, "entries": [e.to_list() for e in entries]}
         with self.b.open_write(self.p(f"trees/{meta.id}.json.gz")) as handle:
-            handle.write(gzip.compress(json.dumps(tree, ensure_ascii=False).encode(), 6))
+            handle.write(gzip.compress(json_dumps(tree).encode(), 6))
         with self.b.open_write(self.p(f"snapshots/{meta.id}.json")) as handle:
-            handle.write(json.dumps(meta.to_dict(), indent=1, ensure_ascii=False).encode())
+            handle.write(json_dumps(meta.to_dict(), indent=1).encode())
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         # Summary first: once it is gone the snapshot no longer exists, even if

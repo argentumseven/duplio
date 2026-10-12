@@ -21,6 +21,8 @@ import threading
 import time
 from pathlib import Path
 
+from duplio.util.text import fs_bytes
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS digests (
     backend   TEXT    NOT NULL,
@@ -35,7 +37,7 @@ CREATE TABLE IF NOT EXISTS digests (
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"  # v2: paths are stored as reversible bytes (names need not be valid UTF-8)
 
 
 class HashCache:
@@ -57,24 +59,25 @@ class HashCache:
             self._conn.execute("DELETE FROM digests")
             self._conn.execute("UPDATE meta SET value=? WHERE key='schema'", (SCHEMA_VERSION,))
             self._conn.commit()
-        self._pending: list[tuple[str, str, str, int, int, str, int]] = []
+        self._pending: list[tuple[str, bytes, str, int, int, str, int]] = []
         self._racy_ns = int(racy_window_s * 1e9)
         self._flush_every = flush_every
         self.hits = 0
         self.misses = 0
 
     def get(self, backend: str, path: str, kind: str, size: int, mtime_ns: int) -> str | None:
+        key = fs_bytes(path)
         with self._lock:
             row = self._conn.execute(
                 "SELECT size, mtime_ns, digest FROM digests WHERE backend=? AND path=? AND kind=?",
-                (backend, path, kind),
+                (backend, key, kind),
             ).fetchone()
             if row is not None and row[0] == size and row[1] == mtime_ns:
                 self.hits += 1
                 return str(row[2])
             # Pending (not yet flushed) entries are found too.
             for item in reversed(self._pending):
-                if item[0] == backend and item[1] == path and item[2] == kind:
+                if item[0] == backend and item[1] == key and item[2] == kind:
                     if item[3] == size and item[4] == mtime_ns:
                         self.hits += 1
                         return item[5]
@@ -98,7 +101,7 @@ class HashCache:
         if now_ns - mtime_ns < window:
             return  # too fresh to trust its timestamp
         with self._lock:
-            self._pending.append((backend, path, kind, size, mtime_ns, digest, now_ns // 1_000_000_000))
+            self._pending.append((backend, fs_bytes(path), kind, size, mtime_ns, digest, now_ns // 1_000_000_000))
             if len(self._pending) >= self._flush_every:
                 self._flush_locked()
 
@@ -114,9 +117,10 @@ class HashCache:
             self._flush_locked()
 
     def invalidate(self, backend: str, path: str) -> None:
+        key = fs_bytes(path)
         with self._lock:
-            self._pending = [p for p in self._pending if not (p[0] == backend and p[1] == path)]
-            self._conn.execute("DELETE FROM digests WHERE backend=? AND path=?", (backend, path))
+            self._pending = [p for p in self._pending if not (p[0] == backend and p[1] == key)]
+            self._conn.execute("DELETE FROM digests WHERE backend=? AND path=?", (backend, key))
             self._conn.commit()
 
     def stats(self) -> dict[str, int]:

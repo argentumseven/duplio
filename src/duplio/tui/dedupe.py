@@ -36,7 +36,7 @@ from duplio.plan.rules import parse_rules
 from duplio.scan.filters import ScanFilter
 from duplio.scan.inventory import RootRole
 from duplio.tui.job import JobScreen
-from duplio.tui.widgets import ConfirmDialog, location_suggestions, short
+from duplio.tui.widgets import ConfirmDialog, location_suggestions, ptext, short
 from duplio.util.fmt import format_ns, human_size, parse_size, plural
 from duplio.vfs.location import location_kind
 
@@ -162,7 +162,7 @@ class SetupScreen(Screen[None]):
                 role_text = Text("against", style="magenta") if role is RootRole.REFERENCE else Text("check", style="green")
             else:
                 role_text = Text("reference", style="magenta") if role is RootRole.REFERENCE else Text("scan", style="green")
-            table.add_row(str(i), role_text, Text(text), Text(_storage_label(text)), key=str(i - 1))
+            table.add_row(str(i), role_text, ptext(text), Text(_storage_label(text)), key=str(i - 1))
 
     def _add(self, role: RootRole) -> None:
         field = self.query_one("#loc-input", Input)
@@ -370,7 +370,7 @@ class ReviewScreen(Screen[None]):
             for label, key in (("", "mark"), ("Loc", "loc"), ("File", "path"), ("Pixels", "px"), ("Size", "size"), ("Dist", "d")):
                 sm.add_column(label, key=key)
             for g in self.result.similar:
-                sg.add_row(f"S{g.id}", str(len(g.members)), Text(g.members[0].rel), "0", key=str(g.id))
+                sg.add_row(f"S{g.id}", str(len(g.members)), ptext(g.members[0].rel), "0", key=str(g.id))
             self.similar_remove = {g.id: set() for g in self.result.similar}
         self._apply_rules(self.rules)
         self._fill_problems()
@@ -401,7 +401,7 @@ class ReviewScreen(Screen[None]):
             status = Text("skip", style="dim") if g.id in self.excluded else (
                 Text("—", style="dim") if not self._victims(g.id) else Text(f"{len(self._victims(g.id))} ✗", style="red"))
             table.add_row(str(g.id), str(g.count), human_size(g.size), human_size(g.wasted), status,
-                          Text(f"{keeper.root + 1}:{keeper.rel}"), key=str(g.id))
+                          ptext(f"{keeper.root + 1}:{keeper.rel}"), key=str(g.id))
         if self.result.groups:
             table.move_cursor(row=min(cursor, len(self.result.groups) - 1))
             self._show_group(self.result.groups[min(cursor, len(self.result.groups) - 1)].id)
@@ -430,8 +430,8 @@ class ReviewScreen(Screen[None]):
             aliases = g.aliases.get(m.id)
             if aliases:
                 notes.append(f"+{len(aliases)} hard link(s)")
-            table.add_row(mark, str(m.root + 1), Text(m.rel), format_ns(m.mtime_ns),
-                          Text(", ".join(notes), style="dim"), key=str(m.id))
+            table.add_row(mark, str(m.root + 1), ptext(m.rel), format_ns(m.mtime_ns),
+                          ptext(", ".join(notes), style="dim"), key=str(m.id))
         if table.row_count:
             table.move_cursor(row=min(cursor, table.row_count - 1))
 
@@ -459,11 +459,11 @@ class ReviewScreen(Screen[None]):
         if not (res.inventory.errors or res.stats.errors or res.unverified):
             log.write(Text("No problems. Every file was read and compared.", style="green"))
         for path, err in res.inventory.errors[:2000]:
-            log.write(Text(f"scan   {path}: {err}", style="yellow"))
+            log.write(ptext(f"scan   {path}: {err}", style="yellow"))
         for path, err in res.stats.errors[:2000]:
-            log.write(Text(f"read   {path}: {err}", style="yellow"))
+            log.write(ptext(f"read   {path}: {err}", style="yellow"))
         for e in res.unverified[:2000]:
-            log.write(Text(f"unverified  {e.rel}", style="yellow"))
+            log.write(ptext(f"unverified  {e.rel}", style="yellow"))
 
     # ---- events -------------------------------------------------------
     @on(DataTable.RowHighlighted, "#groups")
@@ -501,7 +501,7 @@ class ReviewScreen(Screen[None]):
         for m, dist, dim in zip(g.members, g.distances, g.dimensions, strict=True):
             marked = m.id in self.similar_remove[gid]
             mark = Text("✗", style="bold red") if marked else Text("·", style="dim")
-            table.add_row(mark, str(m.root + 1), Text(m.rel), f"{dim[0]}×{dim[1]}", human_size(m.size), str(dist), key=str(m.id))
+            table.add_row(mark, str(m.root + 1), ptext(m.rel), f"{dim[0]}×{dim[1]}", human_size(m.size), str(dist), key=str(m.id))
 
     @on(DataTable.RowSelected, "#members")
     def member_selected(self) -> None:
@@ -587,7 +587,7 @@ class ReviewScreen(Screen[None]):
             status = Text("skip", style="dim") if gid in self.excluded else (
                 Text("—", style="dim") if not victims else Text(f"{len(victims)} ✗", style="red"))
             groups.update_cell(str(gid), "plan", status)
-            groups.update_cell(str(gid), "keeper", Text(f"{keeper.root + 1}:{keeper.rel}"))
+            groups.update_cell(str(gid), "keeper", ptext(f"{keeper.root + 1}:{keeper.rel}"))
             self._show_group(gid)
             if members.row_count:
                 members.move_cursor(row=min(row, members.row_count - 1))
@@ -659,13 +659,13 @@ def plan_renderable(plan: Plan, limit: int = 40) -> Group:
     table.add_column("Kept copy", ratio=1, style="green")
     table.add_column("Size", justify="right")
     for item in plan.items[:limit]:
-        table.add_row(Text(f"{item.victim.root + 1}:{item.victim.rel}"), Text(f"{item.keeper.root + 1}:{item.keeper.rel}"),
+        table.add_row(ptext(f"{item.victim.root + 1}:{item.victim.rel}"), ptext(f"{item.keeper.root + 1}:{item.keeper.rel}"),
                       human_size(item.victim.size))
     parts: list[Any] = [head, Text(""), table]
     if len(plan.items) > limit:
         parts.append(Text(f"… and {len(plan.items) - limit:,} more", style="dim"))
     for note in plan.notes[:5]:
-        parts.append(Text(f"note: {note}", style="yellow"))
+        parts.append(ptext(f"note: {note}", style="yellow"))
     safety = Text(
         "\nBefore each file is touched Duplio re-reads its size and time, re-hashes it and the kept copy, journals "
         "the change, and confirms the kept copy still exists afterwards.",
@@ -690,7 +690,7 @@ def apply_renderable(report: ApplyReport) -> Group:
     table.add_column("File", ratio=1)
     table.add_column("Why", ratio=1, style="dim")
     for o in issues[:50]:
-        table.add_row(Text(o.status, style="yellow" if o.status == "skipped" else "red"), Text(o.item.victim.rel), Text(o.message))
+        table.add_row(Text(o.status, style="yellow" if o.status == "skipped" else "red"), ptext(o.item.victim.rel), ptext(o.message))
     parts: list[Any] = [text]
     if issues:
         parts.append(table)
@@ -799,7 +799,7 @@ class CompareResultScreen(Screen[None]):
         table = self.query_one("#unique", DataTable)
         table.add_columns("Loc", "File", "Size", "Modified")
         for e in self.result.unique[: self.MAX_ROWS]:
-            table.add_row(str(e.root + 1), Text(e.rel), human_size(e.size), format_ns(e.mtime_ns))
+            table.add_row(str(e.root + 1), ptext(e.rel), human_size(e.size), format_ns(e.mtime_ns))
         if len(self.result.unique) > self.MAX_ROWS:
             table.add_row("", Text(f"… {len(self.result.unique) - self.MAX_ROWS:,} more (see the HTML report)", style="dim"), "", "")
 

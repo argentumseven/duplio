@@ -13,32 +13,19 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Static
 
-# Two figures: the right one tearing itself out of the left, joined by strands.
-LOGO = r"""
-    ▄▄████▄▄      ▄▄████▄▄
-   ██ ●  ● ██▌░ ▐██ ◉  ○ ██
-   ██  ▀▀  ██▌▒░▐██  ▄▄  ██
-    ▀██████▀▓▒░░▒▓▀██████▀
-   ▄▄███████▓▒░ ░▒▓███████▄▄
-  ████  ████▓▒░  ░▒▓████  ████
-  ▀▀    ████▓▒    ▒▓████    ▀▀
-        ██▌ ▓▒    ▒▓ ▐██
-       ▀▀▀  ▀      ▀  ▀▀▀
-"""
-
-TAGLINE = "Duplicates in. One survivor out."
+from duplio.assets.logo import logo_text
+from duplio.util.text import printable
 
 
 class Logo(Static):
+    """The Duplio mark: two faceless silhouettes peeling apart (see ``duplio.assets.logo``)."""
+
     DEFAULT_CSS = """
-    Logo { width: auto; height: auto; color: $primary; padding: 0 2; }
+    Logo { width: auto; height: auto; color: $text; padding: 0 2; }
     """
 
     def __init__(self, **kwargs: object) -> None:
-        text = Text(LOGO.strip("\n"), style="bold")
-        text.append("\n  D U P L I O", style="bold")
-        text.append(f"   {TAGLINE}", style="italic dim")
-        super().__init__(text, **kwargs)  # type: ignore[arg-type]
+        super().__init__(logo_text(), **kwargs)  # type: ignore[arg-type]
 
 
 def common_folders() -> list[tuple[str, str]]:
@@ -73,9 +60,15 @@ def location_suggestions() -> list[tuple[str, str]]:
 
 def short(path: str, width: int = 70) -> str:
     home = os.path.expanduser("~")
+    path = printable(path)
     if path.startswith(home):
         path = "~" + path[len(home):]
     return path if len(path) <= width else "…" + path[-(width - 1):]
+
+
+def ptext(value: object, **kwargs: object) -> Text:
+    """Text for untrusted content (file names, error messages): safe to draw on any terminal."""
+    return Text(printable(str(value)), **kwargs)  # type: ignore[arg-type]
 
 
 class ConfirmDialog(ModalScreen[bool]):
