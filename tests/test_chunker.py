@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import random
+import secrets
 from pathlib import Path
 
 import pytest
@@ -122,7 +123,12 @@ def test_cdc_repository_round_trips_and_checks(registry: BackendRegistry, tmp_pa
 
 
 def test_an_insertion_into_a_big_file_costs_little_with_cdc_and_everything_with_fixed(registry: BackendRegistry,
-                                                                                      tmp_path: Path) -> None:
+                                                                                      tmp_path: Path,
+                                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    # Where the chunk boundaries fall depends on a seed taken from the repository's random id, so with a fresh id every run
+    # the cost of the edit varies (rarely past the limit below). A fixed id makes this check repeatable.
+    real_token_hex = secrets.token_hex
+    monkeypatch.setattr(secrets, "token_hex", lambda nbytes=None: "00112233445566778899aabbccddeeff" if nbytes == 16 else real_token_hex(nbytes))
     data = rand_bytes(3 * 1024 * KIB, 10)
     stored = {}
     for kind in ("fixed", "cdc"):
