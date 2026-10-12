@@ -72,7 +72,10 @@ def _password_bytes(password: str) -> bytes:
 
 
 def _derive(password: str, salt: bytes, n: int, r: int, p: int) -> bytes:
-    return Scrypt(salt=salt, length=32, n=n, r=r, p=p).derive(_password_bytes(password))
+    try:
+        return Scrypt(salt=salt, length=32, n=n, r=r, p=p).derive(_password_bytes(password))
+    except (MemoryError, ValueError, OverflowError) as exc:
+        raise RepositoryError(f"the key could not be derived with the repository's settings ({exc})") from None
 
 
 def _wrap(master: bytes, password: str, repo_id: str, *, n: int) -> dict[str, Any]:
@@ -113,7 +116,7 @@ class RepoCrypto:
             raise RepositoryError("this repository uses an encryption scheme this Duplio does not know")
         kdf = block["kdf"]
         n, r, p = int(kdf["n"]), int(kdf["r"]), int(kdf["p"])
-        if n > 2**22 or r > 32 or p > 16:
+        if n > 2**22 or r > 32 or p > 16 or 128 * r * n > 2**30:  # memory is about 128 * r * n bytes
             raise RepositoryError("the repository asks for an unreasonable key-derivation cost; refusing")
         kek = _derive(password, _unb64(kdf["salt"]), n, r, p)
         raw = _unb64(block["wrapped_key"])

@@ -222,13 +222,16 @@ class SnapshotSet:
                 def job() -> None:
                     target = db.join(building, raw.rel)
                     try:
+                        current = sb.stat(raw.path)
+                        src_mode = None if current is None or current.mode is None else current.mode & 0o7777
                         linked = False
                         if prev_dir is not None:
                             old = db.join(prev_dir, raw.rel)
                             old_info = db.stat(old)
                             if (old_info is not None and old_info.is_file and not old_info.is_symlink
                                     and old_info.size == raw.size
-                                    and mtimes_match(old_info.mtime_ns, raw.mtime_ns, tolerance_ns=tolerance)):
+                                    and mtimes_match(old_info.mtime_ns, raw.mtime_ns, tolerance_ns=tolerance)
+                                    and _same_permissions(old_info.mode, src_mode)):
                                 db.makedirs(db.parent(target))
                                 db.hardlink(old, target)
                                 linked = True
@@ -236,7 +239,7 @@ class SnapshotSet:
                             copy_verified((sb, raw.path), (db, target), algorithm=algorithm, expected_size=raw.size,
                                           mtime_ns=raw.mtime_ns, cancel=cancel, limiter=limiter,
                                           on_bytes=lambda n: progress.advance(nbytes=n))
-                            _make_read_only(db, target)
+                            _make_read_only(db, target, src_mode)
                         after = sb.stat(raw.path)
                         with lock:
                             if linked:
@@ -323,11 +326,22 @@ def _slug(label: str) -> str:
     return "".join(c if c.isalnum() or c in "-_" else "_" for c in label)[:40]
 
 
-def _make_read_only(backend, path: str) -> None:  # type: ignore[no-untyped-def]
+_WRITE_BITS = 0o222
+
+
+def _same_permissions(snapshot_mode: int | None, source_mode: int | None) -> bool:
+    """Snapshot files are read-only, so only the other bits (read, execute, setuid…) must match the source."""
+    if snapshot_mode is None or source_mode is None:
+        return True
+    return ((snapshot_mode ^ source_mode) & 0o7777 & ~_WRITE_BITS) == 0
+
+
+def _make_read_only(backend, path: str, source_mode: int | None = None) -> None:  # type: ignore[no-untyped-def]
+    """Keep the source's permissions (a 0600 key stays private, a script stays executable) minus the write bits."""
     if isinstance(backend, LocalBackend):
         with contextlib.suppress(OSError):
-            mode = os.stat(path).st_mode
-            os.chmod(path, mode & ~0o222)
+            mode = source_mode if source_mode is not None else os.stat(path).st_mode & 0o7777
+            os.chmod(path, mode & ~_WRITE_BITS)
 
 
 def _remove_tree(backend, folder: str) -> int:  # type: ignore[no-untyped-def]

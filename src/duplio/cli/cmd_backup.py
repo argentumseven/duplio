@@ -457,7 +457,7 @@ def backup_passwd(repo: str) -> None:
             app.console.print(Text("The two entries differ.", style="yellow"))
             continue
         r.change_password(first)
-        app.console.print(Text("Password changed. The old password no longer opens this repository.", style="green"))
+        app.console.print(Text("Password changed. A copy of the old duplio-repo.json (for example in a backup of the repository) still opens with the old password.", style="green"))
         return
     raise ConfigError("the password was not changed")
 

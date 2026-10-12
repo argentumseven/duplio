@@ -173,3 +173,82 @@ def test_a_source_written_to_during_the_copy_is_not_reported_as_copied(registry:
     report = run_merge(plan, registry, dirs=get_app_dirs().ensure(), progress=WriterAppears())
     assert [r.status for r in report.results] == ["skipped"] and "changed while" in report.results[0].message
     assert not (b / "db.sqlite").exists()  # no torn copy left behind under the real name
+
+
+# ---------------------------------------------------------------- encryption downgrade
+def test_removing_the_key_block_does_not_turn_backups_into_plaintext(registry: BackendRegistry, tmp_path: Path) -> None:
+    import json
+
+    repo = Repository.init(registry.open(str(tmp_path / "repo")), password=PW, scrypt_n=FAST)
+    write(tmp_path / "s" / "a.bin", rand_bytes(5000, 1), mtime=T0)
+    repo.backup(registry.open(str(tmp_path / "s")))
+    config_path = tmp_path / "repo" / "duplio-repo.json"
+    original = config_path.read_text()
+    config = json.loads(original)
+    del config["encryption"]
+    config_path.write_text(json.dumps(config))  # the version and hash fields still say "encrypted"
+    with pytest.raises(RepositoryError, match="no longer has the key block"):
+        Repository.open(registry.open(str(tmp_path / "repo")))
+    config.update(version=1, hash="blake2b-256")  # a careful attacker also edits those: the data gives it away
+    config_path.write_text(json.dumps(config))
+    with pytest.raises(RepositoryError, match="holds encrypted data"):
+        Repository.open(registry.open(str(tmp_path / "repo")))
+    config_path.write_text(original)
+    assert Repository.open(registry.open(str(tmp_path / "repo")), password=PW).encrypted
+
+
+def test_key_derivation_cost_is_capped_by_memory(registry: BackendRegistry, tmp_path: Path) -> None:
+    import json
+
+    Repository.init(registry.open(str(tmp_path / "repo")), password=PW, scrypt_n=FAST)
+    config_path = tmp_path / "repo" / "duplio-repo.json"
+    config = json.loads(config_path.read_text())
+    config["encryption"]["kdf"].update(n=2**22, r=32)  # each field alone is allowed; together they ask for 16 GiB
+    config_path.write_text(json.dumps(config))
+    with pytest.raises(RepositoryError, match="unreasonable"):
+        Repository.open(registry.open(str(tmp_path / "repo")), password=PW)
+
+
+# ---------------------------------------------------------------- manifest names
+def test_manifest_keeps_unicode_variants_apart(registry: BackendRegistry, tmp_path: Path) -> None:
+    import unicodedata
+
+    from duplio.backup.manifest import create_manifest, verify_manifest
+
+    root = tmp_path / "archive"
+    composed = unicodedata.normalize("NFC", "café.txt")
+    decomposed = unicodedata.normalize("NFD", "café.txt")
+    write(root / composed, b"one", mtime=T0)
+    write(root / decomposed, b"two", mtime=T0)
+    location = registry.open(str(root))
+    manifest = create_manifest(location)
+    assert len(manifest.entries) == 2
+    (root / decomposed).unlink()
+    report = verify_manifest(location, manifest)
+    assert [(i.rel, i.status) for i in report.items if i.status == "missing"] == [(decomposed, "missing")]
+    assert not report.clean
+
+
+# ---------------------------------------------------------------- snapshot permissions
+def test_snapshots_keep_permissions_and_notice_chmod(registry: BackendRegistry, tmp_path: Path) -> None:
+    import os
+    import stat
+
+    src, dest = tmp_path / "src", tmp_path / "snaps"
+    key = write(src / "id_rsa", b"PRIVATE" * 100, mtime=T0)
+    script = write(src / "run.sh", b"#!/bin/sh\n", mtime=T0)
+    os.chmod(key, 0o600)
+    os.chmod(script, 0o755)
+
+    def mode(path: Path) -> int:
+        return stat.S_IMODE(path.stat().st_mode)
+
+    first = SnapshotSet(registry.open(str(dest))).create(registry.open(str(src)), now=1_700_000_000)
+    assert mode(dest / first.name / "id_rsa") == 0o400  # still private (never world-readable)
+    assert mode(dest / first.name / "run.sh") == 0o555  # still executable, no longer writable
+    unchanged = SnapshotSet(registry.open(str(dest))).create(registry.open(str(src)), now=1_700_000_100)
+    assert unchanged.linked == 2
+    os.chmod(key, 0o644)  # permission-only change: no new mtime
+    again = SnapshotSet(registry.open(str(dest))).create(registry.open(str(src)), now=1_700_000_200)
+    assert (again.linked, again.copied) == (1, 1) and mode(dest / again.name / "id_rsa") == 0o444
+    assert mode(dest / first.name / "id_rsa") == 0o400  # the older snapshot is untouched

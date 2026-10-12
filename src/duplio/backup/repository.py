@@ -46,7 +46,7 @@ from typing import Any
 
 from duplio import __version__
 from duplio.backup import lockfile
-from duplio.backup.crypto import PasswordRequired, RepoCrypto, require_library
+from duplio.backup.crypto import MAGIC, PasswordRequired, RepoCrypto, require_library
 from duplio.compare.scheduler import Job, run_jobs
 from duplio.errors import RepositoryError
 from duplio.events import CancelToken, NullProgress, ProgressSink
@@ -317,6 +317,8 @@ class Repository:
         if int(config.get("version", 0)) > REPO_VERSION:
             raise RepositoryError("repository was created by a newer Duplio; please upgrade")
         crypto = None
+        if "encryption" not in config:
+            cls._refuse_downgrade(location, config)
         if "encryption" in config:
             password = password if password is not None else password_from_environment()
             if password is None:
@@ -326,6 +328,33 @@ class Repository:
                 )
             crypto = RepoCrypto.unlock(password, config["encryption"], str(config["id"]))
         return cls(location, config, crypto)
+
+    @staticmethod
+    def _refuse_downgrade(location: Location, config: dict[str, Any]) -> None:
+        """The configuration file is not authenticated: someone with write access could delete its encryption
+        block so the next backup is written in the clear. Refuse when anything contradicts "not encrypted"."""
+        if config.get("hash") == "hmac-sha256" or int(config.get("version", 1)) >= 2:
+            raise RepositoryError(
+                f"{location.display} was created encrypted, but its configuration no longer has the key block. "
+                "The file was modified or damaged; refusing to continue, because new backups would be stored "
+                "unencrypted. Restore duplio-repo.json from a copy."
+            )
+        b = location.backend
+        try:
+            for name, is_dir in b.listdir(b.join(location.path, "snapshots")):
+                if is_dir or not name.endswith(".json"):
+                    continue
+                with b.open_read(b.join(location.path, f"snapshots/{name}")) as handle:
+                    head = handle.read(4)
+                if head == MAGIC:
+                    raise RepositoryError(
+                        f"{location.display} holds encrypted data but its configuration says it is not encrypted. "
+                        "The configuration was modified or damaged; refusing to continue. "
+                        "Restore duplio-repo.json from a copy."
+                    )
+                break
+        except OSError:
+            pass  # unreadable summaries are reported by `backup check`
 
     @property
     def encrypted(self) -> bool:

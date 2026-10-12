@@ -190,32 +190,49 @@ def verify_manifest(
     progress = progress or NullProgress()
     cancel = cancel or CancelToken()
     files, walk_errors = _list(location, scan_filter or ScanFilter.for_backup(), progress, cancel)
-    here = {nfc(f.rel): f for f in files}
-    wanted = {nfc(e.rel): e for e in manifest.entries}
     report = VerifyReport()
     for rel, _err in walk_errors:
         report.items.append(VerifyItem(rel, "unreadable", _err))
-    to_read: list[RawEntry] = []
-    for key, entry in wanted.items():
-        raw = here.get(key)
+    # Pair by exact name first. Names that differ only in Unicode form (café composed / decomposed) are two
+    # different files here, so collapsing them would let one hide the loss or damage of the other.
+    unmatched = {f.rel: f for f in files}
+    paired: list[tuple[ManifestEntry, RawEntry]] = []
+    leftovers: list[ManifestEntry] = []
+    for entry in manifest.entries:
+        raw = unmatched.pop(entry.rel, None)
         if raw is None:
+            leftovers.append(entry)
+        else:
+            paired.append((entry, raw))
+    by_form: dict[str, list[RawEntry]] = {}
+    for raw in unmatched.values():
+        by_form.setdefault(nfc(raw.rel), []).append(raw)
+    for entry in leftovers:  # a file moved between file systems that store names differently
+        candidates = by_form.get(nfc(entry.rel))
+        if candidates:
+            raw = candidates.pop(0)
+            unmatched.pop(raw.rel, None)
+            paired.append((entry, raw))
+        else:
             report.items.append(VerifyItem(entry.rel, "missing"))
-        elif quick:
+    to_read: list[RawEntry] = []
+    for entry, raw in paired:
+        if quick:
             same = raw.size == entry.size and raw.mtime_ns == entry.mtime_ns
             report.items.append(VerifyItem(entry.rel, "ok" if same else "modified",
                                            "" if same else "size or time differs (not read: --quick)"))
         else:
             to_read.append(raw)
-    for key, raw in here.items():
-        if key not in wanted:
-            report.items.append(VerifyItem(raw.rel, "new"))
+    for raw in unmatched.values():
+        report.items.append(VerifyItem(raw.rel, "new"))
+    expected = {raw.rel: entry for entry, raw in paired}
     if to_read:
         progress.stage("Verifying", total_items=len(to_read), total_bytes=sum(r.size for r in to_read))
         digests, errors = _hash_entries(location, to_read, manifest.algorithm, progress, cancel)
         for rel, message in errors:
             report.items.append(VerifyItem(rel, "unreadable", message))
         for raw in to_read:
-            entry = wanted[nfc(raw.rel)]
+            entry = expected[raw.rel]
             digest = digests.get(raw.rel)
             if digest is None:
                 continue
