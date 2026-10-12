@@ -22,7 +22,7 @@ from duplio.util.appdirs import AppDirs
 from duplio.util.fmt import iso_now
 from duplio.util.text import fs_bytes, fs_str
 
-SCHEMA_VERSION = "1"
+SCHEMA_VERSION = "2"  # v2: each row records when it was written (see the racy-timestamp rule in sync.py)
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS files (
     key      BLOB PRIMARY KEY,
@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS files (
     mtime_l  INTEGER NOT NULL,
     rel_r    BLOB    NOT NULL,
     size_r   INTEGER NOT NULL,
-    mtime_r  INTEGER NOT NULL
+    mtime_r  INTEGER NOT NULL,
+    recorded_ns INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 """
@@ -47,6 +48,7 @@ class Baseline:
     rel_b: str
     size_b: int
     mtime_b: int
+    recorded_ns: int = 0  # when this row was written; 0 = unknown
 
 
 def pair_id(uri_a: str, uri_b: str) -> str:
@@ -62,18 +64,19 @@ class SyncState:
         self._conn = sqlite3.connect(path, check_same_thread=False, timeout=30)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
-        self._conn.executescript(_SCHEMA)
+        self._conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         left = min(uri_a, uri_b)
         self.flipped = uri_a != left  # our "A" is the stored right-hand side
         row = self._conn.execute("SELECT value FROM meta WHERE key='schema'").fetchone()
-        if row is None:
-            self._conn.executemany("INSERT INTO meta VALUES (?, ?)", [("schema", SCHEMA_VERSION), ("left", left),
-                                                                       ("right", max(uri_a, uri_b))])
-            self._conn.commit()
-        elif row[0] != SCHEMA_VERSION:  # unknown future format: behave as a first run, never guess
-            self._conn.execute("DELETE FROM files")
+        if row is not None and row[0] != SCHEMA_VERSION:
+            # An older or unknown format: forget it and behave as a first run, which never deletes anything.
+            self._conn.execute("DROP TABLE IF EXISTS files")
             self._conn.execute("UPDATE meta SET value=? WHERE key='schema'", (SCHEMA_VERSION,))
-            self._conn.commit()
+        self._conn.executescript(_SCHEMA)
+        if row is None:
+            self._conn.executemany("INSERT OR REPLACE INTO meta VALUES (?, ?)", [("schema", SCHEMA_VERSION), ("left", left),
+                                                                                  ("right", max(uri_a, uri_b))])
+        self._conn.commit()
 
     @classmethod
     def open(cls, dirs: AppDirs, uri_a: str, uri_b: str) -> SyncState:
@@ -90,24 +93,25 @@ class SyncState:
 
     def load(self) -> dict[str, Baseline]:
         with self._lock:
-            rows = self._conn.execute("SELECT key, rel_l, size_l, mtime_l, rel_r, size_r, mtime_r FROM files").fetchall()
+            rows = self._conn.execute(
+                "SELECT key, rel_l, size_l, mtime_l, rel_r, size_r, mtime_r, recorded_ns FROM files").fetchall()
         out: dict[str, Baseline] = {}
-        for key, rl, sl, ml, rr, sr, mr in rows:
+        for key, rl, sl, ml, rr, sr, mr, rec in rows:
             if self.flipped:
-                out[fs_str(key)] = Baseline(fs_str(rr), sr, mr, fs_str(rl), sl, ml)
+                out[fs_str(key)] = Baseline(fs_str(rr), sr, mr, fs_str(rl), sl, ml, rec)
             else:
-                out[fs_str(key)] = Baseline(fs_str(rl), sl, ml, fs_str(rr), sr, mr)
+                out[fs_str(key)] = Baseline(fs_str(rl), sl, ml, fs_str(rr), sr, mr, rec)
         return out
 
     def put(self, key: str, base: Baseline) -> None:
         if self.flipped:
             row = (fs_bytes(key), fs_bytes(base.rel_b), base.size_b, base.mtime_b, fs_bytes(base.rel_a),
-                   base.size_a, base.mtime_a)
+                   base.size_a, base.mtime_a, base.recorded_ns)
         else:
             row = (fs_bytes(key), fs_bytes(base.rel_a), base.size_a, base.mtime_a, fs_bytes(base.rel_b),
-                   base.size_b, base.mtime_b)
+                   base.size_b, base.mtime_b, base.recorded_ns)
         with self._lock:
-            self._conn.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?)", row)
+            self._conn.execute("INSERT OR REPLACE INTO files VALUES (?, ?, ?, ?, ?, ?, ?, ?)", row)
 
     def drop(self, key: str) -> None:
         with self._lock:

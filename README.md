@@ -43,6 +43,7 @@ is read again.
 - [How duplicates are detected](#how-duplicates-are-detected)
 - [Performance](#performance)
 - [What counts as "the same file"](#what-counts-as-the-same-file)
+- [How much file attributes are trusted](#how-much-file-attributes-are-trusted)
 - [Choosing which copy to keep](#choosing-which-copy-to-keep)
 - [Actions](#actions)
 - [Safety model](#safety-model)
@@ -253,6 +254,31 @@ than images (re-encoded video, audio with different tags, documents re-saved by 
 editor), whole duplicate folders, a file that is a truncated prefix of another, and
 related sets such as RAW+JPEG pairs, Live Photos or `.xmp` sidecars (Duplio treats each
 file on its own, so a keep rule can keep one half of a pair from each location).
+
+## How much file attributes are trusted
+
+Modification time, size, permissions and inode numbers are easy to get wrong (clocks drift, drives round times to 1–2 s,
+tools restore old timestamps, bit rot changes data and leaves the metadata alone, network file systems reuse inode numbers).
+Duplio therefore never lets them decide anything that could cost data:
+
+| Decision | Decided by | What the attributes do |
+|---|---|---|
+| Is this file a duplicate / already in the destination / backed up? (`scan`, `dedupe`, `compare`, `diff`, `merge`, `sync`, `ingest`) | **content** (size is only a prefilter: different size means different content) | nothing; digests are read fresh, never taken from the cache, for "safe elsewhere" answers |
+| May this file be removed or replaced? (`dedupe`, `merge --move`, `--clean-source`, sync deletions) | **content, re-read right before the action** (hash, or byte-for-byte) | a changed size or time only makes Duplio skip the file |
+| Are these two hard links the same file? | inode and device, only on file systems where those are stable (not FAT, SMB, MTP, most network mounts) | |
+| Which copy is "newer" in a conflict | modification time, but a time in the future is never believed and a tie keeps both versions | a wrong clock cannot make a file win |
+| Which copy to keep among *identical* files, or the `{year}` in a merge layout | modification time (`oldest`, `newest`, `--layout`); photo imports read EXIF, then the file name, before the file time | only a preference; nothing is lost if it is wrong |
+
+Four tools must skip unchanged files cheaply, so they do trust size and time (like rsync, restic and FreeFileSync): the
+incremental `backup`, the default `mirror`, `snapshot` hard-link reuse and `sync` change detection. They add the "racy
+timestamp" rule: a file modified within a few seconds of the moment it was recorded (or within two timestamp steps of the
+drive, whichever is longer) is compared by content, because an edit in the same step keeps the same size and time. Times are
+compared within what both drives can store, and `--ignore-dst` forgives an exact one-hour shift.
+
+What no size-and-time tool can see is a change that kept both, on a file that had long settled (silent corruption, or a tool
+that restores timestamps). For that, ask for content: `backup run --rehash`, `mirror --checksum`, `snapshot create
+--verify-links`, `sync --basis content` (which avoids needless copies; it does not make sync read everything), and the
+read-everything checkers `manifest verify` and `backup check --read-data`.
 
 ## Choosing which copy to keep
 
@@ -612,7 +638,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the parts fit together 
 
 ```bash
 pip install -e ".[all,dev]"
-pytest              # 390+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, merge, sync, CLI, TUI
+pytest              # 440+ tests: engine, safety, odd file names, backends (fake ADB/SMB), backups, merge, sync, CLI, TUI
 ruff check src tests && mypy src
 ```
 

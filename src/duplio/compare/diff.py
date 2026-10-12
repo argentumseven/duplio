@@ -44,7 +44,7 @@ from duplio.events import CancelToken, NullProgress, ProgressSink
 from duplio.hashing.cache import HashCache
 from duplio.scan.inventory import FileEntry, Inventory
 from duplio.util.text import name_key
-from duplio.util.timecmp import SECOND_NS, mtimes_match, newer, tolerance_for
+from duplio.util.timecmp import SECOND_NS, mtimes_match, tolerance_for, trusted_newer
 
 
 class Basis(StrEnum):
@@ -315,9 +315,13 @@ def _classify(
         if entry.size == other.size and other.id in failed:
             return DiffItem(side, Kind.UNREADABLE, entry, same_path,
                             note="the file at this path on the other side could not be read")
-        direction = newer(entry.mtime_ns, other.mtime_ns, tolerance_ns=max(tolerance, SECOND_NS),
-                          dst_shift=options.ignore_dst)
-        return DiffItem(side, Kind.CHANGED, entry, same_path, extra_copies=extra_only, newer=direction, group=gid)
+        direction = trusted_newer(entry.mtime_ns, other.mtime_ns, now_ns=time.time_ns(),
+                                  tolerance_ns=max(tolerance, SECOND_NS), dst_shift=options.ignore_dst)
+        note = ""
+        if direction == 0 and abs(entry.mtime_ns - other.mtime_ns) > max(tolerance, SECOND_NS):
+            note = "a modification time is in the future, so neither side is called newer"
+        return DiffItem(side, Kind.CHANGED, entry, same_path, extra_copies=extra_only, newer=direction, group=gid,
+                        note=note)
     if entry.size in failed_sizes[1 - side]:
         # Something of this size on the other side could not be read: it might be this very content.
         return DiffItem(side, Kind.UNREADABLE, entry, [], group=gid,

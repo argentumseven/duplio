@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import contextlib
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
@@ -30,6 +31,7 @@ from duplio.transfer import copy_verified
 from duplio.util.fmt import utc_stamp
 from duplio.util.text import name_key, printable
 from duplio.util.throttle import RateLimiter
+from duplio.util.timecmp import is_racy
 from duplio.vfs.base import RawEntry, WalkStats
 from duplio.vfs.location import Location
 
@@ -174,6 +176,8 @@ def plan_mirror(
                   mtime_resolution_ns=loc.caps.mtime_resolution_ns)
         return value
 
+    now_ns = time.time_ns()
+    resolutions = (source.caps.mtime_resolution_ns, dest.caps.mtime_resolution_ns)
     progress.stage("Comparing", total_items=len(plan._src))
     new_files: list[RawEntry] = []
     for _rel, s in sorted(plan._src.items()):
@@ -185,7 +189,9 @@ def plan_mirror(
             new_files.append(s)
         elif s.size != d.size:
             plan.actions.append(MirrorAction("update", s.rel, s.size, "size differs", dest_rel=d.rel))
-        elif options.checksum:
+        elif options.checksum or is_racy(s.mtime_ns, now_ns, *resolutions):
+            # Files changed within the last few seconds are compared by content even without --checksum: an
+            # edit in the same timestamp step as the copy would keep the same size and time.
             if digest(source, s) == digest(dest, d):
                 plan.unchanged += 1
             else:

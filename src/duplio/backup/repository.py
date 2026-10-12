@@ -54,6 +54,7 @@ from duplio.scan.filters import ScanFilter, extension
 from duplio.util.fmt import iso_now, utc_stamp_ms
 from duplio.util.text import json_dumps
 from duplio.util.throttle import RateLimiter
+from duplio.util.timecmp import is_racy
 from duplio.vfs.base import RawEntry
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import Location
@@ -579,6 +580,8 @@ class Repository:
             entries: dict[str, TreeEntry] = {}
             lock = threading.Lock()
             todo: list[RawEntry] = []
+            parent_ns = int(parent.timestamp * 1e9) if parent is not None else 0
+            resolution = source.caps.mtime_resolution_ns
             for raw in files:
                 prev = parent_tree.get(raw.rel)
                 if (
@@ -586,6 +589,9 @@ class Repository:
                     and prev is not None
                     and prev.size == raw.size
                     and prev.mtime_ns == raw.mtime_ns
+                    # Same size and time prove nothing for a file changed around the time of the parent snapshot:
+                    # it may have been edited again within the same timestamp step. Those are read again.
+                    and not is_racy(raw.mtime_ns, parent_ns, resolution)
                     and all(c in index for c in prev.chunks)
                 ):
                     entries[raw.rel] = TreeEntry(raw.rel, raw.size, raw.mtime_ns, list(prev.chunks), prev.mode)

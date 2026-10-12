@@ -32,3 +32,39 @@ def newer(a_ns: int, b_ns: int, *, tolerance_ns: int = SECOND_NS, dst_shift: boo
     if mtimes_match(a_ns, b_ns, tolerance_ns=tolerance_ns, dst_shift=dst_shift):
         return 0
     return 1 if a_ns > b_ns else -1
+
+
+# ---------------------------------------------------------------------------
+# Timestamps that cannot prove anything
+# ---------------------------------------------------------------------------
+
+RACY_WINDOW_NS = 3 * SECOND_NS
+FUTURE_SLACK_NS = 24 * HOUR_NS
+
+
+def racy_window(*resolutions_ns: int) -> int:
+    """How close to a reference moment a modification time is too close to prove "unchanged"."""
+    return max([RACY_WINDOW_NS, *(2 * r for r in resolutions_ns)])
+
+
+def is_racy(mtime_ns: int, reference_ns: int, *resolutions_ns: int) -> bool:
+    """Was the file modified so near the moment it was recorded that an edit could have kept the same time?
+
+    A drive stores times in steps (1-2 s on FAT, SMB and many phones), so a file written, recorded and then
+    written again within one step shows the same size and time both times. Size and time are therefore trusted
+    only for files that were already older than the window when they were recorded (the "racy timestamp"
+    problem every incremental tool has to handle).
+    """
+    return reference_ns - mtime_ns < racy_window(*resolutions_ns)
+
+
+def in_the_future(mtime_ns: int, now_ns: int) -> bool:
+    """A modification time more than a day ahead of the clock: a wrong clock or a tool that sets it deliberately."""
+    return mtime_ns > now_ns + FUTURE_SLACK_NS
+
+
+def trusted_newer(a_ns: int, b_ns: int, *, now_ns: int, tolerance_ns: int = SECOND_NS, dst_shift: bool = False) -> int:
+    """Like :func:`newer`, but ``0`` (undecided) when either time is in the future: neither can be believed."""
+    if in_the_future(a_ns, now_ns) or in_the_future(b_ns, now_ns):
+        return 0
+    return newer(a_ns, b_ns, tolerance_ns=tolerance_ns, dst_shift=dst_shift)

@@ -54,7 +54,7 @@ from duplio.util.fmt import iso_now
 from duplio.util.names import rel_issues
 from duplio.util.text import name_key
 from duplio.util.throttle import RateLimiter
-from duplio.util.timecmp import mtimes_match, newer, tolerance_for
+from duplio.util.timecmp import is_racy, mtimes_match, tolerance_for, trusted_newer
 from duplio.vfs.guards import check_destination
 from duplio.vfs.location import BackendRegistry
 
@@ -220,6 +220,11 @@ def plan_sync(
         return e.size != size or not mtimes_match(e.mtime_ns, mtime, tolerance_ns=tol_side[side],
                                                   dst_shift=options.ignore_dst)
 
+    def unproven(side: int, base: Baseline) -> bool:
+        """Was this side's file recorded so soon after its last modification that "same size and time" proves nothing?"""
+        mtime = base.mtime_a if side == 0 else base.mtime_b
+        return bool(base.recorded_ns) and is_racy(mtime, base.recorded_ns, roots[side].caps.mtime_resolution_ns)
+
     def same_by_time_size(a: FileEntry, b: FileEntry) -> bool:
         return a.size == b.size and mtimes_match(a.mtime_ns, b.mtime_ns, tolerance_ns=tol_pair,
                                                   dst_shift=options.ignore_dst)
@@ -248,6 +253,10 @@ def plan_sync(
             if base is not None:
                 ca, cb = changed(0, a, base), changed(1, b, base)
                 if not ca and not cb:
+                    if unproven(0, base) or unproven(1, base):
+                        # Edited within the same timestamp step as the last sync? Only the content can say.
+                        undecided.append((key, a, b, None))
+                        continue
                     plan.unchanged += 1
                     continue
                 if ca != cb:
@@ -347,7 +356,11 @@ def _conflict_action(key: str, a: FileEntry, b: FileEntry, options: SyncOptions,
     if policy == "skip":
         plan.skipped.append(SyncSkip(key, a.rel, "changed differently on both sides (--on-conflict skip)"))
         return None
-    direction = newer(a.mtime_ns, b.mtime_ns, tolerance_ns=tol, dst_shift=options.ignore_dst)
+    direction = trusted_newer(a.mtime_ns, b.mtime_ns, now_ns=time.time_ns(), tolerance_ns=tol,
+                              dst_shift=options.ignore_dst)
+    if policy == "newer" and direction == 0:
+        # Equal times, or a time that cannot be believed: no side can be called newer, so nothing is replaced.
+        policy = "keep-both"
     if policy == "a":
         winner = 0
     elif policy == "b":
@@ -355,7 +368,7 @@ def _conflict_action(key: str, a: FileEntry, b: FileEntry, options: SyncOptions,
     elif direction != 0:
         winner = 0 if direction > 0 else 1
     else:
-        winner = 0  # same time, different content: the visible conflict copy keeps B's version safe
+        winner = 0  # keep-both with no usable times: A keeps the name, B's version is kept alongside
     why = "changed on both sides"
     if policy in ("newer", "a", "b"):
         return SyncAction(SyncOp.UPDATE, key, a, b, frm=winner,
@@ -542,7 +555,7 @@ def run_sync(
 
 
 def _baseline(a: FileEntry, b: FileEntry) -> Baseline:
-    return Baseline(a.rel, a.size, a.mtime_ns, b.rel, b.size, b.mtime_ns)
+    return Baseline(a.rel, a.size, a.mtime_ns, b.rel, b.size, b.mtime_ns, time.time_ns())
 
 
 def _record(state: SyncState, key: str, plan: SyncPlan, src_side: int, src: FileEntry, dest_path: str,

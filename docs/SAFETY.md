@@ -134,6 +134,16 @@ code that enforces it and the test that proves it.
 | Backslashes in Linux file names stay part of the name; keep-both names obey the destination's rules | `merge.render_layout`, `_conflict` | `test_a_backslash_in_a_linux_file_name_is_part_of_the_name`, `test_keep_both_names_respect_the_destination_rules` |
 | Retention always keeps the newest snapshot that had no read errors | `retention.apply_policy` | `test_retention_keeps_the_newest_snapshot_without_errors` |
 
+## Attributes are hints, not proof
+
+| Guarantee | Where | Test |
+|---|---|---|
+| A file edited within the same timestamp step as the last backup, snapshot, mirror run or sync is compared by content instead of being assumed unchanged | `util/timecmp.py::is_racy` in `Repository.backup`, `SnapshotSet.create`, `plan_mirror`, `plan_sync` | `test_backup_reads_again_a_file_edited_in_the_same_timestamp_step`, `test_snapshot_copies_a_file_edited_in_the_same_timestamp_step`, `test_mirror_compares_recent_files_by_content`, `test_sync_compares_by_content_a_file_edited_in_the_same_timestamp_step` |
+| For long-settled files, content checks are available on request (`--rehash`, `--checksum`, `--verify-links`) | | `test_backup_trusts_old_files_and_rehash_distrusts_them`, `test_mirror_checksum_is_the_answer_for_old_files`, `test_snapshot_verify_links_catches_edits_that_kept_size_and_time` |
+| The limit is stated and tested, not hidden: sync cannot see a silent edit of a settled file | | `test_sync_cannot_see_a_silent_edit_of_a_long_settled_file` |
+| A modification time in the future never wins a "newer" contest (merge, sync, diff); equal or doubtful times keep both versions | `timecmp.trusted_newer` | `test_a_time_in_the_future_never_wins_a_newer_contest`, `test_racy_and_future_rules` |
+| An older sync-history format is dropped (first run: nothing is deleted), never misread | `syncstate.py` | `test_an_older_sync_history_is_dropped_not_misread` |
+
 ## Notifications cannot hurt a job
 
 A failed webhook, command or e-mail is a warning, never a failure (`test_failed_delivery_is_reported_not_raised`); messages
@@ -152,7 +162,7 @@ reach commands through environment variables, never through the shell command li
 - The system trash cannot be restored programmatically; Duplio tells you where the files went.
 - A share mounted locally *and* opened as `smb://` at the same time cannot be recognised as the same storage in advance. The executor's post-action keeper check catches it and rolls the change back.
 - **A lost repository password cannot be recovered.** Encryption protects contents and names; it does not hide how many objects there are, their sizes or their timestamps. `duplio-repo.json` itself is not authenticated: a changed configuration is refused when it contradicts the stored data or its own markers, but on a repository that holds no data yet nothing can reveal that its key block was removed. Changing the password re-wraps the master key and does not rotate it, so a saved copy of the old configuration still opens with the old password.
-- Snapshot hard-link reuse trusts size, modification time (within what the drive can store) and permission bits; a file edited without changing any of them would be linked to the stale copy. `duplio manifest verify` finds that kind of change.
+- Incremental backup, the default mirror, snapshot hard-link reuse and sync change detection trust size, modification time (within what the drive can store) and, for snapshots, permission bits, except for files modified around the time they were recorded (the racy-timestamp rule). A long-settled file edited without changing size or time is not noticed by them; `--rehash`, `--checksum`, `--verify-links`, `duplio manifest verify` and `backup check --read-data` are the ways to look.
 - The first sync with the default `time-size` basis treats same-size, same-time files as identical without reading them; `--basis content` reads them.
 - `merge`, `sync` and `snapshot` copy file contents and modification times only, with the same limits as backups (no symbolic links, ownership, extended attributes or empty folders). Hard-link snapshots keep permission bits.
 - `sync` does not detect renames: a renamed file is a deletion plus a new file (the content is copied again; nothing is lost). It also cannot pair names that differ only by case or Unicode form on a drive that distinguishes them; those are left alone and reported.

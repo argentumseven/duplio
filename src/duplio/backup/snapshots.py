@@ -46,7 +46,7 @@ from duplio.transfer import copy_verified
 from duplio.util.fmt import iso_now
 from duplio.util.text import json_dumps
 from duplio.util.throttle import RateLimiter
-from duplio.util.timecmp import mtimes_match, tolerance_for
+from duplio.util.timecmp import is_racy, mtimes_match, tolerance_for
 from duplio.vfs.base import RawEntry, WalkStats
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import Location
@@ -147,6 +147,7 @@ class SnapshotSet:
         tags: list[str] | None = None,
         one_file_system: bool = True,
         limiter: RateLimiter | None = None,
+        verify_links: bool = False,
         progress: ProgressSink | None = None,
         cancel: CancelToken | None = None,
         now: float | None = None,
@@ -157,8 +158,8 @@ class SnapshotSet:
         self.require_hardlinks()
         with self._lock("snapshot"):
             return self._create_locked(source, scan_filter=scan_filter, label=label, tags=tags,
-                                       one_file_system=one_file_system, limiter=limiter, progress=progress,
-                                       cancel=cancel, now=now)
+                                       one_file_system=one_file_system, limiter=limiter, verify_links=verify_links,
+                                       progress=progress, cancel=cancel, now=now)
 
     def _create_locked(
         self,
@@ -169,6 +170,7 @@ class SnapshotSet:
         tags: list[str] | None,
         one_file_system: bool,
         limiter: RateLimiter | None,
+        verify_links: bool,
         progress: ProgressSink | None,
         cancel: CancelToken | None,
         now: float | None,
@@ -213,6 +215,8 @@ class SnapshotSet:
             report = SnapshotReport(meta=meta, name=name)
             report.errors.extend(walk.errors)
             prev_dir = db.join(self.loc.path, previous[0]) if previous else None
+            prev_ns = int(previous[1].timestamp * 1e9) if previous else 0
+            resolutions = (self.loc.caps.mtime_resolution_ns, source.caps.mtime_resolution_ns)
             tolerance = tolerance_for(self.loc.caps.mtime_resolution_ns, source.caps.mtime_resolution_ns, floor_ns=1_000)
             lock = threading.Lock()
             algorithm = default_full_algorithm()
@@ -231,7 +235,11 @@ class SnapshotSet:
                             if (old_info is not None and old_info.is_file and not old_info.is_symlink
                                     and old_info.size == raw.size
                                     and mtimes_match(old_info.mtime_ns, raw.mtime_ns, tolerance_ns=tolerance)
-                                    and _same_permissions(old_info.mode, src_mode)):
+                                    and _same_permissions(old_info.mode, src_mode)
+                                    # a file changed around the time of the previous snapshot may have been edited
+                                    # again within the same timestamp step: size and time cannot vouch for it
+                                    and not is_racy(raw.mtime_ns, prev_ns, *resolutions)
+                                    and (not verify_links or _same_content(sb, raw, db, old, algorithm, cancel))):
                                 db.makedirs(db.parent(target))
                                 db.hardlink(old, target)
                                 linked = True
@@ -327,6 +335,17 @@ def _slug(label: str) -> str:
 
 
 _WRITE_BITS = 0o222
+
+
+def _same_content(sb, raw: RawEntry, db, old: str, algorithm: str, cancel: CancelToken) -> bool:  # type: ignore[no-untyped-def]
+    """Read both files and compare: the proof that size and time alone cannot give."""
+    from duplio.hashing.core import hash_file
+
+    try:
+        return hash_file(sb, raw.path, algorithm, expected_size=raw.size, cancel=cancel) == hash_file(
+            db, old, algorithm, expected_size=raw.size, cancel=cancel)
+    except OSError:
+        return False
 
 
 def _same_permissions(snapshot_mode: int | None, source_mode: int | None) -> bool:

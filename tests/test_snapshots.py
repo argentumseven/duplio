@@ -166,9 +166,11 @@ def test_snapshot_inside_source_is_refused(tmp_path: Path, registry: BackendRegi
 def test_odd_file_names(tmp_path: Path, registry: BackendRegistry) -> None:
     src = tmp_path / "src"
     src.mkdir()
-    with open(os.fsencode(src) + b"/bad\xffname\n.bin", "wb") as handle:
+    odd = os.fsencode(src) + b"/bad\xffname\n.bin"
+    with open(odd, "wb") as handle:
         handle.write(b"payload")
-    write(src / "Ünï ✓" / "日本語.txt", b"text")
+    os.utime(odd, (T0, T0))  # files edited moments before a snapshot are (rightly) not hard-linked on size and time
+    write(src / "Ünï ✓" / "日本語.txt", b"text", mtime=T0)
     report = take(registry, src, tmp_path / "snaps", now=1_700_000_000)
     again = take(registry, src, tmp_path / "snaps", now=1_700_000_500)
     assert report.copied == 2 and again.linked == 2 and not again.errors

@@ -35,10 +35,13 @@ def snapshot() -> None:
 @click.option("-x", "--exclude", multiple=True, metavar="GLOB")
 @click.option("-i", "--include", multiple=True, metavar="GLOB")
 @click.option("--cross-filesystems", is_flag=True)
+@click.option("--verify-links", is_flag=True,
+              help="Before hard-linking an unchanged-looking file, compare its content with the previous snapshot's "
+                   "copy (reads both; catches edits that kept the size and time).")
 @guard_options
 @handle_errors
 def snapshot_create(source: str, dest: str, label: str, tags: tuple[str, ...], exclude: tuple[str, ...],
-                    include: tuple[str, ...], cross_filesystems: bool, bwlimit: str | None,
+                    include: tuple[str, ...], cross_filesystems: bool, verify_links: bool, bwlimit: str | None,
                     expect_mounted: bool | None, sentinel: str | None) -> None:
     """Add a snapshot of SOURCE to DEST (a local or hard-link capable drive).
 
@@ -55,7 +58,7 @@ def snapshot_create(source: str, dest: str, label: str, tags: tuple[str, ...], e
     def work(cancel):  # type: ignore[no-untyped-def]
         with progress_for(app) as progress:
             return snaps.create(src, scan_filter=flt, label=label, tags=list(tags),
-                                one_file_system=not cross_filesystems, limiter=make_limiter(bwlimit),
+                                one_file_system=not cross_filesystems, limiter=make_limiter(bwlimit), verify_links=verify_links,
                                 progress=progress, cancel=cancel)
 
     report = run_cancellable(work)
