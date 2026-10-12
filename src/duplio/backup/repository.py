@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from duplio import __version__
+from duplio.backup.crypto import PasswordRequired, RepoCrypto, require_library
 from duplio.compare.scheduler import Job, run_jobs
 from duplio.errors import LockError, RepositoryError
 from duplio.events import CancelToken, NullProgress, ProgressSink
@@ -58,7 +59,7 @@ from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import Location
 
 REPO_FORMAT = "duplio-repo"
-REPO_VERSION = 1
+REPO_VERSION = 2  # 2: may carry an 'encryption' block; version-1 repositories (unencrypted) still open
 CONFIG_NAME = "duplio-repo.json"
 OBJECT_MAGIC = b"DPO1"
 FLAG_RAW = 0
@@ -74,6 +75,21 @@ INCOMPRESSIBLE = frozenset(
         "rar", "jar", "apk", "ipa", "docx", "xlsx", "pptx", "odt", "pdf", "dng", "cr2", "cr3", "nef", "arw",
     }
 )  # fmt: skip
+
+
+def password_from_environment() -> str | None:
+    """DUPLIO_REPO_PASSWORD, or the first line of the file named by DUPLIO_REPO_PASSWORD_FILE."""
+    value = os.environ.get("DUPLIO_REPO_PASSWORD")
+    if value:
+        return value
+    path = os.environ.get("DUPLIO_REPO_PASSWORD_FILE")
+    if path:
+        try:
+            with open(path, encoding="utf-8") as handle:
+                return handle.readline().rstrip("\r\n") or None
+        except OSError as exc:
+            raise RepositoryError(f"cannot read the password file {path}: {exc}") from exc
+    return None
 
 
 def object_id(data: bytes | memoryview) -> str:
@@ -151,6 +167,36 @@ class SnapshotMeta:
 
 
 @dataclass
+class FileVersion:
+    """One distinct content of a path, and the snapshots it appears in."""
+
+    size: int
+    mtime_ns: int
+    chunks: tuple[str, ...]
+    snapshots: list[str] = field(default_factory=list)
+    times: list[str] = field(default_factory=list)
+
+
+@dataclass
+class FoundFile:
+    path: str
+    versions: list[FileVersion] = field(default_factory=list)
+
+    def add(self, snap: SnapshotMeta, entry: TreeEntry) -> None:
+        key = tuple(entry.chunks)
+        for v in self.versions:
+            if v.chunks == key:
+                v.snapshots.append(snap.id)
+                v.times.append(snap.time)
+                return
+        self.versions.append(FileVersion(entry.size, entry.mtime_ns, key, [snap.id], [snap.time]))
+
+    @property
+    def snapshot_count(self) -> int:
+        return sum(len(v.snapshots) for v in self.versions)
+
+
+@dataclass
 class BackupReport:
     snapshot: SnapshotMeta
     errors: list[tuple[str, str]] = field(default_factory=list)
@@ -183,10 +229,11 @@ class RestoreReport:
 
 
 class Repository:
-    def __init__(self, location: Location, config: dict[str, Any]) -> None:
+    def __init__(self, location: Location, config: dict[str, Any], crypto: RepoCrypto | None = None) -> None:
         self.loc = location
         self.b = location.backend
         self.config = config
+        self.crypto = crypto
         self.chunk_size = int(config.get("chunk_size", DEFAULT_CHUNK))
         self.compression = str(config.get("compression", "auto"))
         self._index: set[str] | None = None
@@ -198,8 +245,19 @@ class Repository:
         return self.b.join(self.loc.path, rel)
 
     @classmethod
-    def init(cls, location: Location, *, chunk_size: int = DEFAULT_CHUNK, compression: str = "auto") -> Repository:
+    def init(
+        cls,
+        location: Location,
+        *,
+        chunk_size: int = DEFAULT_CHUNK,
+        compression: str = "auto",
+        password: str | None = None,
+        scrypt_n: int | None = None,
+    ) -> Repository:
+        """Create a repository; with ``password`` everything stored in it is encrypted."""
         b = location.backend
+        if password is not None:
+            require_library()
         if compression not in ("auto", "always", "never"):
             raise RepositoryError("compression must be auto, always or never")
         if not 64 * 1024 <= chunk_size <= 64 * 1024 * 1024:
@@ -214,24 +272,31 @@ class Repository:
             if existing:
                 raise RepositoryError(f"{location.display} is not empty; choose an empty or new folder")
         b.makedirs(location.path)
-        config = {
+        repo_id = secrets.token_hex(16)
+        config: dict[str, Any] = {
             "format": REPO_FORMAT,
-            "version": REPO_VERSION,
-            "id": secrets.token_hex(16),
+            "version": REPO_VERSION if password is not None else 1,
+            "id": repo_id,
             "created": iso_now(),
-            "hash": "blake2b-256",
+            "hash": "blake2b-256" if password is None else "hmac-sha256",
             "chunk_size": chunk_size,
             "compression": compression,
             "created_by": f"duplio {__version__}",
         }
+        crypto = None
+        if password is not None:
+            from duplio.backup.crypto import DEFAULT_SCRYPT_N
+
+            crypto, config["encryption"] = RepoCrypto.create(password, repo_id, scrypt_n=scrypt_n or DEFAULT_SCRYPT_N)
         for sub in ("objects", "trees", "snapshots", "locks"):
             b.makedirs(b.join(location.path, sub))
         with b.open_write(b.join(location.path, CONFIG_NAME)) as handle:
             handle.write(json.dumps(config, indent=2).encode())
-        return cls(location, config)
+        return cls(location, config, crypto)
 
     @classmethod
-    def open(cls, location: Location) -> Repository:
+    def open(cls, location: Location, *, password: str | None = None) -> Repository:
+        """Open a repository. An encrypted one needs ``password`` (or DUPLIO_REPO_PASSWORD / _FILE)."""
         b = location.backend
         try:
             with b.open_read(b.join(location.path, CONFIG_NAME)) as handle:
@@ -250,7 +315,33 @@ class Repository:
             raise RepositoryError(f"{location.display} is not a Duplio repository")
         if int(config.get("version", 0)) > REPO_VERSION:
             raise RepositoryError("repository was created by a newer Duplio; please upgrade")
-        return cls(location, config)
+        crypto = None
+        if "encryption" in config:
+            password = password if password is not None else password_from_environment()
+            if password is None:
+                raise PasswordRequired(
+                    f"{location.display} is encrypted: enter its password, or set DUPLIO_REPO_PASSWORD "
+                    "(or DUPLIO_REPO_PASSWORD_FILE)"
+                )
+            crypto = RepoCrypto.unlock(password, config["encryption"], str(config["id"]))
+        return cls(location, config, crypto)
+
+    @property
+    def encrypted(self) -> bool:
+        return self.crypto is not None
+
+    def change_password(self, new_password: str, *, scrypt_n: int | None = None) -> None:
+        """Re-wrap the master key under a new password. Data is untouched; the old password stops working."""
+        if self.crypto is None:
+            raise RepositoryError("this repository is not encrypted")
+        from duplio.backup.crypto import DEFAULT_SCRYPT_N
+
+        config = dict(self.config)
+        config["encryption"] = self.crypto.rewrap(new_password, str(config["id"]), scrypt_n=scrypt_n or DEFAULT_SCRYPT_N)
+        with self.lock("change-password"):
+            with self.b.open_write(self.p(CONFIG_NAME), overwrite=True) as handle:
+                handle.write(json.dumps(config, indent=2).encode())
+            self.config = config
 
     # ------------------------------------------------------------------ locking
     @contextlib.contextmanager
@@ -327,12 +418,14 @@ class Repository:
 
     def put(self, data: bytes, *, compress: bool) -> tuple[str, int, bool]:
         """Store a chunk; returns ``(oid, stored_bytes, newly_written)``."""
-        oid = object_id(data)
+        oid = self.oid(data)
         index = self.index()
         with self._index_lock:
             if oid in index:
                 return oid, 0, False
         blob = encode_object(data, compress)
+        if self.crypto is not None:
+            blob = self.crypto.seal(blob, oid.encode())
         path = self.object_path(oid)
         if self.limiter is not None:
             self.limiter.acquire(len(blob))
@@ -348,10 +441,23 @@ class Repository:
     def get(self, oid: str) -> bytes:
         with self.b.open_read(self.object_path(oid)) as handle:
             blob = handle.read()
+        if self.crypto is not None:
+            blob = self.crypto.open(blob, oid.encode())
         data = decode_object(blob)
-        if object_id(data) != oid:
+        if self.oid(data) != oid:
             raise RepositoryError(f"object {oid[:12]}… is corrupt (content does not match its id)")
         return data
+
+    def oid(self, data: bytes | memoryview) -> str:
+        """The id a chunk is stored under: its BLAKE2b hash, or a keyed HMAC in an encrypted repository."""
+        return object_id(data) if self.crypto is None else self.crypto.object_id(data)
+
+    # ---- small metadata files (file lists, snapshot summaries)
+    def _seal_meta(self, kind: str, name: str, payload: bytes) -> bytes:
+        return payload if self.crypto is None else self.crypto.seal(payload, f"{kind}:{name}".encode())
+
+    def _open_meta(self, kind: str, name: str, blob: bytes) -> bytes:
+        return blob if self.crypto is None else self.crypto.open(blob, f"{kind}:{name}".encode())
 
     # ------------------------------------------------------------------ snapshots
     def snapshots(self) -> list[SnapshotMeta]:
@@ -361,8 +467,9 @@ class Repository:
                 continue
             try:
                 with self.b.open_read(self.p(f"snapshots/{name}")) as handle:
-                    out.append(SnapshotMeta.from_dict(json.loads(handle.read())))
-            except (OSError, ValueError, TypeError):
+                    raw = self._open_meta("snap", name[: -len(".json")], handle.read())
+                out.append(SnapshotMeta.from_dict(json.loads(raw)))
+            except (OSError, ValueError, TypeError, RepositoryError):
                 continue
         out.sort(key=lambda s: (s.time, s.id))
         return out
@@ -382,15 +489,15 @@ class Repository:
 
     def tree(self, snapshot_id: str) -> list[TreeEntry]:
         with self.b.open_read(self.p(f"trees/{snapshot_id}.json.gz")) as handle:
-            data = json.loads(gzip.decompress(handle.read()))
+            data = json.loads(gzip.decompress(self._open_meta("tree", snapshot_id, handle.read())))
         return [TreeEntry.from_list(row) for row in data["entries"]]
 
     def _write_snapshot(self, meta: SnapshotMeta, entries: list[TreeEntry]) -> None:
         tree = {"format": "duplio-tree", "version": 1, "snapshot": meta.id, "entries": [e.to_list() for e in entries]}
         with self.b.open_write(self.p(f"trees/{meta.id}.json.gz")) as handle:
-            handle.write(gzip.compress(json_dumps(tree).encode(), 6))
+            handle.write(self._seal_meta("tree", meta.id, gzip.compress(json_dumps(tree).encode(), 6)))
         with self.b.open_write(self.p(f"snapshots/{meta.id}.json")) as handle:
-            handle.write(json_dumps(meta.to_dict(), indent=1).encode())
+            handle.write(self._seal_meta("snap", meta.id, json_dumps(meta.to_dict(), indent=1).encode()))
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         # Summary first: once it is gone the snapshot no longer exists, even if
@@ -631,7 +738,7 @@ class Repository:
         try:
             with backend.open_read(path) as handle:
                 for oid in entry.chunks:
-                    if object_id(_read_exact(handle, self.chunk_size)) != oid:
+                    if self.oid(_read_exact(handle, self.chunk_size)) != oid:
                         return False
                 return not handle.read(1)
         except OSError:
@@ -660,7 +767,7 @@ class Repository:
             cancel.check()
             try:
                 tree = self.tree(snap.id)
-            except (OSError, ValueError) as exc:
+            except (OSError, ValueError, RepositoryError) as exc:
                 report.unreadable_trees.append(f"{snap.id}: {exc}")
                 continue
             missing = sorted({c for e in tree for c in e.chunks if c not in index})
@@ -697,7 +804,7 @@ class Repository:
             for snap in snaps:
                 try:
                     referenced.update(c for e in self.tree(snap.id) for c in e.chunks)
-                except (OSError, ValueError) as exc:
+                except (OSError, ValueError, RepositoryError) as exc:
                     raise RepositoryError(
                         f"snapshot {snap.id} cannot be read ({exc}); refusing to prune until 'duplio backup check' passes"
                     ) from exc
@@ -732,6 +839,51 @@ class Repository:
                 if ".duplio-tmp-" in obj:
                     with contextlib.suppress(OSError):
                         self.b.remove(self.b.join(self.b.join(objects_dir, name), obj))
+
+    def find(self, pattern: str, *, snapshot: str | None = None, regex: bool = False,
+             progress: ProgressSink | None = None) -> list[FoundFile]:
+        """Files whose path matches ``pattern`` (a glob, or a regex) in one snapshot or in all of them.
+
+        Each result lists the distinct versions (by content) and where they occur, so a deleted file or an
+        earlier edition is easy to find.
+        """
+        import re
+
+        from duplio.scan.filters import compile_glob
+
+        matcher = re.compile(pattern, re.IGNORECASE) if regex else compile_glob(pattern)
+        search = matcher.search if regex else matcher.match
+        progress = progress or NullProgress()
+        snaps = [self.find_snapshot(snapshot)] if snapshot else self.snapshots()
+        progress.stage("Searching snapshots", total_items=len(snaps))
+        found: dict[str, FoundFile] = {}
+        for snap in snaps:
+            try:
+                entries = self.tree(snap.id)
+            except (OSError, ValueError, RepositoryError):
+                progress.advance(items=1)
+                continue
+            for e in entries:
+                if not search(e.path):
+                    continue
+                hit = found.setdefault(e.path, FoundFile(e.path))
+                hit.add(snap, e)
+            progress.advance(items=1)
+        return sorted(found.values(), key=lambda f: f.path)
+
+    def history(self, path: str) -> FoundFile | None:
+        """Every version of one exact path across all snapshots (None if it never existed)."""
+        result = None
+        for snap in self.snapshots():
+            try:
+                entries = self.tree(snap.id)
+            except (OSError, ValueError, RepositoryError):
+                continue
+            for e in entries:
+                if e.path == path:
+                    result = result or FoundFile(path)
+                    result.add(snap, e)
+        return result
 
     def diff(self, a: str, b: str) -> dict[str, list[str]]:
         ta = {e.path: e for e in self.tree(self.find_snapshot(a).id)}

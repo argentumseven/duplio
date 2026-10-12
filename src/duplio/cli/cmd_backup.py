@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import sys
 from typing import Any
 
@@ -11,9 +12,11 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from duplio.backup.crypto import MIN_PASSWORD_LEN, PasswordRequired, WrongPassword
+from duplio.backup.export import export_snapshot
 from duplio.backup.ingest import DEFAULT_LAYOUT, LAYOUT_TOKENS, IngestOptions, ingest
 from duplio.backup.mirror import MirrorOptions, plan_mirror, run_mirror
-from duplio.backup.repository import DEFAULT_CHUNK, Repository
+from duplio.backup.repository import DEFAULT_CHUNK, Repository, password_from_environment
 from duplio.backup.retention import RetentionPolicy, apply_policy
 from duplio.cli.app import SIZE, cli, get_app, handle_errors, progress_for, run_cancellable
 from duplio.cli.cmd_drive import guard_destination, guard_options, make_limiter
@@ -24,12 +27,61 @@ from duplio.util.fmt import format_ns, human_duration, human_size, parse_duratio
 from duplio.util.text import printable
 
 
+def open_repo(app, location) -> Repository:  # type: ignore[no-untyped-def]
+    """Open a repository, asking for its password (up to three times) when it is encrypted."""
+    password: str | None = _password_from_file(app)
+    given = password is not None
+    interactive = sys.stdin.isatty()
+    for _ in range(3):
+        try:
+            return Repository.open(location, password=password)
+        except PasswordRequired:
+            if not interactive:
+                raise
+        except WrongPassword:
+            if not interactive or given or password is None:
+                raise  # a password from a file or the environment is never retried
+            app.console.print(Text("Wrong password.", style="red"))
+        password = getpass.getpass(f"Password for {location.display}: ")
+        given = False
+    raise WrongPassword("wrong password (three attempts)")
+
+
+def _password_from_file(app) -> str | None:  # type: ignore[no-untyped-def]
+    if not app.password_file:
+        return None
+    try:
+        with open(app.password_file, encoding="utf-8") as handle:
+            return handle.readline().rstrip("\r\n") or None
+    except OSError as exc:
+        raise ConfigError(f"cannot read the password file {app.password_file}: {exc}") from exc
+
+
 def _repo(app, text: str) -> Repository:  # type: ignore[no-untyped-def]
-    return Repository.open(app.registry.open(text))
+    return open_repo(app, app.registry.open(text))
+
+
+def _new_password(app) -> str:  # type: ignore[no-untyped-def]
+    password = _password_from_file(app) or password_from_environment()
+    if password is not None:
+        return password
+    if not sys.stdin.isatty():
+        raise ConfigError("an encrypted repository needs a password: set DUPLIO_REPO_PASSWORD or DUPLIO_REPO_PASSWORD_FILE")
+    for _ in range(3):
+        first = getpass.getpass("New repository password: ")
+        if len(first) < MIN_PASSWORD_LEN:
+            app.console.print(Text(f"Use at least {MIN_PASSWORD_LEN} characters.", style="yellow"))
+            continue
+        if getpass.getpass("Repeat the password: ") == first:
+            return first
+        app.console.print(Text("The two entries differ.", style="yellow"))
+    raise ConfigError("no password was set")
 
 
 @cli.group()
-def backup() -> None:
+@click.option("--password-file", type=click.Path(exists=True, dir_okay=False), default=None,
+              help="Read the repository password from the first line of this file.")
+def backup(password_file: str | None) -> None:
     """Versioned, deduplicated snapshots of folders, phones and shares.
 
     \b
@@ -39,19 +91,30 @@ def backup() -> None:
     duplio backup snapshots /mnt/usb/duplio-repo
     duplio backup restore /mnt/usb/duplio-repo latest ~/Restored
     duplio backup forget /mnt/usb/duplio-repo --keep-daily 7 --keep-monthly 12 --prune
+
+    Encrypted repositories: 'backup init --encrypt'; the password comes from a prompt,
+    --password-file, or the DUPLIO_REPO_PASSWORD environment variable.
     """
+    get_app().password_file = password_file
 
 
 @backup.command("init")
 @click.argument("repo")
 @click.option("--chunk-size", type=SIZE, default=DEFAULT_CHUNK, show_default=True)
 @click.option("--compression", type=click.Choice(["auto", "always", "never"]), default="auto", show_default=True)
+@click.option("--encrypt", is_flag=True, help="Encrypt everything before it is stored (AES-256-GCM; needs a password).")
 @handle_errors
-def backup_init(repo: str, chunk_size: int, compression: str) -> None:
+def backup_init(repo: str, chunk_size: int, compression: str, encrypt: bool) -> None:
     """Create a new, empty repository."""
     app = get_app()
-    r = Repository.init(app.registry.open(repo), chunk_size=chunk_size, compression=compression)
+    password = _new_password(app) if encrypt else None
+    r = Repository.init(app.registry.open(repo), chunk_size=chunk_size, compression=compression, password=password)
     app.console.print(Text.assemble(("Repository created: ", "green"), r.loc.display, (f"  (id {r.config['id'][:12]})", "dim")))
+    if encrypt:
+        app.console.print(Panel(Text("Everything in this repository is encrypted with a key protected by your password. "
+                                     "If you lose the password the backups cannot be recovered — there is no reset. "
+                                     "Store it somewhere safe, separate from the backup.", style="yellow"),
+                                title="Keep your password safe", border_style="yellow"))
 
 
 @backup.command("run")
@@ -72,7 +135,7 @@ def backup_run(source: str, repo: str, label: str, tags: tuple[str, ...], exclud
     app = get_app()
     repo_loc = app.registry.open(repo)
     guard_destination(app, repo_loc, expect_mounted=expect_mounted, sentinel=sentinel)
-    r = Repository.open(repo_loc)
+    r = open_repo(app, repo_loc)
     r.limiter = make_limiter(bwlimit)
     src = app.registry.open(source)
     flt = ScanFilter.for_backup(include=list(include), exclude=list(app.settings.exclude) + list(exclude))
@@ -287,6 +350,114 @@ def backup_stats(repo: str) -> None:
     ratio = (s["logical_bytes"] / s["stored_bytes"]) if s["stored_bytes"] else 0
     app.console.print(f"{s['snapshots']:,} snapshots protect {human_size(s['logical_bytes'])} using {human_size(s['stored_bytes'])} "
                       f"in {s['objects']:,} chunks (×{ratio:.1f} efficiency)")
+
+
+@backup.command("find")
+@click.argument("repo")
+@click.argument("pattern")
+@click.option("-s", "--snapshot", default=None, help="Search only this snapshot (default: all).")
+@click.option("--regex", is_flag=True, help="PATTERN is a regular expression instead of a glob such as '*.docx'.")
+@click.option("--limit", type=int, default=50, show_default=True)
+@handle_errors
+def backup_find(repo: str, pattern: str, snapshot: str | None, regex: bool, limit: int) -> None:
+    """Find a file by name in every snapshot — including files deleted long ago.
+
+    \b
+    duplio backup find /mnt/usb/repo '*tax*2023*.pdf'
+    duplio backup find /mnt/usb/repo 'invoice-\\d+\\.pdf' --regex
+    """
+    app = get_app()
+    r = _repo(app, repo)
+
+    def work(cancel):  # type: ignore[no-untyped-def]
+        with progress_for(app) as progress:
+            return r.find(pattern, snapshot=snapshot, regex=regex, progress=progress)
+
+    hits = run_cancellable(work)
+    if not hits:
+        app.console.print("Nothing matches.")
+        return
+    table = Table(box=box.SIMPLE_HEAD, expand=True)
+    for col, justify in (("Path", "left"), ("Versions", "right"), ("In snapshots", "right"), ("Latest size", "right"),
+                         ("Last seen", "left")):
+        table.add_column(col, justify=justify, overflow="fold")  # type: ignore[arg-type]
+    for h in hits[:limit]:
+        last = max(h.versions, key=lambda v: max(v.times))
+        table.add_row(t(h.path), str(len(h.versions)), str(h.snapshot_count), human_size(last.size),
+                      t(max(last.times)[:19].replace("T", " ")))
+    app.console.print(table)
+    if len(hits) > limit:
+        app.console.print(Text(f"… {len(hits) - limit:,} more matches (use --limit)", style="dim"))
+    app.console.print(Text("See every version of one file with: duplio backup history REPO PATH", style="dim"))
+
+
+@backup.command("history")
+@click.argument("repo")
+@click.argument("path")
+@handle_errors
+def backup_history(repo: str, path: str) -> None:
+    """Every different version of one file (exact path as shown by 'backup find')."""
+    app = get_app()
+    found = _repo(app, repo).history(path.strip("/"))
+    if found is None:
+        raise ConfigError(f"{path!r} is in no snapshot; check the exact path with 'duplio backup find'")
+    table = Table(box=box.SIMPLE_HEAD, expand=True)
+    for col, justify in (("#", "right"), ("Size", "right"), ("Modified", "left"), ("First seen", "left"),
+                         ("Last seen", "left"), ("Snapshots", "right")):
+        table.add_column(col, justify=justify)  # type: ignore[arg-type]
+    for i, v in enumerate(sorted(found.versions, key=lambda v: min(v.times)), 1):
+        table.add_row(str(i), human_size(v.size), t(format_ns(v.mtime_ns)), t(min(v.times)[:19].replace("T", " ")),
+                      t(max(v.times)[:19].replace("T", " ")), str(len(v.snapshots)))
+    app.console.print(table)
+    first = min(found.versions, key=lambda v: min(v.times))
+    app.console.print(Text(f"Bring one back with: duplio backup restore REPO {first.snapshots[0]} TARGET --include "
+                           f"'{printable(path)}'", style="dim"))
+
+
+@backup.command("export")
+@click.argument("repo")
+@click.argument("snapshot")
+@click.argument("archive", type=click.Path(dir_okay=False))
+@click.option("-i", "--include", multiple=True, metavar="GLOB", help="Only export matching paths.")
+@handle_errors
+def backup_export(repo: str, snapshot: str, archive: str, include: tuple[str, ...]) -> None:
+    """Write a snapshot as one .zip / .tar / .tar.gz / .tar.xz file (plaintext, even from an encrypted repository)."""
+    app = get_app()
+    r = _repo(app, repo)
+
+    def work(cancel):  # type: ignore[no-untyped-def]
+        with progress_for(app) as progress:
+            return export_snapshot(r, snapshot, archive, include=list(include) or None, progress=progress, cancel=cancel)
+
+    files, nbytes = run_cancellable(work)
+    app.console.print(Text.assemble(("Wrote ", "green"), t(archive), f"  ({plural(files, 'file')}, {human_size(nbytes)})"))
+    if r.encrypted:
+        app.console.print(Text("The archive is NOT encrypted. Protect it, or delete it after use.", style="yellow"))
+
+
+@backup.command("passwd")
+@click.argument("repo")
+@handle_errors
+def backup_passwd(repo: str) -> None:
+    """Change an encrypted repository's password (the data is not re-encrypted, so this is instant)."""
+    app = get_app()
+    r = _repo(app, repo)
+    if not r.encrypted:
+        raise ConfigError("this repository is not encrypted")
+    if not sys.stdin.isatty():
+        raise ConfigError("changing the password needs a terminal (the new password is typed twice)")
+    for _ in range(3):
+        first = getpass.getpass("New password: ")
+        if len(first) < MIN_PASSWORD_LEN:
+            app.console.print(Text(f"Use at least {MIN_PASSWORD_LEN} characters.", style="yellow"))
+            continue
+        if getpass.getpass("Repeat the new password: ") != first:
+            app.console.print(Text("The two entries differ.", style="yellow"))
+            continue
+        r.change_password(first)
+        app.console.print(Text("Password changed. The old password no longer opens this repository.", style="green"))
+        return
+    raise ConfigError("the password was not changed")
 
 
 @backup.command("unlock")

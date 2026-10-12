@@ -30,6 +30,7 @@ class AppContext:
     console: Console
     quiet: bool = False
     json_output: bool = False
+    password_file: str | None = None  # --password-file of the 'backup' group
     dirs: AppDirs = field(default_factory=lambda: get_app_dirs().ensure())
     _settings: Settings | None = None
     _registry: BackendRegistry | None = None
