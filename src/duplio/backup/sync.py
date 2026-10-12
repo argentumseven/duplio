@@ -217,7 +217,8 @@ def plan_sync(
 
     def changed(side: int, e: FileEntry, base: Baseline) -> bool:
         size, mtime = (base.size_a, base.mtime_a) if side == 0 else (base.size_b, base.mtime_b)
-        return e.size != size or not mtimes_match(e.mtime_ns, mtime, tolerance_ns=tol_side[side])
+        return e.size != size or not mtimes_match(e.mtime_ns, mtime, tolerance_ns=tol_side[side],
+                                                  dst_shift=options.ignore_dst)
 
     def same_by_time_size(a: FileEntry, b: FileEntry) -> bool:
         return a.size == b.size and mtimes_match(a.mtime_ns, b.mtime_ns, tolerance_ns=tol_pair,
@@ -270,6 +271,16 @@ def plan_sync(
         side = 0 if a is not None else 1
         present = a if a is not None else b
         assert present is not None
+        if base is not None:
+            # It was in sync before. Missing from the other side's scan does not mean deleted there: it may be
+            # outside the filters on that side (size, type, hidden, include) after an edit. Ask the file system.
+            other_root = roots[1 - side]
+            other_rel = base.rel_b if side == 0 else base.rel_a
+            if other_root.backend.stat(other_root.backend.join(other_root.path, other_rel)) is not None:
+                plan.skipped.append(SyncSkip(
+                    key, present.rel,
+                    f"still exists on {SIDE[1 - side]} but is outside the filters there; neither side is touched"))
+                continue
         if base is None:
             pending_actions[key] = SyncAction(SyncOp.COPY, key, a, b, frm=side, reason=f"new on {SIDE[side]}")
         elif changed(side, present, base):
@@ -304,6 +315,10 @@ def plan_sync(
 
     # Names the other side cannot store are never rewritten in a sync (the two sides would drift apart).
     for key, action in pending_actions.items():
+        victim = action.entry if action.op is SyncOp.DELETE else action.target
+        if action.op in (SyncOp.DELETE, SyncOp.UPDATE, SyncOp.CONFLICT) and victim is not None and victim.protected:
+            plan.skipped.append(SyncSkip(key, victim.rel, "protected path: never removed or replaced"))
+            continue
         if action.op is SyncOp.COPY and action.frm is not None:
             issues = rel_issues(action.rel, windows=roots[1 - action.frm].caps.windows_names)
             if issues:
@@ -506,9 +521,14 @@ def run_sync(
                 except KeyboardInterrupt:
                     cancel.cancel()
                     raise
-            # Deletions come last, so that nothing is moved aside before the other changes are safely in place.
+            # Deletions come last, so that nothing is moved aside before the other changes are safely in place:
+            # if any copy failed or the run was cancelled, they wait for the next run.
+            postpone = bool(report.failures) or cancel.cancelled or any(r.status == "cancelled" for r in report.results)
             for action in deletions:
-                report.results.append(job(action))
+                if postpone:
+                    report.results.append(SyncResult(action, "skipped", "postponed: some copies did not finish"))
+                else:
+                    report.results.append(job(action))
         finally:
             report.cancelled = cancel.cancelled
             report.bytes_copied = sum(r.action.bytes for r in report.results

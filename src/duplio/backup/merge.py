@@ -310,6 +310,8 @@ def _conflict(item: DiffItem, previous: FileEntry, target: str, options: MergeOp
             policy = "rename"  # same time, different content: ambiguous, so keep both
     if policy == "skip":
         return None
+    if policy == "replace" and previous.protected:
+        policy = "rename"  # a protected path (app bundle, photo library, …) is never replaced; keep both
     if policy == "replace":
         return MergeAction("replace", entry, previous.rel, "different file at the same path (old version kept)",
                            "previous version is kept in .duplio-versions", previous=previous)

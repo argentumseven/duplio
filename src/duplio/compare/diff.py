@@ -222,6 +222,7 @@ def diff_inventory(
 
     # ---- 2. cheap path-based matching (non-content bases)
     pending = [e for e in inventory.entries if e.id not in decided]
+    path_matched: set[int] = set()
     if options.basis is not Basis.CONTENT:
         undecided, pending = pending, []
         progress.stage("Matching paths", total_items=len(undecided))
@@ -232,6 +233,7 @@ def diff_inventory(
             if matching:
                 decided[e.id] = DiffItem(e.root, Kind.SAME, e, matching,
                                          note="" if options.basis is Basis.TIME_SIZE else "size only")
+                path_matched.add(e.id)
             else:
                 pending.append(e)
         progress.advance(items=len(undecided))
@@ -239,7 +241,9 @@ def diff_inventory(
     # ---- 3. content comparison (everything undecided, or only the leftovers)
     group_of: dict[int, DuplicateGroup] = {}
     if options.basis is Basis.CONTENT or options.detect_moves:
-        sub = Inventory(roots=roots, entries=pending)
+        # Hard-linked entries (already decided above) still take part: other files with the same content must be
+        # able to match them. A link set alone in its size bucket is never read.
+        sub = Inventory(roots=roots, entries=[e for e in inventory.entries if e.id not in path_matched])
         mode = Mode.ALL if options.basis is Basis.CONTENT else Mode.CROSS
         if sub.entries:
             result: ScanResult = Engine(sub, options.scan_options(mode), cache=cache, progress=progress,
@@ -254,8 +258,13 @@ def diff_inventory(
     cancel.check()
 
     # ---- 4. classify what is left
+    failed_sizes: dict[int, set[int]] = {0: set(), 1: set()}
+    for e in inventory.entries:
+        if e.id in failed:
+            failed_sizes[e.root].add(e.size)
     for e in pending:
-        item = _classify(e, group_of.get(e.id), e.id in failed, counterparts(e), failed, tolerance, options)
+        item = _classify(e, group_of.get(e.id), e.id in failed, counterparts(e), failed, tolerance, options,
+                         failed_sizes)
         decided[e.id] = item
     items = [decided[e.id] for e in inventory.entries if e.id in decided]
     items.sort(key=lambda i: (KIND_ORDER.index(i.kind), i.side, i.entry.rel))
@@ -279,6 +288,7 @@ def _classify(
     failed: set[int],
     tolerance: int,
     options: DiffOptions,
+    failed_sizes: dict[int, set[int]],
 ) -> DiffItem:
     side = entry.root
     if unreadable:
@@ -308,4 +318,9 @@ def _classify(
         direction = newer(entry.mtime_ns, other.mtime_ns, tolerance_ns=max(tolerance, SECOND_NS),
                           dst_shift=options.ignore_dst)
         return DiffItem(side, Kind.CHANGED, entry, same_path, extra_copies=extra_only, newer=direction, group=gid)
+    if entry.size in failed_sizes[1 - side]:
+        # Something of this size on the other side could not be read: it might be this very content.
+        return DiffItem(side, Kind.UNREADABLE, entry, [], group=gid,
+                        note="a file of the same size on the other side could not be read, so this cannot be ruled out "
+                             "as already there")
     return DiffItem(side, Kind.ONLY, entry, [], extra_copies=extra_only, group=gid)

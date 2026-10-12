@@ -169,9 +169,7 @@ def sync_cmd(a: str, b: str, on_conflict: str, deletions: str, max_delete: float
     cache = app.cache(bool(kw.get("use_cache")))
     state = SyncState.open(app.dirs, roots[0].location.uri, roots[1].location.uri)
     try:
-        if reset:
-            state.reset()
-        baseline = state.load()
+        baseline = {} if reset else state.load()  # --reset plans as a first run; the history is only cleared for real
 
         def planning(cancel):  # type: ignore[no-untyped-def]
             with progress_for(app) as progress:
@@ -191,6 +189,8 @@ def sync_cmd(a: str, b: str, on_conflict: str, deletions: str, max_delete: float
         if not plan.has_work:
             state_note = "Both sides are in sync. ✓" if not plan.skipped else "Nothing to do for the rest."
             if not dry_run:
+                if reset:
+                    state.reset()
                 run_sync(plan, app.registry, state, dirs=app.dirs)  # refreshes the history of identical files
             app.console.print(Text(state_note, style="green"))
             return
@@ -203,6 +203,8 @@ def sync_cmd(a: str, b: str, on_conflict: str, deletions: str, max_delete: float
             if not click.confirm("Apply these changes?", default=False):
                 return
         started = time.monotonic()
+        if reset:
+            state.reset()
 
         def work(cancel):  # type: ignore[no-untyped-def]
             with progress_for(app) as progress:

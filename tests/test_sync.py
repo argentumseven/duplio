@@ -31,12 +31,12 @@ class Pair:
     def __init__(self, a: Path | str, b: Path | str, registry: BackendRegistry, dirs: AppDirs) -> None:
         self.a, self.b, self.registry, self.dirs = a, b, registry, dirs
 
-    def plan(self, *, caps_b=None, mutate=None, reset: bool = False, **opts) -> tuple[SyncPlan, SyncState]:  # type: ignore[no-untyped-def]
+    def plan(self, *, caps_b=None, mutate=None, reset: bool = False, scan_filter=None, **opts) -> tuple[SyncPlan, SyncState]:  # type: ignore[no-untyped-def]
         roots = make_roots([(self.registry.open(str(self.a)), RootRole.NORMAL),
                             (self.registry.open(str(self.b)), RootRole.NORMAL)])
         if caps_b:
             roots[1].caps = roots[1].caps.with_(**caps_b)
-        inventory = scan(roots, ScanFilter(min_size=0))
+        inventory = scan(roots, scan_filter or ScanFilter(min_size=0))
         if mutate:
             mutate(inventory)
         state = SyncState.open(self.dirs, roots[0].location.uri, roots[1].location.uri)

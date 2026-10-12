@@ -252,3 +252,174 @@ def test_snapshots_keep_permissions_and_notice_chmod(registry: BackendRegistry, 
     again = SnapshotSet(registry.open(str(dest))).create(registry.open(str(src)), now=1_700_000_200)
     assert (again.linked, again.copied) == (1, 1) and mode(dest / again.name / "id_rsa") == 0o444
     assert mode(dest / first.name / "id_rsa") == 0o400  # the older snapshot is untouched
+
+
+# ---------------------------------------------------------------- sync decisions
+def _pair(tmp_path: Path, registry: BackendRegistry, dirs):  # type: ignore[no-untyped-def]
+    from .test_sync import Pair
+
+    a, b = tmp_path / "A", tmp_path / "B"
+    a.mkdir()
+    b.mkdir()
+    return Pair(a, b, registry, dirs)
+
+
+def test_a_file_outside_the_filters_on_one_side_is_not_a_deletion(tmp_path: Path, registry: BackendRegistry, dirs) -> None:  # type: ignore[no-untyped-def]
+    from .test_sync import ops, tree
+
+    pair = _pair(tmp_path, registry, dirs)
+    for i in range(6):
+        write(pair.a / f"f{i}.bin", rand_bytes(5000, 10 + i), mtime=T0)
+    write(pair.a / "report.bin", rand_bytes(5000, 1), mtime=T0)
+    pair.sync()
+    write(pair.b / "report.bin", b"x" * 10, mtime=T0 + 100)  # truncated on B: now below --min-size
+    plan, state = pair.plan(scan_filter=ScanFilter(min_size=1000))
+    assert "report.bin" not in ops(plan)  # was: delete
+    assert any("outside the filters" in s.reason for s in plan.skipped)
+    from duplio.backup.sync import run_sync
+
+    run_sync(plan, pair.registry, state, dirs=pair.dirs)
+    state.close()
+    assert "report.bin" in tree(pair.a) and len(tree(pair.b)["report.bin"]) == 10
+
+
+def test_deletions_wait_when_a_copy_failed(tmp_path: Path, registry: BackendRegistry, dirs, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    import duplio.backup.sync as sync_mod
+
+    from .test_sync import tree
+
+    pair = _pair(tmp_path, registry, dirs)
+    write(pair.a / "x.bin", rand_bytes(5000, 1), mtime=T0)
+    write(pair.a / "other.bin", rand_bytes(5000, 2), mtime=T0)
+    pair.sync()
+    (pair.a / "x.bin").rename(pair.a / "y.bin")  # renamed on A: B should get y.bin, then lose x.bin
+    real = sync_mod.execute_action
+
+    def disk_full(action, env):  # type: ignore[no-untyped-def]
+        if action.entry.rel == "y.bin":
+            raise OSError(errno.ENOSPC, "No space left on device")
+        return real(action, env)
+
+    monkeypatch.setattr(sync_mod, "execute_action", disk_full)
+    _, report = pair.sync()
+    assert report.count("failed") == 1
+    assert "x.bin" in tree(pair.b)  # still live: the only copy of that content on B was not moved aside
+    assert any("postponed" in r.message for r in report.results if r.status == "skipped")
+    monkeypatch.setattr(sync_mod, "execute_action", real)
+    pair.sync()
+    assert "y.bin" in tree(pair.b) and "x.bin" not in tree(pair.b)
+
+
+def test_ignore_dst_also_applies_to_each_sides_own_history(tmp_path: Path, registry: BackendRegistry, dirs) -> None:  # type: ignore[no-untyped-def]
+    import os
+
+    pair = _pair(tmp_path, registry, dirs)
+    for i in range(3):
+        write(pair.a / f"f{i}.bin", rand_bytes(3000, i), mtime=T0)
+    pair.sync()
+    for p in pair.b.iterdir():  # B's clock/time zone moved by exactly one hour
+        os.utime(p, (T0 + 3600, T0 + 3600))
+    assert pair.plan()[0].has_work
+    plan, _ = pair.plan(ignore_dst=True)
+    assert not plan.has_work
+
+
+def test_sync_never_deletes_or_replaces_protected_paths(tmp_path: Path, registry: BackendRegistry, dirs) -> None:  # type: ignore[no-untyped-def]
+    import os
+
+    from .test_sync import ops, tree
+
+    pair = _pair(tmp_path, registry, dirs)
+    write(pair.a / "Library.photoslibrary" / "master.bin", rand_bytes(3000, 1), mtime=T0)
+    write(pair.a / "plain.bin", rand_bytes(3000, 2), mtime=T0)
+    for i in range(4):
+        write(pair.a / f"pad{i}.bin", rand_bytes(3000, 20 + i), mtime=T0)
+    pair.sync()
+    os.remove(pair.b / "Library.photoslibrary" / "master.bin")
+    os.remove(pair.b / "plain.bin")
+    plan, _ = pair.sync()
+    assert ops(plan) == {"plain.bin": "delete"}
+    assert "Library.photoslibrary/master.bin" in tree(pair.a)  # protected: left alone
+    assert any("protected" in s.reason for s in plan.skipped)
+
+
+def test_reset_with_dry_run_keeps_the_history(tmp_path: Path) -> None:
+    import os
+
+    from click.testing import CliRunner
+
+    from duplio.cli.main import cli
+
+    def run(*args: str):  # type: ignore[no-untyped-def]
+        return CliRunner(env={"COLUMNS": "170"}).invoke(cli, ["--no-color", *args], catch_exceptions=False)
+
+    a, b = tmp_path / "A", tmp_path / "B"
+    b.mkdir()
+    for i in range(5):
+        write(a / f"f{i}.bin", rand_bytes(2000, i), mtime=T0)
+    assert run("sync", str(a), str(b)).exit_code == 0
+    preview = run("sync", str(a), str(b), "--reset", "--dry-run")
+    assert preview.exit_code == 0 and "First sync" in preview.output
+    os.remove(b / "f0.bin")
+    result = run("sync", str(a), str(b), "--yes")  # the history survived: this is a deletion, not a "new" file
+    assert result.exit_code == 0 and not (a / "f0.bin").exists()
+
+
+# ---------------------------------------------------------------- diff and merge decisions
+def _diff(a: Path, b: Path, registry: BackendRegistry):  # type: ignore[no-untyped-def]
+    roots = make_roots([(registry.open(str(a)), RootRole.NORMAL), (registry.open(str(b)), RootRole.NORMAL)])
+    return diff_inventory(scan(roots, ScanFilter(min_size=0)), DiffOptions())
+
+
+def test_a_hard_linked_pair_does_not_hide_identical_copies(tmp_path: Path, registry: BackendRegistry) -> None:
+    import os
+
+    a, b = tmp_path / "A", tmp_path / "B"
+    b.mkdir()
+    data = rand_bytes(4000, 1)
+    write(a / "x.bin", data, mtime=T0)
+    os.link(a / "x.bin", b / "x.bin")  # one file reachable from both sides (a snapshot, a link-dest backup)
+    write(a / "y.bin", data, mtime=T0)  # an independent copy of the same content
+    kinds = {i.entry.rel: i.kind.value for i in _diff(a, b, registry).items if i.side == 0}
+    assert kinds == {"x.bin": "same", "y.bin": "moved"}  # was: y is "only here" and would be copied again
+    # and a same-path file identical to a hard-linked one is not "changed"
+    c, d = tmp_path / "C", tmp_path / "D"
+    d.mkdir()
+    write(c / "other.bin", data, mtime=T0)
+    os.link(c / "other.bin", d / "z.bin")
+    write(c / "z.bin", data, mtime=T0)
+    kinds = {i.entry.rel: i.kind.value for i in _diff(c, d, registry).items if i.side == 0}
+    assert kinds["z.bin"] == "same"
+
+
+def test_an_unreadable_file_of_the_same_size_blocks_only_here(tmp_path: Path, registry: BackendRegistry,
+                                                              monkeypatch: pytest.MonkeyPatch) -> None:
+    a, b = tmp_path / "A", tmp_path / "B"
+    data = rand_bytes(4000, 7)
+    write(a / "photo.bin", data, mtime=T0)
+    write(b / "elsewhere" / "p.bin", data, mtime=T0)  # might be the very same photo, but cannot be read
+    real = LocalBackend.open_read
+
+    def deny(self, path):  # type: ignore[no-untyped-def]
+        if path.endswith("p.bin"):
+            raise PermissionError(13, "denied", path)
+        return real(self, path)
+
+    monkeypatch.setattr(LocalBackend, "open_read", deny)
+    diff = _diff(a, b, registry)
+    mine = {i.entry.rel: i for i in diff.items if i.side == 0}
+    assert mine["photo.bin"].kind.value == "unreadable"  # was: "only here", copied again
+    plan = plan_merge(diff, MergeOptions())
+    assert not plan.actions and plan.skipped_count("unreadable") == 1
+
+
+def test_merge_never_replaces_a_protected_destination_file(tmp_path: Path, registry: BackendRegistry, dirs) -> None:  # type: ignore[no-untyped-def]
+    a, b = tmp_path / "A", tmp_path / "B"
+    write(a / "App.app" / "Contents" / "main.bin", b"new build", mtime=T0 + 100)
+    write(b / "App.app" / "Contents" / "main.bin", b"installed build", mtime=T0)
+    roots = make_roots([(registry.open(str(a)), RootRole.NORMAL), (registry.open(str(b)), RootRole.NORMAL)])
+    diff = diff_inventory(scan(roots, ScanFilter(min_size=0)), DiffOptions())
+    plan = plan_merge(diff, MergeOptions(on_conflict="replace"))
+    assert [x.kind for x in plan.actions] == ["rename"]
+    run_merge(plan, registry, dirs=dirs)
+    assert (b / "App.app" / "Contents" / "main.bin").read_bytes() == b"installed build"
