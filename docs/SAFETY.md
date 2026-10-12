@@ -15,6 +15,7 @@ code that enforces it and the test that proves it.
 | Overlapping roots (nested, symlinked, bind-mounted, one phone via ADB and MTP) are refused | `scan/inventory.py::check_overlaps` | `test_overlapping_roots_refused`, `test_same_phone_via_adb_and_mtp_refused` |
 | "Is it backed up?" never reports *safe* or *missing* for a file it could not compare | `_split` / `_drop` taint tracking | `test_unique_mode_marks_unreadable_as_unverified`, `test_unreadable_reference_never_yields_false_unique` |
 | Cached digests never cause an action | the executor always re-reads | `test_same_size_same_mtime_content_change_is_caught` |
+| "Already safe elsewhere" is never answered from remembered digests (a copy that rotted without changing size or time is noticed); `--use-cache` is an explicit opt-in | `compare`, `diff`, `merge`, `sync`, `mirror`, `ingest` and the TUI read fresh | `test_compare_notices_rot_in_the_backup`, `test_diff_notices_rot`, `test_merge_does_not_skip_a_file_whose_copy_rotted`, `test_mirror_checksum_repairs_a_rotted_copy`, `test_ingest_does_not_trust_a_rotted_library_copy` |
 | Recently modified files are not cached | `HashCache.put` racy window | `test_cache_ignores_fresh_files` |
 
 ## File names are data, never trusted text

@@ -487,11 +487,14 @@ def backup_unlock(repo: str) -> None:
 @click.option("--force", is_flag=True, help="Override the safety brake.")
 @click.option("--dry-run", is_flag=True)
 @click.option("-y", "--yes", is_flag=True)
+@click.option("--use-cache", is_flag=True,
+              help="Trust cached digests for --checksum and rename detection (faster; misses content that changed "
+                   "without its size or time changing).")
 @guard_options
 @handle_errors
 def mirror(source: str, dest: str, delete_extraneous: bool, checksum: bool, no_verify: bool, keep_versions: str | None,
            exclude: tuple[str, ...], max_change: float, force: bool, dry_run: bool, yes: bool, bwlimit: str | None,
-           expect_mounted: bool | None, sentinel: str | None) -> None:
+           expect_mounted: bool | None, sentinel: str | None, use_cache: bool) -> None:
     """Keep DEST an exact, verified copy of SOURCE — with old versions kept.
 
     \b
@@ -505,7 +508,7 @@ def mirror(source: str, dest: str, delete_extraneous: bool, checksum: bool, no_v
                             dry_run=dry_run, max_change_ratio=max_change, force=force, keep_versions=keep_versions,
                             limiter=make_limiter(bwlimit))
     flt = ScanFilter.for_backup(exclude=list(app.settings.exclude) + list(exclude))
-    cache = app.cache()
+    cache = app.cache(use_cache)
 
     def planning(cancel):  # type: ignore[no-untyped-def]
         with progress_for(app) as progress:
@@ -562,11 +565,14 @@ def mirror(source: str, dest: str, delete_extraneous: bool, checksum: bool, no_v
 @click.option("--free-source", is_flag=True, help="Afterwards delete from SOURCE every file verified in the library.")
 @click.option("--dry-run", is_flag=True)
 @click.option("-y", "--yes", is_flag=True)
+@click.option("--use-cache", is_flag=True,
+              help="Trust cached digests of library files when deciding a photo is already there (faster; misses "
+                   "library files that changed without their size or time changing).")
 @guard_options
 @handle_errors
 def ingest_cmd(source: str, library: str, layout: str, all_files: bool, device_label: str, reimport_deleted: bool,
                free_source: bool, dry_run: bool, yes: bool, bwlimit: str | None, expect_mounted: bool | None,
-               sentinel: str | None) -> None:
+               sentinel: str | None, use_cache: bool) -> None:
     """Import new photos/videos from a phone into a dated library, skipping anything already there.
 
     \b
@@ -585,7 +591,7 @@ def ingest_cmd(source: str, library: str, layout: str, all_files: bool, device_l
     options = IngestOptions(layout=layout, media_only=not all_files, dry_run=dry_run, free_source=free_source,
                             reimport_deleted=reimport_deleted, device_label=device_label,
                             limiter=make_limiter(bwlimit))
-    cache = app.cache()
+    cache = app.cache(use_cache)
 
     def work(cancel):  # type: ignore[no-untyped-def]
         with progress_for(app) as progress:

@@ -235,7 +235,9 @@ class SetupScreen(Screen[None]):
             opened = [(app.registry.open(text), role) for text, role in locations]
             roots = make_roots(opened)
             inventory = scan(roots, scan_filter, progress=progress, cancel=cancel, one_file_system=options.one_file_system)
-            result = compare(inventory, options, cache=app.cache, progress=progress, cancel=cancel)
+            # "Is it backed up?" must reflect what is on disk now, so it never trusts remembered digests.
+            cache = app.fresh_cache if options.mode is Mode.UNIQUE else app.cache
+            result = compare(inventory, options, cache=cache, progress=progress, cancel=cancel)
             try:
                 save_session(result, app.dirs)
             except OSError:

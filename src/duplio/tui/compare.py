@@ -96,7 +96,7 @@ class CompareMergeScreen(_SuggestMixin, Screen[None]):
 
         def job(progress, cancel):  # type: ignore[no-untyped-def]
             inv = _inventory(app, paths[0], paths[1], progress, cancel)
-            return diff_inventory(inv, DiffOptions(), cache=app.cache, progress=progress, cancel=cancel)
+            return diff_inventory(inv, DiffOptions(), cache=app.fresh_cache, progress=progress, cancel=cancel)
 
         def summarise(result: DiffResult) -> Group:
             return Group(summary_panel(result), *verdict(result))
@@ -112,7 +112,7 @@ class CompareMergeScreen(_SuggestMixin, Screen[None]):
 
         def job(progress, cancel):  # type: ignore[no-untyped-def]
             inv = _inventory(app, paths[0], paths[1], progress, cancel)
-            diff = diff_inventory(inv, DiffOptions(), cache=app.cache, progress=progress, cancel=cancel)
+            diff = diff_inventory(inv, DiffOptions(), cache=app.fresh_cache, progress=progress, cancel=cancel)
             return plan_merge(diff, options)
 
         return job
@@ -218,7 +218,7 @@ class SyncScreen(_SuggestMixin, Screen[None]):
             inv = _inventory(app, a, b, progress, cancel)
             state = SyncState.open(app.dirs, inv.roots[0].location.uri, inv.roots[1].location.uri)
             try:
-                return plan_sync(inv, state.load(), options, cache=app.cache, progress=progress, cancel=cancel)
+                return plan_sync(inv, state.load(), options, cache=app.fresh_cache, progress=progress, cancel=cancel)
             finally:
                 state.close()
 

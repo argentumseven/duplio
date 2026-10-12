@@ -464,7 +464,7 @@ class MirrorScreen(_SuggestMixin, Screen[None]):
         def job(progress, cancel):  # type: ignore[no-untyped-def]
             src, dst = app.registry.open(source), app.registry.open(dest)
             plan = plan_mirror(src, dst, scan_filter=ScanFilter.for_backup(exclude=list(app.settings.exclude)),
-                               options=options, cache=app.cache, progress=progress, cancel=cancel)
+                               options=options, cache=app.fresh_cache, progress=progress, cancel=cancel)
             if not execute:
                 return plan
             return run_mirror(plan, options=options, progress=progress, cancel=cancel)
@@ -549,7 +549,7 @@ class IngestScreen(_SuggestMixin, Screen[None]):
         app: Any = self.app
 
         def job(progress, cancel):  # type: ignore[no-untyped-def]
-            return ingest(app.registry.open(source), app.registry.open(library), options=options, cache=app.cache,
+            return ingest(app.registry.open(source), app.registry.open(library), options=options, cache=app.fresh_cache,
                           dirs=app.dirs, progress=progress, cancel=cancel, confirm_free=free)
 
         def summarise(report: IngestReport) -> Text:

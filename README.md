@@ -177,10 +177,15 @@ that device: one for MTP, few for spinning disks (read in inode order), more for
 SSDs and network shares. A phone and a NAS are read at the same time and neither
 slows the other.
 
-**Cache.** Digests are cached in SQLite, keyed by path, size and modification time,
-so a rescan of an unchanged archive takes seconds. Files modified in the last few
-seconds are not cached, because their timestamps cannot yet be trusted. The cache
-only speeds up discovery: actions always re-read the bytes.
+**Cache.** Digests are cached in SQLite, keyed by path, size and modification time, so a rescan of an unchanged
+archive takes seconds. Files modified in the last few seconds are not cached, because their timestamps cannot yet be
+trusted. A remembered digest cannot notice content that changed **without its size or time changing** (bit rot, a
+failing disk, a tool that restores timestamps), so the cache is only allowed to *propose*:
+
+- `scan`, `dedupe` and `similar` use it to find candidates; before anything is changed, the executor re-reads both files.
+- Questions whose answer is "this is already safe somewhere else" read fresh: `compare`, `diff`, `merge`, `sync`,
+  `mirror` and `ingest`, in the CLI and the TUI. A backup copy that rotted since the last scan is reported as such, not
+  believed. `--use-cache` opts back in for speed, where you accept that blind spot.
 
 **Modes.**
 

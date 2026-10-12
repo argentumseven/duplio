@@ -166,7 +166,7 @@ def sync_cmd(a: str, b: str, on_conflict: str, deletions: str, max_delete: float
         kw["min_size"] = 0
     roots = make_roots([(loc_a, RootRole.NORMAL), (loc_b, RootRole.NORMAL)])
     scan_filter = build_filter(app, kw)
-    cache = app.cache(not kw.get("no_cache"))
+    cache = app.cache(bool(kw.get("use_cache")))
     state = SyncState.open(app.dirs, roots[0].location.uri, roots[1].location.uri)
     try:
         if reset:

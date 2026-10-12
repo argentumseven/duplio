@@ -189,6 +189,11 @@ class DuplioApp(App[None]):
                     self._cache = NullCache()
             return self._cache
 
+    @property
+    def fresh_cache(self) -> HashCache:
+        """No remembered digests: for answers like "already in the backup", which must reflect what is on disk now."""
+        return NullCache()
+
     def on_mount(self) -> None:
         self.register_theme(DUPLIO_DARK)
         self.register_theme(DUPLIO_LIGHT)

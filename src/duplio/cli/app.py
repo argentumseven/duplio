@@ -164,6 +164,9 @@ def scan_options(fn: Callable[..., Any]) -> Callable[..., Any]:
         click.option("--within-targets", is_flag=True, help="Reference mode: also report duplicates among non-reference locations."),
         click.option("--workers", type=click.IntRange(1, 64), default=None, help="Parallel reads per local disk."),
         click.option("--no-cache", is_flag=True, help="Ignore and do not update the hash cache."),
+        click.option("--use-cache", is_flag=True,
+                     help="'compare' only: trust cached digests when deciding a file is safe elsewhere (faster; "
+                          "cannot notice content that changed without its size or time changing)."),
     ]
     for option in reversed(options):
         fn = option(fn)

@@ -72,7 +72,9 @@ def make_compare_options(*, default_basis: str = "content", bases: tuple[str, ..
         click.option("--include-vcs", is_flag=True, help="Also compare .git/.hg/.svn internals (normally skipped)."),
         click.option("--no-default-excludes", is_flag=True, help="Do not skip system junk (Thumbs.db, .Trash, @eaDir…)."),
         click.option("--cross-filesystems", is_flag=True, help="Descend into other filesystems mounted inside a location."),
-        click.option("--no-cache", is_flag=True, help="Ignore and do not update the hash cache."),
+        click.option("--use-cache", is_flag=True,
+                     help="Trust cached digests (faster, but a file whose content changed without its size or time "
+                          "changing would be missed). By default every compared file is read fresh."),
     ]
     if ages:
         options.extend([
@@ -125,7 +127,7 @@ def do_diff(app: AppContext, a: str, b: str, kw: dict[str, Any], *, options: Dif
     options = options or diff_options_from(kw)
     roots = make_roots([(app.registry.open(a), RootRole.NORMAL), (app.registry.open(b), RootRole.NORMAL)])
     scan_filter = build_filter(app, kw)
-    cache = app.cache(not kw.get("no_cache"))
+    cache = app.cache(bool(kw.get("use_cache")))
 
     def work(cancel):  # type: ignore[no-untyped-def]
         with progress_for(app) as progress:

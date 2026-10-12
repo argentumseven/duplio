@@ -40,7 +40,9 @@ from duplio.util.fmt import human_size, plural
 from duplio.util.text import fs_bytes, json_dumps
 
 
-def do_scan(app: AppContext, roots: tuple[str, ...], refs: tuple[str, ...], kw: dict[str, Any], *, mode: Mode | None = None) -> ScanResult:
+def do_scan(app: AppContext, roots: tuple[str, ...], refs: tuple[str, ...], kw: dict[str, Any], *, mode: Mode | None = None,
+            trust_cache: bool = True) -> ScanResult:
+    """``trust_cache=False`` is for questions whose answer is "this is safe elsewhere": see ``HashCache``."""
     if not roots and not refs:
         raise ConfigError("give at least one location to scan")
     locations = [(app.registry.open(r), RootRole.NORMAL) for r in roots]
@@ -48,7 +50,7 @@ def do_scan(app: AppContext, roots: tuple[str, ...], refs: tuple[str, ...], kw: 
     scan_roots = make_roots(locations)
     scan_filter = build_filter(app, kw)
     options = build_options(app, kw, refs=bool(refs), mode=mode)
-    cache = app.cache(not kw.get("no_cache"))
+    cache = app.cache(not kw.get("no_cache") and (trust_cache or bool(kw.get("use_cache"))))
 
     def work(cancel):  # type: ignore[no-untyped-def]
         with progress_for(app) as progress:
@@ -216,7 +218,7 @@ def compare(sources: tuple[str, ...], against: tuple[str, ...], refs: tuple[str,
     app.json_output = as_json
     if list_all:  # stdout carries only the paths, so the summary and progress go to stderr
         app.console = SafeConsole(stderr=True, highlight=False, no_color=app.console.no_color)
-    result = do_scan(app, sources, tuple(against) + tuple(refs), kw, mode=Mode.UNIQUE)
+    result = do_scan(app, sources, tuple(against) + tuple(refs), kw, mode=Mode.UNIQUE, trust_cache=False)
     if as_json:
         _print_json(result)
         return
