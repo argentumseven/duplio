@@ -134,12 +134,13 @@ def test_forget_and_prune(registry: BackendRegistry, tmp_path: Path, source: Pat
     first = repo.backup(registry.open(str(source))).snapshot
     write(source / "big.bin", rand_bytes(300_000, 2), mtime=1_600_000_002)
     repo.backup(registry.open(str(source)))
-    objects, freed = repo.prune(dry_run=True)
+    report = repo.prune(dry_run=True, grace_s=0, min_age_s=0)
+    objects = report.objects
     assert objects == 0
     with repo.lock("forget"):
         repo.delete_snapshot(first.id)
-    objects, freed = repo.prune()
-    assert objects > 0 and freed > 0
+    report = repo.prune(grace_s=0, min_age_s=0)
+    assert report.objects > 0 and report.bytes > 0
     assert repo.check(read_data=True).ok
 
 

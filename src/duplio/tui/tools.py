@@ -383,11 +383,13 @@ class BackupScreen(_SuggestMixin, Screen[None]):
             return repo.prune(progress=progress)
 
         self.app.push_screen(
-            ConfirmDialog("Apply retention", f"Forget {plural(len(decision.remove), 'snapshot')} and free their space? "
-                          f"{len(decision.keep):,} snapshots are kept.", confirm_label="Forget & prune", danger=True),
+            ConfirmDialog("Apply retention", f"Forget {plural(len(decision.remove), 'snapshot')}? Their data is set aside "
+                          f"and deleted after a day. {len(decision.keep):,} snapshots are kept.",
+                          confirm_label="Forget & prune", danger=True),
             lambda ok: self.app.push_screen(
                 JobScreen("Applying retention", job,
-                          summarise=lambda r: Text(f"Freed {human_size(r[1])} ({r[0]:,} chunks).", style="green")),
+                          summarise=lambda r: Text(f"Set aside {human_size(r.bytes)} ({r.objects:,} chunks); deleted after the grace period.",
+                                           style="green")),
                 lambda _: self.list_snapshots(),
             ) if ok else None,
         )

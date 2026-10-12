@@ -247,11 +247,19 @@ def backup_check(repo: str, read_data: bool, subset: float | None) -> None:
     app.console.print(f"{report.snapshots:,} snapshots · {report.objects:,} objects · {report.orphans:,} unreferenced (removed by prune)")
     if read_data:
         app.console.print(f"{report.read_objects:,} objects re-read and verified")
+    if report.orphan_trees:
+        app.console.print(Text(
+            f"{plural(len(report.orphan_trees), 'snapshot')} {'has' if len(report.orphan_trees) == 1 else 'have'} a file list "
+            "but no summary (a lost file, or an interrupted backup or forget): " + ", ".join(report.orphan_trees[:5])
+            + ("…" if len(report.orphan_trees) > 5 else "")
+            + ". 'duplio backup repair' brings them back; until then prune keeps their data for a week.", style="yellow"))
     if report.ok:
         app.console.print(Text("Repository is healthy. ✓", style="bold green"))
         return
     for snap, missing in report.missing.items():
-        app.console.print(Text(f"snapshot {snap}: {len(missing)} chunks missing", style="red"))
+        in_trash = report.in_trash.get(snap, 0)
+        extra = f" ({in_trash} of them are in the trash: 'duplio backup trash restore')" if in_trash else ""
+        app.console.print(Text(f"snapshot {snap}: {len(missing)} chunks missing{extra}", style="red"))
     for oid in report.corrupt[:20]:
         app.console.print(Text(f"corrupt chunk {oid}", style="red"))
     for line in report.unreadable_trees:
@@ -307,21 +315,123 @@ def backup_forget(repo: str, do_apply: bool, prune: bool, **kw: Any) -> None:
             r.delete_snapshot(snap.id)
     app.console.print(Text(f"Forgot {plural(len(decision.remove), 'snapshot')}.", style="green"))
     if prune:
-        objects, freed = r.prune()
-        app.console.print(Text(f"Pruned {objects:,} chunks, freed {human_size(freed)}.", style="green"))
+        _print_prune(app, r.prune())
+
+
+def _print_prune(app, report) -> None:  # type: ignore[no-untyped-def]
+    verb = "Would set aside" if report.dry_run else "Set aside"
+    if report.objects:
+        app.console.print(Text(f"{verb} {human_size(report.bytes)} ({report.objects:,} chunks) nobody uses.", style="green"))
+    else:
+        app.console.print("Nothing to set aside.")
+    if report.too_young:
+        app.console.print(Text(f"{report.too_young:,} unused chunks are newer than the safety margin and were left alone.", style="dim"))
+    if report.purged_objects:
+        verb = "Would delete" if report.dry_run else "Deleted"
+        app.console.print(Text(f"{verb} {human_size(report.purged_bytes)} that had been in the trash long enough.", style="green"))
+    if report.trees_protected:
+        app.console.print(Text(f"{plural(len(report.trees_protected), 'snapshot')} without a summary are protected for now "
+                               "('duplio backup repair' brings them back).", style="yellow"))
+    for line in report.trees_skipped:
+        app.console.print(Text(f"left alone, damaged and belonging to no snapshot: {line}", style="yellow"))
+    if report.batch and not report.dry_run:
+        app.console.print(Text("Set-aside data stays recoverable ('duplio backup trash') until a later prune removes it.", style="dim"))
 
 
 @backup.command("prune")
 @click.argument("repo")
 @click.option("--dry-run", is_flag=True)
+@click.option("--grace", default="1d", show_default=True,
+              help="Keep set-aside data in the repository's trash this long before deleting it (0 = delete at once).")
+@click.option("--min-age", default="1d", show_default=True,
+              help="Never touch data written more recently than this (protects a backup that is still running; 0 = off).")
+@click.option("--immediate", is_flag=True, help="Same as --grace 0 --min-age 0: free the space now, no recovery.")
 @handle_errors
-def backup_prune(repo: str, dry_run: bool) -> None:
-    """Delete chunks no snapshot uses any more."""
+def backup_prune(repo: str, dry_run: bool, grace: str, min_age: str, immediate: bool) -> None:
+    """Set aside chunks no snapshot uses; later runs delete them for good.
+
+    Space comes back after the grace period, not at once, so that a mistake in what counts as "unused" can be
+    undone with 'duplio backup trash restore'.
+    """
     app = get_app()
     r = _repo(app, repo)
-    objects, freed = r.prune(dry_run=dry_run)
-    verb = "Would free" if dry_run else "Freed"
-    app.console.print(Text(f"{verb} {human_size(freed)} ({objects:,} chunks).", style="green"))
+    grace_s = 0.0 if immediate else _seconds(grace)
+    min_age_s = 0.0 if immediate else _seconds(min_age)
+    _print_prune(app, r.prune(dry_run=dry_run, grace_s=grace_s, min_age_s=min_age_s))
+
+
+def _seconds(text: str) -> float:
+    return 0.0 if text.strip() in ("0", "0s") else float(parse_duration(text))
+
+
+@backup.command("repair")
+@click.argument("repo")
+@handle_errors
+def backup_repair(repo: str) -> None:
+    """Bring back snapshots whose summary file was lost (their file list is still there)."""
+    app = get_app()
+    ids = _repo(app, repo).repair()
+    if ids:
+        app.console.print(Text(f"Recovered {plural(len(ids), 'snapshot')}: " + ", ".join(ids), style="green"))
+    else:
+        app.console.print("Nothing to repair.")
+
+
+@backup.group("trash")
+def backup_trash() -> None:
+    """Data that prune has set aside (recoverable until it is purged)."""
+
+
+@backup_trash.command("list")
+@click.argument("repo")
+@handle_errors
+def trash_list(repo: str) -> None:
+    app = get_app()
+    batches = _repo(app, repo).trash()
+    if not batches:
+        app.console.print("The trash is empty.")
+        return
+    table = Table(box=box.SIMPLE_HEAD, expand=True)
+    for col in ("Batch", "Chunks", "Size", "File lists"):
+        table.add_column(col)
+    for b in batches:
+        table.add_row(t(b.name), f"{b.objects:,}", human_size(b.bytes), str(b.trees))
+    app.console.print(table)
+
+
+@backup_trash.command("restore")
+@click.argument("repo")
+@click.argument("batch", required=False)
+@handle_errors
+def trash_restore(repo: str, batch: str | None) -> None:
+    """Put set-aside chunks (and snapshots) back; all batches unless BATCH is given."""
+    app = get_app()
+    chunks, snaps = _repo(app, repo).trash_restore(batch)
+    app.console.print(Text(f"Restored {chunks:,} chunks and {plural(snaps, 'snapshot')}.", style="green"))
+
+
+@backup_trash.command("purge")
+@click.argument("repo")
+@click.option("--older-than", default=None, help="Only batches older than this, e.g. 7d (default: everything).")
+@click.option("--dry-run", is_flag=True)
+@click.option("-y", "--yes", is_flag=True, help="Do not ask.")
+@handle_errors
+def trash_purge(repo: str, older_than: str | None, dry_run: bool, yes: bool) -> None:
+    """Delete set-aside data for good (this cannot be undone)."""
+    app = get_app()
+    r = _repo(app, repo)
+    age = _seconds(older_than) if older_than else 0.0
+    files, size = r.trash_purge(older_than_s=age, dry_run=True)
+    if not files:
+        app.console.print("Nothing to purge.")
+        return
+    if dry_run:
+        app.console.print(Text(f"Would delete {files:,} files ({human_size(size)}).", style="yellow"))
+        return
+    if not yes and not (sys.stdin.isatty() and click.confirm(f"Permanently delete {files:,} files ({human_size(size)})?")):
+        raise ConfigError("not confirmed; nothing was deleted (use --yes to skip the question)")
+    files, size = r.trash_purge(older_than_s=age)
+    app.console.print(Text(f"Deleted {files:,} files ({human_size(size)}).", style="green"))
 
 
 @backup.command("diff")

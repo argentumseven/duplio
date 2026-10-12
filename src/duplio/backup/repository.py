@@ -42,11 +42,24 @@ import zlib
 from collections import defaultdict
 from collections.abc import Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from duplio import __version__
 from duplio.backup import lockfile
 from duplio.backup.crypto import MAGIC, PasswordRequired, RepoCrypto, require_library
+from duplio.backup.repo_gc import (
+    DEFAULT_GRACE_S,
+    DEFAULT_MIN_AGE_S,
+    ORPHAN_TREE_GRACE_S,
+    PruneReport,
+    TrashBatch,
+    purge_trash,
+    restore_trash,
+    trash_batches,
+    trashed_objects,
+)
+from duplio.backup.repo_gc import prune as gc_prune
 from duplio.compare.scheduler import Job, run_jobs
 from duplio.errors import RepositoryError
 from duplio.events import CancelToken, NullProgress, ProgressSink
@@ -66,7 +79,6 @@ OBJECT_MAGIC = b"DPO1"
 FLAG_RAW = 0
 FLAG_ZLIB = 1
 DEFAULT_CHUNK = 4 * 1024 * 1024
-STALE_LOCK_S = 12 * 3600
 
 # Already-compressed formats: compressing them again wastes CPU for nothing.
 INCOMPRESSIBLE = frozenset(
@@ -214,6 +226,8 @@ class CheckReport:
     unreadable_summaries: list[str] = field(default_factory=list)  # a snapshot exists but its summary cannot be read
     orphans: int = 0
     read_objects: int = 0
+    orphan_trees: list[str] = field(default_factory=list)  # file lists whose summary is missing (see `backup repair`)
+    in_trash: dict[str, int] = field(default_factory=dict)  # snapshot -> missing chunks that are in the trash
 
     @property
     def ok(self) -> bool:
@@ -462,7 +476,7 @@ class Repository:
                 with self.b.open_read(self.p(f"snapshots/{name}")) as handle:
                     raw = self._open_meta("snap", sid, handle.read())
                 meta = SnapshotMeta.from_dict(json.loads(raw))
-            except (OSError, ValueError, TypeError, RepositoryError) as exc:
+            except (OSError, ValueError, TypeError, KeyError, EOFError, RepositoryError) as exc:
                 unreadable.append(f"{sid}: {exc}")
                 continue
             meta.id = sid  # the file name is the identity; a damaged or edited record cannot point elsewhere
@@ -490,17 +504,94 @@ class Repository:
             raise RepositoryError(f"{ref!r} is ambiguous; use more characters")
         return matches[0]
 
-    def tree(self, snapshot_id: str) -> list[TreeEntry]:
+    def _read_tree(self, snapshot_id: str) -> dict[str, Any]:
         with self.b.open_read(self.p(f"trees/{snapshot_id}.json.gz")) as handle:
-            data = json.loads(gzip.decompress(self._open_meta("tree", snapshot_id, handle.read())))
-        return [TreeEntry.from_list(row) for row in data["entries"]]
+            blob = handle.read()
+        try:
+            data = json.loads(gzip.decompress(self._open_meta("tree", snapshot_id, blob)))
+            if not isinstance(data, dict) or not isinstance(data["entries"], list):
+                raise ValueError("not a file list")
+            return data
+        except (EOFError, zlib.error, ValueError, KeyError, TypeError) as exc:  # truncated, flipped, or the wrong shape
+            raise RepositoryError(f"the file list of snapshot {snapshot_id} is damaged ({type(exc).__name__}: {exc})") from exc
+
+    def tree(self, snapshot_id: str) -> list[TreeEntry]:
+        data = self._read_tree(snapshot_id)
+        try:
+            return [TreeEntry.from_list(row) for row in data["entries"]]
+        except (ValueError, KeyError, TypeError, IndexError) as exc:
+            raise RepositoryError(f"the file list of snapshot {snapshot_id} is damaged ({type(exc).__name__}: {exc})") from exc
 
     def _write_snapshot(self, meta: SnapshotMeta, entries: list[TreeEntry]) -> None:
-        tree = {"format": "duplio-tree", "version": 1, "snapshot": meta.id, "entries": [e.to_list() for e in entries]}
+        # The file list carries a copy of the summary, so a lost summary file can be rebuilt exactly (adopt_orphan_trees).
+        tree = {
+            "format": "duplio-tree",
+            "version": 1,
+            "snapshot": meta.id,
+            "meta": meta.to_dict(),
+            "entries": [e.to_list() for e in entries],
+        }
         with self.b.open_write(self.p(f"trees/{meta.id}.json.gz")) as handle:
             handle.write(self._seal_meta("tree", meta.id, gzip.compress(json_dumps(tree).encode(), 6)))
         with self.b.open_write(self.p(f"snapshots/{meta.id}.json")) as handle:
             handle.write(self._seal_meta("snap", meta.id, json_dumps(meta.to_dict(), indent=1).encode()))
+
+    def orphan_trees(self) -> list[str]:
+        """Ids of snapshot file lists that have no summary: a lost summary, or a backup interrupted just before
+        it published, or a forget interrupted just after it removed the summary."""
+        live = {s.id for s in self.snapshots()} | {u.split(":", 1)[0] for u in self.snapshot_problems()}
+        found = []
+        for name, is_dir in self.b.listdir(self.p("trees")):
+            if is_dir or not name.endswith(".json.gz") or ".duplio-tmp-" in name:
+                continue
+            sid = name[: -len(".json.gz")]
+            if sid not in live:
+                found.append(sid)
+        return sorted(found)
+
+    def adopt_orphan_trees(self) -> list[str]:
+        """Write the missing summary for every file list that has none, bringing those snapshots back.
+
+        The caller holds the repository lock. File lists made before summaries were embedded are adopted with
+        what can be derived from them (time from the id, file and byte counts) and the tag ``recovered``.
+        """
+        from duplio.backup.repo_gc import id_time
+
+        adopted: list[str] = []
+        for sid in self.orphan_trees():
+            try:
+                data = self._read_tree(sid)
+                entries = [TreeEntry.from_list(row) for row in data["entries"]]
+            except (OSError, ValueError, KeyError, RepositoryError):
+                continue  # `backup check` reports unreadable file lists; there is nothing to rebuild from
+            try:
+                meta = SnapshotMeta.from_dict(dict(data["meta"]))
+            except (KeyError, TypeError, ValueError):
+                stamp = id_time(sid)
+                meta = SnapshotMeta(
+                    id=sid,
+                    time=datetime.fromtimestamp(stamp, UTC).isoformat(timespec="seconds") if stamp else iso_now(),
+                    host="unknown",
+                    source="(recovered)",
+                    label="recovered",
+                    tags=["recovered"],
+                    parent=None,
+                    files=len(entries),
+                    bytes=sum(e.size for e in entries),
+                )
+            meta.id = sid
+            try:
+                with self.b.open_write(self.p(f"snapshots/{sid}.json")) as handle:
+                    handle.write(self._seal_meta("snap", sid, json_dumps(meta.to_dict(), indent=1).encode()))
+            except FileExistsError:
+                continue
+            adopted.append(sid)
+        return adopted
+
+    def repair(self) -> list[str]:
+        """Bring back snapshots whose summary file was lost. Returns their ids."""
+        with self.lock("repair"):
+            return self.adopt_orphan_trees()
 
     def delete_snapshot(self, snapshot_id: str) -> None:
         # Summary first: once it is gone the snapshot no longer exists, even if
@@ -771,6 +862,7 @@ class Repository:
         snaps, report.unreadable_summaries = self._read_summaries()
         report.snapshots = len(snaps)
         progress.stage("Checking snapshots", total_items=len(snaps))
+        recoverable: dict[str, str] | None = None
         for snap in snaps:
             cancel.check()
             try:
@@ -781,9 +873,13 @@ class Repository:
             missing = sorted({c for e in tree for c in e.chunks if c not in index})
             if missing:
                 report.missing[snap.id] = missing
+                if recoverable is None:
+                    recoverable = trashed_objects(self)
+                report.in_trash[snap.id] = sum(1 for c in missing if c in recoverable)
             referenced.update(c for e in tree for c in e.chunks)
             progress.advance(items=1)
         report.orphans = len(index - referenced)
+        report.orphan_trees = self.orphan_trees()
         if read_data:
             to_read = sorted(referenced & index)
             if subset is not None and 0 < subset < 1:
@@ -800,58 +896,36 @@ class Repository:
         return report
 
     def prune(
-        self, *, dry_run: bool = False, progress: ProgressSink | None = None
-    ) -> tuple[int, int]:
-        """Delete chunks no snapshot references. Returns ``(objects, bytes)``."""
-        progress = progress or NullProgress()
-        with self.lock("prune"):
-            self._index = None
-            index = self.index()
-            referenced: set[str] = set()
-            snaps, unreadable = self._read_summaries()
-            if unreadable:
-                raise RepositoryError(
-                    f"{len(unreadable)} snapshot summary file(s) cannot be read ({unreadable[0]}); refusing to prune, "
-                    "because their data would look unused. Run 'duplio backup check' and try again."
-                )
-            for snap in snaps:
-                try:
-                    referenced.update(c for e in self.tree(snap.id) for c in e.chunks)
-                except (OSError, ValueError, RepositoryError) as exc:
-                    raise RepositoryError(
-                        f"snapshot {snap.id} cannot be read ({exc}); refusing to prune until 'duplio backup check' passes"
-                    ) from exc
-            garbage = sorted(index - referenced)
-            freed = 0
-            progress.stage("Pruning", total_items=len(garbage))
-            for oid in garbage:
-                path = self.object_path(oid)
-                info = self.b.stat(path)
-                freed += info.size if info else 0
-                if not dry_run:
-                    self.b.remove(path)
-                    index.discard(oid)
-                progress.advance(items=1)
-            if not dry_run:
-                self._clean_leftovers({s.id for s in snaps})
-            return len(garbage), freed
+        self,
+        *,
+        dry_run: bool = False,
+        grace_s: float = DEFAULT_GRACE_S,
+        min_age_s: float = DEFAULT_MIN_AGE_S,
+        orphan_grace_s: float = ORPHAN_TREE_GRACE_S,
+        progress: ProgressSink | None = None,
+    ) -> PruneReport:
+        """Set aside the data no snapshot needs; delete it for good once it has sat in ``trash/`` for ``grace_s``.
 
-    def _clean_leftovers(self, live: set[str]) -> None:
-        """Remove trees without a summary and temp files from interrupted writes."""
-        for name, is_dir in self.b.listdir(self.p("trees")):
-            if is_dir:
-                continue
-            if (name.endswith(".json.gz") and name[: -len(".json.gz")] not in live) or ".duplio-tmp-" in name:
-                with contextlib.suppress(OSError):
-                    self.b.remove(self.p(f"trees/{name}"))
-        objects_dir = self.p("objects")
-        for name, is_dir in self.b.listdir(objects_dir):
-            if not is_dir:
-                continue
-            for obj, _ in self.b.listdir(self.b.join(objects_dir, name)):
-                if ".duplio-tmp-" in obj:
-                    with contextlib.suppress(OSError):
-                        self.b.remove(self.b.join(self.b.join(objects_dir, name), obj))
+        ``min_age_s`` is a safety margin: data written more recently is never touched. ``grace_s=0`` deletes
+        immediately and ``min_age_s=0`` removes the margin; both are explicit requests for less safety.
+        """
+        with self.lock("prune"):
+            return gc_prune(
+                self, dry_run=dry_run, grace_s=grace_s, min_age_s=min_age_s, orphan_grace_s=orphan_grace_s,
+                progress=progress,
+            )
+
+    def trash(self) -> list[TrashBatch]:
+        return trash_batches(self)
+
+    def trash_restore(self, batch: str | None = None) -> tuple[int, int]:
+        """Bring back chunks (and snapshot file lists) that prune set aside. Returns (chunks, snapshots)."""
+        with self.lock("trash-restore"):
+            return restore_trash(self, batch)
+
+    def trash_purge(self, *, older_than_s: float = 0.0, dry_run: bool = False) -> tuple[int, int]:
+        with self.lock("trash-purge"):
+            return purge_trash(self, older_than_s=older_than_s, dry_run=dry_run)
 
     def find(self, pattern: str, *, snapshot: str | None = None, regex: bool = False,
              progress: ProgressSink | None = None) -> list[FoundFile]:
