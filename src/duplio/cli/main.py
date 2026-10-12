@@ -13,6 +13,7 @@ from duplio.cli import (  # noqa: F401  (register commands)
     cmd_misc,
     cmd_plan,
     cmd_scan,
+    cmd_snapshot,
     cmd_sync,
 )
 from duplio.cli.app import cli
