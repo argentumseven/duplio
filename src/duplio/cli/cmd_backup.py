@@ -310,8 +310,9 @@ def backup_forget(repo: str, do_apply: bool, prune: bool, **kw: Any) -> None:
     if not do_apply:
         app.console.print(Text(f"Dry run: {plural(len(decision.remove), 'snapshot')} would be forgotten. Add --apply.", style="yellow"))
         return
-    with r.lock("forget"):
+    with r.lock("forget") as lease:
         for snap in decision.remove:
+            lease.check()
             r.delete_snapshot(snap.id)
     app.console.print(Text(f"Forgot {plural(len(decision.remove), 'snapshot')}.", style="green"))
     if prune:

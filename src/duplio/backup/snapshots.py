@@ -156,10 +156,10 @@ class SnapshotSet:
         if info is None or not info.is_dir:
             raise RepositoryError(f"source folder not found: {source.display}")
         self.require_hardlinks()
-        with self._lock("snapshot"):
+        with self._lock("snapshot") as lease:
             return self._create_locked(source, scan_filter=scan_filter, label=label, tags=tags,
                                        one_file_system=one_file_system, limiter=limiter, verify_links=verify_links,
-                                       progress=progress, cancel=cancel, now=now)
+                                       progress=progress, cancel=cancel, now=now, lease=lease)
 
     def _create_locked(
         self,
@@ -174,6 +174,7 @@ class SnapshotSet:
         progress: ProgressSink | None,
         cancel: CancelToken | None,
         now: float | None,
+        lease: lockfile.Lease,
     ) -> SnapshotReport:
         progress = progress or NullProgress()
         cancel = cancel or CancelToken()
@@ -205,6 +206,8 @@ class SnapshotSet:
                 if scan_filter.uses_time and scan_filter.skip_by_time(raw.mtime_ns):
                     continue
                 files.append(raw)
+                if len(files) % 512 == 0:
+                    lease.check()
             cancel.check()
 
             meta = SnapshotMeta(
@@ -226,6 +229,7 @@ class SnapshotSet:
                 def job() -> None:
                     target = db.join(building, raw.rel)
                     try:
+                        lease.check()
                         current = sb.stat(raw.path)
                         src_mode = None if current is None or current.mode is None else current.mode & 0o7777
                         linked = False
@@ -259,9 +263,9 @@ class SnapshotSet:
                             if after is not None and (after.size != raw.size or after.mtime_ns != raw.mtime_ns):
                                 report.changed_during.append(raw.rel)
                     except Exception as exc:
-                        from duplio.errors import CancelledError
+                        from duplio.errors import CancelledError, LockLostError
 
-                        if isinstance(exc, CancelledError):
+                        if isinstance(exc, CancelledError | LockLostError):
                             raise
                         with lock:
                             report.errors.append((sb.display(raw.path), str(exc)))
@@ -275,11 +279,13 @@ class SnapshotSet:
             meta.reused_files = report.linked
             meta.errors = len(report.errors)
             meta.files = report.linked + report.copied
+            lease.verify()  # publishing: the lock must still be ours
             db.rename(building, db.join(self.loc.path, name))
         except BaseException:
             with contextlib.suppress(Exception):
                 _remove_tree(db, building)
             raise
+        lease.verify()
         self._write_meta(name, meta)
         self._point_latest(name)
         return report
@@ -311,7 +317,8 @@ class SnapshotSet:
         """Delete one snapshot. Returns the bytes freed (files that no other snapshot links to)."""
         if not name or name.startswith(".") or "/" in name or "\\" in name or name in (".", ".."):
             raise SafetyError(f"not a snapshot folder name: {name!r}")
-        with self._lock("forget"):
+        with self._lock("forget") as lease:
+            lease.verify()
             return self._forget_locked(name)
 
     def _forget_locked(self, name: str) -> int:

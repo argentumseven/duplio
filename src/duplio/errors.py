@@ -49,3 +49,7 @@ class LockError(RepositoryError):
 
 class UnsupportedOperation(DuplioError):
     """The storage backend does not support the requested operation."""
+
+
+class LockLostError(LockError):
+    """This process held a lock but can no longer prove it; it stops before changing anything else."""

@@ -390,10 +390,11 @@ class Repository:
 
     # ------------------------------------------------------------------ locking
     @contextlib.contextmanager
-    def lock(self, purpose: str) -> Iterator[None]:
+    def lock(self, purpose: str) -> Iterator[lockfile.Lease]:
+        """Exclusive access as a lease: refreshed while held, and checked before anything irreversible."""
         with lockfile.exclusive(self.b, self.p("locks/repo.lock"), purpose,
-                                hint="If that process is gone, run 'duplio backup unlock'."):
-            yield
+                                hint="If that process is gone, run 'duplio backup unlock'.") as lease:
+            yield lease
 
     def force_unlock(self) -> bool:
         path = self.p("locks/repo.lock")
@@ -522,7 +523,7 @@ class Repository:
         except (ValueError, KeyError, TypeError, IndexError) as exc:
             raise RepositoryError(f"the file list of snapshot {snapshot_id} is damaged ({type(exc).__name__}: {exc})") from exc
 
-    def _write_snapshot(self, meta: SnapshotMeta, entries: list[TreeEntry]) -> None:
+    def _write_snapshot(self, meta: SnapshotMeta, entries: list[TreeEntry], lease: lockfile.Lease | None = None) -> None:
         # The file list carries a copy of the summary, so a lost summary file can be rebuilt exactly (adopt_orphan_trees).
         tree = {
             "format": "duplio-tree",
@@ -531,8 +532,12 @@ class Repository:
             "meta": meta.to_dict(),
             "entries": [e.to_list() for e in entries],
         }
+        if lease is not None:
+            lease.verify()  # publishing is the moment a stale writer could do harm
         with self.b.open_write(self.p(f"trees/{meta.id}.json.gz")) as handle:
             handle.write(self._seal_meta("tree", meta.id, gzip.compress(json_dumps(tree).encode(), 6)))
+        if lease is not None:
+            lease.verify()
         with self.b.open_write(self.p(f"snapshots/{meta.id}.json")) as handle:
             handle.write(self._seal_meta("snap", meta.id, json_dumps(meta.to_dict(), indent=1).encode()))
 
@@ -624,7 +629,7 @@ class Repository:
         if info is None or not info.is_dir:
             raise RepositoryError(f"source folder not found: {source.display}")
 
-        with self.lock("backup"):
+        with self.lock("backup") as lease:
             parent = None
             for snap in reversed(self.snapshots()):
                 if snap.source == source.uri and snap.label == label:
@@ -652,6 +657,7 @@ class Repository:
                 files.append(raw)
                 if len(files) % 512 == 0:
                     progress.advance(items=512, detail=raw.rel)
+                    lease.check()
             cancel.check()
             index = self.index()
             report = BackupReport(
@@ -696,11 +702,11 @@ class Repository:
             def make_job(raw: RawEntry):  # type: ignore[no-untyped-def]
                 def job() -> None:
                     try:
-                        entry, new_bytes, stored, changed = self._store_file(source, raw, cancel, progress)
+                        entry, new_bytes, stored, changed = self._store_file(source, raw, cancel, progress, lease)
                     except Exception as exc:
-                        from duplio.errors import CancelledError
+                        from duplio.errors import CancelledError, LockLostError
 
-                        if isinstance(exc, CancelledError):
+                        if isinstance(exc, CancelledError | LockLostError):
                             raise
                         with lock:
                             report.errors.append((source.backend.display(raw.path), str(exc)))
@@ -721,11 +727,12 @@ class Repository:
             ordered = [entries[k] for k in sorted(entries)]
             report.snapshot.files = len(ordered)
             report.snapshot.bytes = sum(e.size for e in ordered)
-            self._write_snapshot(report.snapshot, ordered)
+            self._write_snapshot(report.snapshot, ordered, lease)
             return report
 
     def _store_file(
-        self, source: Location, raw: RawEntry, cancel: CancelToken, progress: ProgressSink
+        self, source: Location, raw: RawEntry, cancel: CancelToken, progress: ProgressSink,
+        lease: lockfile.Lease | None = None,
     ) -> tuple[TreeEntry, int, int, bool]:
         b = source.backend
         compress = self.compression == "always" or (
@@ -742,6 +749,8 @@ class Repository:
             with b.open_read(raw.path) as handle:
                 while True:
                     cancel.check()
+                    if lease is not None:
+                        lease.check()
                     data = _read_exact(handle, self.chunk_size)
                     if not data:
                         break
@@ -909,10 +918,10 @@ class Repository:
         ``min_age_s`` is a safety margin: data written more recently is never touched. ``grace_s=0`` deletes
         immediately and ``min_age_s=0`` removes the margin; both are explicit requests for less safety.
         """
-        with self.lock("prune"):
+        with self.lock("prune") as lease:
             return gc_prune(
                 self, dry_run=dry_run, grace_s=grace_s, min_age_s=min_age_s, orphan_grace_s=orphan_grace_s,
-                progress=progress,
+                progress=progress, lease=lease,
             )
 
     def trash(self) -> list[TrashBatch]:

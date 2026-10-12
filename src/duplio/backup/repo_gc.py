@@ -25,6 +25,7 @@ from duplio.events import NullProgress, ProgressSink
 from duplio.util.fmt import utc_stamp_ms
 
 if TYPE_CHECKING:
+    from duplio.backup.lockfile import Lease
     from duplio.backup.repository import Repository
 
 TRASH_DIR = "trash"
@@ -200,14 +201,14 @@ def prune(
     min_age_s: float = DEFAULT_MIN_AGE_S,
     orphan_grace_s: float = ORPHAN_TREE_GRACE_S,
     progress: ProgressSink | None = None,
-    check_lease=None,  # type: ignore[no-untyped-def]
+    lease: Lease | None = None,
 ) -> PruneReport:
     """Set aside what no snapshot needs. The caller holds the repository lock."""
     progress = progress or NullProgress()
     b = repo.b
     now = time.time()
     report = PruneReport(dry_run=dry_run)
-    guard = check_lease or (lambda: None)
+    guard = lease.check if lease is not None else (lambda: None)
 
     snaps, unreadable = repo._read_summaries()
     if unreadable:
@@ -262,6 +263,8 @@ def prune(
     batch = utc_stamp_ms()
     batch_root = b.join(repo.p(TRASH_DIR), batch)
     keep_in_place = 0
+    if lease is not None and not dry_run:
+        lease.verify()  # about to change the repository: be sure the lock is still ours
     for count, oid in enumerate(garbage):
         if count % 256 == 0:
             guard()
@@ -298,7 +301,8 @@ def prune(
         _clean_temp_files(repo, now, min_age_s)
 
     # 3. Deferred deletion: batches that have been in the trash long enough.
-    guard()
+    if lease is not None and not dry_run:
+        lease.verify()
     purged, purged_bytes = purge_trash(repo, older_than_s=max(grace_s, 1.0), dry_run=dry_run)
     report.purged_objects, report.purged_bytes = purged, purged_bytes
     return report
