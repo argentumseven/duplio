@@ -27,7 +27,7 @@ import os
 import secrets
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -45,9 +45,11 @@ from duplio.hashing.algorithms import default_full_algorithm, get_algorithm
 from duplio.hashing.core import files_identical, hash_file
 from duplio.plan.journal import Journal, exclusive_lock
 from duplio.plan.model import ActionType, FileRef, Plan, PlanItem
+from duplio.plan.reconcile import record_failure
 from duplio.transfer import copy_verified
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.atomic import atomic_write_json
+from duplio.util.faults import crashpoint
 from duplio.util.fmt import iso_now
 from duplio.util.text import json_dumps
 from duplio.util.timecmp import is_racy
@@ -258,30 +260,39 @@ class Executor:
         if isinstance(vb, LocalBackend):
             with contextlib.suppress(OSError):
                 mode = os.stat(v.path).st_mode & 0o7777
-        seq = self.journal.intent(
-            op=item.op.value,
-            item=item.id,
-            group=item.group_id,
-            src_root=self.plan.roots[v.root].uri,
-            src=v.path,
-            rel=v.rel,
-            keeper_root=self.plan.roots[k.root].uri,
-            keeper=k.path,
-            size=v.size,
-            mtime_ns=v.mtime_ns,
-            mode=mode,
-            digest=item.digest,
-            algorithm=item.algorithm,
-        )
+        artifacts = self._artifacts(item, victim_loc)
+        fields = {
+            "op": item.op.value,
+            "item": item.id,
+            "group": item.group_id,
+            "src_root": self.plan.roots[v.root].uri,
+            "src": v.path,
+            "rel": v.rel,
+            "keeper_root": self.plan.roots[k.root].uri,
+            "keeper": k.path,
+            "size": v.size,
+            "mtime_ns": v.mtime_ns,
+            "mode": mode,
+            "digest": item.digest,
+            "algorithm": item.algorithm,
+            **artifacts,
+        }
+        seq = self.journal.intent(**fields)
         try:
-            outcome = self._act(item, victim_loc, keeper_loc, seq)
+            outcome = self._act(item, victim_loc, keeper_loc, seq, artifacts)
         except _Skip as skip:
             self.journal.event(seq, "skipped", reason=str(skip))
             raise
         except BaseException as exc:
-            self.journal.failed(seq, str(exc) or type(exc).__name__)
+            self._record_failure(seq, fields, exc)
             raise
         return outcome
+
+    def _record_failure(self, seq: int, intent: Mapping[str, object], exc: BaseException) -> None:
+        """Journal an error. If the change had in fact taken effect (the error came afterwards, or only the
+        confirmation was lost), record it as done, so that ``undo`` still reverses it."""
+        assert self.journal is not None
+        record_failure(self.journal, seq, intent, exc, self.registry, self.dirs)
 
     # ------------------------------------------------------------------
     def _keeper_present(self, kb: Backend, k: FileRef) -> bool:
@@ -350,17 +361,32 @@ class Executor:
             raise _Skip("not byte-for-byte identical to the kept copy")
 
     # ------------------------------------------------------------------
-    def _act(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int) -> ItemOutcome:
+    def _artifacts(self, item: PlanItem, victim_loc: Location) -> dict[str, str]:
+        """Names of the files an operation will create, chosen before it starts and written into its journal entry,
+        so that after a crash the files left behind can be recognised and the operation resolved from facts."""
+        v, vb = item.victim, victim_loc.backend
+        if item.op is ActionType.QUARANTINE:
+            q_root = vb.join(self._loc(v.root).path, f"{QUARANTINE_DIR}/{self.apply_id}")
+            local = self.dirs.quarantine / self.apply_id / safe_tag(vb.id) / Path(*v.rel.split("/"))
+            return {"planned_dst": vb.join(q_root, v.rel), "fallback_dst": str(local)}
+        if item.op is ActionType.DELETE:
+            return {"probe": vb.join(vb.parent(v.path), f".duplio-del-{secrets.token_hex(4)}")}
+        if item.op in (ActionType.HARDLINK, ActionType.REFLINK):
+            return {"tmp": os.path.join(os.path.dirname(v.path), f".duplio-link-{secrets.token_hex(4)}")}
+        return {}
+
+    def _act(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int,
+             art: dict[str, str]) -> ItemOutcome:
         assert self.journal is not None
         op = item.op
         if op is ActionType.QUARANTINE:
-            return self._quarantine(item, victim_loc, keeper_loc, seq)
+            return self._quarantine(item, victim_loc, keeper_loc, seq, art)
         if op is ActionType.DELETE:
-            return self._delete(item, victim_loc, keeper_loc, seq)
+            return self._delete(item, victim_loc, keeper_loc, seq, art)
         if op is ActionType.TRASH:
             return self._trash(item, victim_loc, keeper_loc, seq)
         if op in (ActionType.HARDLINK, ActionType.REFLINK):
-            return self._replace_with_link(item, victim_loc, keeper_loc, seq)
+            return self._replace_with_link(item, victim_loc, keeper_loc, seq, art)
         raise ConfigError(f"unknown action {op}")
 
     def _post_check(self, keeper_loc: Location, k: FileRef, rollback: Callable[[], None]) -> None:
@@ -377,13 +403,12 @@ class Executor:
                 "The change was rolled back."
             )
 
-    def _quarantine(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int) -> ItemOutcome:
+    def _quarantine(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int,
+                    art: dict[str, str]) -> ItemOutcome:
         assert self.journal is not None
         v = item.victim
         vb = victim_loc.backend
-        root_loc = self._loc(v.root)
-        q_root = vb.join(root_loc.path, f"{QUARANTINE_DIR}/{self.apply_id}")
-        dst = vb.join(q_root, v.rel)
+        dst = art["planned_dst"]
         fallback = False
         try:
             if not vb.capabilities(v.path).can_rename:
@@ -396,8 +421,7 @@ class Executor:
             # Different filesystem or no rename support: copy, verify, then delete.
             fallback = True
             local = self.registry.local()
-            q_local = self.dirs.quarantine / self.apply_id / safe_tag(vb.id) / Path(*v.rel.split("/"))
-            dst = str(q_local)
+            dst = art["fallback_dst"]
             dst_root_uri = str(self.dirs.quarantine)
             if item.algorithm and get_algorithm(item.algorithm).cryptographic:
                 algorithm = item.algorithm
@@ -435,11 +459,12 @@ class Executor:
             self._quarantined.setdefault(v.root, []).append({"original": v.path, "rel": v.rel, "quarantined": dst})
         return ItemOutcome(item, "done", "quarantined", reclaimed=item.reclaim, dst=dst)
 
-    def _delete(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int) -> ItemOutcome:
+    def _delete(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int,
+                art: dict[str, str]) -> ItemOutcome:
         assert self.journal is not None
         v = item.victim
         vb = victim_loc.backend
-        probe = vb.join(vb.parent(v.path), f".duplio-del-{secrets.token_hex(4)}")
+        probe = art["probe"]
         probed = False
         if vb.capabilities(v.path).can_rename:
             try:
@@ -473,13 +498,14 @@ class Executor:
         self.journal.done(seq, reclaimed=item.reclaim)
         return ItemOutcome(item, "done", "moved to trash", reclaimed=item.reclaim)
 
-    def _replace_with_link(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int) -> ItemOutcome:
+    def _replace_with_link(self, item: PlanItem, victim_loc: Location, keeper_loc: Location, seq: int,
+                           art: dict[str, str]) -> ItemOutcome:
         assert self.journal is not None
         vb, kb = victim_loc.backend, keeper_loc.backend
         if not isinstance(vb, LocalBackend) or vb is not kb:
             raise _Skip(f"{item.op.value} needs both files on the same local filesystem")
         v, k = item.victim.path, item.keeper.path
-        tmp = os.path.join(os.path.dirname(v), f".duplio-link-{secrets.token_hex(4)}")
+        tmp = art["tmp"]
         try:
             if item.op is ActionType.HARDLINK:
                 os.link(k, tmp)
@@ -495,7 +521,9 @@ class Executor:
             st_v = os.lstat(v)
             if st_v.st_size != item.victim.size or st_v.st_mtime_ns != item.victim.mtime_ns:
                 raise _Skip("changed while being processed")
+            crashpoint("exec.link.before-replace")
             os.replace(tmp, v)
+            crashpoint("exec.link.after-replace")
         except BaseException:
             with contextlib.suppress(OSError):
                 os.unlink(tmp)

@@ -43,6 +43,7 @@ from duplio.hashing.algorithms import default_full_algorithm
 from duplio.plan.executor import ApplyOptions, ApplyReport, Executor, new_apply_id
 from duplio.plan.journal import Journal, exclusive_lock
 from duplio.plan.model import ActionType, FileRef, Plan, PlanItem, RootSpec
+from duplio.plan.reconcile import KnownLocations, record_failure
 from duplio.scan.inventory import FileEntry, Root
 from duplio.transfer import copy_verified
 from duplio.util.appdirs import AppDirs, get_app_dirs
@@ -478,12 +479,13 @@ def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
     planned_archive = None
     if action.kind == "replace" and action.previous is not None:
         planned_archive = db.join(dest.path, f"{VERSIONS_DIR}/{apply_id}/{action.previous.rel}")
-    seq = journal.intent(
-        op="merge-replace" if action.kind == "replace" else "merge-copy",
-        src_root=src.location.uri, src=entry.path, rel=entry.rel,
-        dst_root=dest.location.uri, dst=db.join(dest.path, dest_rel), dest_rel=dest_rel,
-        size=entry.size, mtime_ns=entry.mtime_ns, kind=action.kind, archived=planned_archive,
-    )  # fmt: skip
+    intent = {
+        "op": "merge-replace" if action.kind == "replace" else "merge-copy",
+        "src_root": src.location.uri, "src": entry.path, "rel": entry.rel,
+        "dst_root": dest.location.uri, "dst": db.join(dest.path, dest_rel), "dest_rel": dest_rel,
+        "size": entry.size, "mtime_ns": entry.mtime_ns, "kind": action.kind, "archived": planned_archive,
+    }  # fmt: skip
+    seq = journal.intent(**intent)
     try:
         if action.kind == "replace":
             prev = action.previous
@@ -541,7 +543,7 @@ def execute_action(action: MergeAction, env: TransferEnv) -> MergeResult:
         journal.event(seq, "skipped", reason="cancelled")
         raise
     except BaseException as exc:
-        journal.failed(seq, str(exc) or type(exc).__name__)
+        record_failure(journal, seq, intent, exc, KnownLocations(src.location, dest.location))
         raise
 
 

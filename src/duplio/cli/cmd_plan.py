@@ -18,7 +18,7 @@ from duplio.plan.executor import ApplyOptions, apply_plan
 from duplio.plan.journal import list_journals, summarize
 from duplio.plan.model import ActionType, Plan
 from duplio.plan.planner import build_plan
-from duplio.plan.undo import inspect_incomplete, list_quarantine, purge_quarantine, undo
+from duplio.plan.undo import list_quarantine, purge_quarantine, undo
 from duplio.util.fmt import human_size, plural
 
 
@@ -196,19 +196,31 @@ def quarantine_purge(apply_id: str | None, older_than: str | None, dry_run: bool
 @cli.command()
 @handle_errors
 def recover() -> None:
-    """Check for operations interrupted by a crash or power loss."""
+    """Settle operations interrupted by a crash or power loss.
+
+    Each interrupted operation is resolved from what is actually on disk: finished ones are recorded as done (so
+    'undo' can reverse them), unstarted ones are recorded as such, and a delete or replacement that stopped half-way
+    is rolled back by putting the file back. Anything unclear is left alone and listed. Nothing is deleted.
+    """
+    from duplio.plan.reconcile import UNRESOLVED, reconcile
+
     app = get_app()
-    findings = inspect_incomplete(app.registry, app.dirs)
-    if not findings:
+    resolutions = reconcile(app.registry, app.dirs)
+    if not resolutions:
         app.console.print(Text("No interrupted operations. ✓", style="green"))
         return
     table = Table(box=box.SIMPLE_HEAD, expand=True)
-    for col in ("Journal", "Operation", "File", "State"):
+    for col in ("Journal", "Operation", "File", "Result", "What was found"):
         table.add_column(col)
-    for path, op, state in findings:
-        table.add_row(t(path.stem), t(op.intent.get("op", "")), t(op.intent.get("src", "")), t(state, "yellow"))
+    for r in resolutions:
+        table.add_row(t(r.journal.stem), t(r.op), t(r.path), t(r.outcome, "red" if r.outcome == UNRESOLVED else "green"),
+                      t(r.note))
     app.console.print(table)
-    app.console.print(Text("Quarantined originals can be restored with 'duplio undo ID'.", style="dim"))
+    if any(r.outcome == UNRESOLVED for r in resolutions):
+        app.console.print(Text("Some operations could not be settled automatically; nothing was changed for them.",
+                               style="yellow"))
+        sys.exit(1)
+    app.console.print(Text("Operations that had taken effect can be reversed with 'duplio undo ID'.", style="dim"))
 
 
 @cli.command()

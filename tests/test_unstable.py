@@ -195,8 +195,8 @@ def test_a_kept_copy_that_changes_during_the_run_stops_later_removals(registry: 
     acted: list[int] = []
     real = Executor._act
 
-    def act_then_damage_keeper(self, item, victim_loc, keeper_loc, seq):  # type: ignore[no-untyped-def]
-        out = real(self, item, victim_loc, keeper_loc, seq)
+    def act_then_damage_keeper(self, *args):  # type: ignore[no-untyped-def]
+        out = real(self, *args)
         if not acted:
             silently_rewrite(keeper)  # same size, same modification time; only the change time moves
         acted.append(1)
@@ -231,3 +231,29 @@ def test_an_unchanged_kept_copy_is_hashed_once_for_reversible_steps_and_every_ti
 
     assert count(ActionType.QUARANTINE) == 1  # unchanged, old enough to trust, undoable: reuse the verdict
     assert count(ActionType.DELETE) == 2  # irreversible: look again each time
+
+
+# --------------------------------------------------------------------------- freeing a phone: the copy is read again
+def test_ingest_rechecks_the_library_copy_right_before_deleting_the_original(registry: BackendRegistry, tmp_path: Path,
+                                                                             dirs, monkeypatch: pytest.MonkeyPatch) -> None:  # type: ignore[no-untyped-def]
+    from duplio.backup import ingest as ingest_module
+    from duplio.backup.ingest import IngestOptions, ingest
+
+    data = rand_bytes(40_000, 71)
+    write(tmp_path / "phone" / "DCIM" / "IMG_1.jpg", data, mtime=T0)
+    real = ingest_module._free_source
+
+    def damage_the_copy_first(source, library, verified, *args):  # type: ignore[no-untyped-def]
+        # Hours later in a big run: the verified copy in the library has been damaged (same size, other content).
+        for _raw, dest_rel, _digest in verified:
+            target = tmp_path / "library" / dest_rel
+            damaged = bytearray(target.read_bytes())
+            damaged[100] ^= 0xFF
+            target.write_bytes(bytes(damaged))
+        return real(source, library, verified, *args)
+
+    monkeypatch.setattr(ingest_module, "_free_source", damage_the_copy_first)
+    report = ingest(registry.open(str(tmp_path / "phone")), registry.open(str(tmp_path / "library")), dirs=dirs,
+                    options=IngestOptions(free_source=True), confirm_free=True)
+    assert report.freed == 0 and (tmp_path / "phone" / "DCIM" / "IMG_1.jpg").read_bytes() == data
+    assert any("no longer matches" in message for _, message in report.errors)

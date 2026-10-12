@@ -39,6 +39,7 @@ REFRESH_S = 60.0  # how often the owner rewrites the lock
 STALE_S = 20 * 60.0  # a lock not refreshed for this long (by the share's own clock) is abandoned
 STALE_LOCK_S = STALE_S  # older name, kept for callers that import it
 _CLOCK_SLACK_S = 5.0
+VERIFY_ATTEMPTS = 3  # reads/writes of the lock tried before it is declared unconfirmable
 
 
 def read_lock(backend: Backend, path: str) -> dict[str, Any]:
@@ -150,19 +151,21 @@ class Lease:
         if self._lost.is_set():
             raise self._fail()
         with self._guard:
-            try:
-                held = read_lock(self.backend, self.path) if self.backend.exists(self.path) else {}
-            except OSError as exc:
-                self._mark_lost(f"it cannot be read: {exc}")
-                raise self._fail() from exc
-            if held.get("token") != self.token:
-                self._mark_lost("another process took it over" if held else "the lock file is gone")
-                raise self._fail()
-            try:
-                self._write()
-            except OSError as exc:
-                self._mark_lost(f"it cannot be refreshed: {exc}")
-                raise self._fail() from exc
+            failure: OSError | None = None
+            for attempt in range(VERIFY_ATTEMPTS):
+                if attempt:
+                    time.sleep(0.2 * attempt)  # a share that hiccups once should not cost a whole backup
+                try:
+                    held = read_lock(self.backend, self.path) if self.backend.exists(self.path) else {}
+                    if held.get("token") != self.token:
+                        self._mark_lost("another process took it over" if held else "the lock file is gone")
+                        raise self._fail()
+                    self._write()
+                    return
+                except OSError as exc:
+                    failure = exc
+            self._mark_lost(f"it cannot be confirmed: {failure}")
+            raise self._fail() from failure
 
     def _write(self) -> None:
         self._seq += 1

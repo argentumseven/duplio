@@ -245,7 +245,9 @@ def undo_summary(console: Console, report: UndoReport) -> None:
     table.add_column("Result", no_wrap=True)
     table.add_column("File", ratio=2, overflow="fold")
     table.add_column("Note", style="dim", ratio=1)
-    colours = {"restored": "green", "would-restore": "cyan", "conflict": "yellow", "failed": "red", "not-undoable": "red", "already-undone": "dim"}
+    colours = {"restored": "green", "would-restore": "cyan", "conflict": "yellow", "failed": "red", "not-undoable": "red",
+               "already-undone": "dim", "interrupted-unresolved": "red", "interrupted-completed": "cyan",
+               "interrupted-rolled-back": "cyan", "interrupted-not-started": "dim"}
     for line in report.lines[:200]:
         table.add_row(t(line.status, colours.get(line.status, "")), t(line.path), t(line.message))
     console.print(table)

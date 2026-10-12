@@ -68,6 +68,7 @@ class IngestItem:
     dest_rel: str | None = None
     date_source: str | None = None
     message: str = ""
+    digest: str | None = None  # content digest verified in the library during this run
 
 
 @dataclass
@@ -229,7 +230,7 @@ def ingest(
     algo = default_full_algorithm()
     ledger = Ledger(ledger_path(dirs, library))
     lib_lock = threading.Lock()
-    verified_sources: list[tuple[RawEntry, str]] = []
+    verified_sources: list[tuple[RawEntry, str, str]] = []
 
     def library_match(size: int, digest: str) -> str | None:
         with lib_lock:
@@ -256,7 +257,20 @@ def ingest(
             key = Ledger.source_key(source.uri, raw.rel, raw.size, raw.mtime_ns)
             known = ledger.seen_digest(key)
             if known is not None and not options.reimport_deleted and ledger.imported(known) is not None:
-                report.items.append(IngestItem(raw.rel, raw.size, "previously-imported", ledger.imported(known)))
+                item = IngestItem(raw.rel, raw.size, "previously-imported", ledger.imported(known))
+                if options.free_source and not options.dry_run:
+                    # A run that was interrupted after importing but before freeing the phone: the ledger's word is
+                    # not enough to delete anything, so the original is read and matched against the library again.
+                    try:
+                        digest = hash_file(sb, raw.path, algo, expected_size=raw.size, cancel=cancel)
+                        existing = library_match(raw.size, digest)
+                    except OSError:
+                        existing = None
+                    if existing is not None:
+                        item = IngestItem(raw.rel, raw.size, "duplicate", existing, message="already in library",
+                                          digest=digest)
+                        verified_sources.append((raw, existing, digest))
+                report.items.append(item)
                 progress.advance(items=1, nbytes=raw.size)
                 continue
             if options.dry_run:
@@ -276,8 +290,8 @@ def ingest(
                 report.errors.append((raw.rel, str(exc)))
             report.items.append(item)
             # Only content verified in the library *during this run* may be freed on the source.
-            if item.status in ("imported", "duplicate") and item.dest_rel:
-                verified_sources.append((raw, item.dest_rel))
+            if item.status in ("imported", "duplicate") and item.dest_rel and item.digest:
+                verified_sources.append((raw, item.dest_rel, item.digest))
             progress.advance(items=1)
     finally:
         ledger.close()
@@ -286,7 +300,7 @@ def ingest(
             lb.remove_empty_dirs(lb.join(library.path, INCOMING_DIR), library.path)
 
     if options.free_source and not options.dry_run:
-        _free_source(source, library, verified_sources, report, cancel, progress)
+        _free_source(source, library, verified_sources, report, cancel, progress, algo)
     return report
 
 
@@ -307,7 +321,7 @@ def _import_one(raw, source, library, options, algo, ledger, key, library_match,
         existing = library_match(raw.size, digest)
         if existing is not None:
             ledger.record(key, digest, raw.size, existing, source.uri)
-            return IngestItem(raw.rel, raw.size, "duplicate", existing, message="already in library")
+            return IngestItem(raw.rel, raw.size, "duplicate", existing, message="already in library", digest=digest)
         name = raw.rel.rsplit("/", 1)[-1]
         try:
             with lb.open_read(tmp) as handle:
@@ -340,7 +354,7 @@ def _import_one(raw, source, library, options, algo, ledger, key, library_match,
                     RawEntry(lb.join(library.path, final_rel), final_rel, raw.size, info.mtime_ns)
                 )
         ledger.record(key, digest, raw.size, final_rel, source.uri)
-        return IngestItem(raw.rel, raw.size, "imported", final_rel, date_source)
+        return IngestItem(raw.rel, raw.size, "imported", final_rel, date_source, digest=digest)
     finally:
         with contextlib.suppress(Exception):
             if lb.exists(tmp):
@@ -350,19 +364,30 @@ def _import_one(raw, source, library, options, algo, ledger, key, library_match,
 def _free_source(
     source: Location,
     library: Location,
-    verified: list[tuple[RawEntry, str]],
+    verified: list[tuple[RawEntry, str, str]],
     report: IngestReport,
     cancel: CancelToken,
     progress: ProgressSink,
+    algorithm: str,
 ) -> None:
     sb, lb = source.backend, library.backend
     progress.stage("Freeing space on source", total_items=len(verified))
-    for raw, dest_rel in verified:
+    for raw, dest_rel, digest in verified:
         cancel.check()
         progress.advance(items=1)
-        kept = lb.stat(lb.join(library.path, dest_rel))
+        kept_path = lb.join(library.path, dest_rel)
+        kept = lb.stat(kept_path)
         if kept is None or kept.size != raw.size:
             report.errors.append((raw.rel, "library copy missing; not deleted"))
+            continue
+        # The library copy was verified when it was imported, possibly long ago in a big run. Deleting the only
+        # other copy is the irreversible step, so the copy is read and compared once more right before it.
+        try:
+            if hash_file(lb, kept_path, algorithm, expected_size=raw.size, cancel=cancel) != digest:
+                report.errors.append((raw.rel, "library copy no longer matches; not deleted"))
+                continue
+        except OSError as exc:
+            report.errors.append((raw.rel, f"library copy could not be re-checked ({exc}); not deleted"))
             continue
         info = sb.stat(raw.path)
         if info is None or info.size != raw.size or info.mtime_ns != raw.mtime_ns:

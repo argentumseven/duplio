@@ -22,8 +22,10 @@ from duplio.plan.journal import (
     list_journals,
     summarize,
 )
+from duplio.plan.reconcile import reconcile_journal
 from duplio.transfer import copy_verified
 from duplio.util.appdirs import AppDirs, get_app_dirs
+from duplio.util.faults import crashpoint
 from duplio.util.fmt import parse_duration
 from duplio.vfs.location import BackendRegistry
 
@@ -112,6 +114,7 @@ def _unshare(op: OpState, registry: BackendRegistry, dry_run: bool) -> UndoLine:
         if intent.get("mode") is not None:
             os.chmod(tmp, int(intent["mode"]))
         os.utime(tmp, ns=(int(intent["mtime_ns"]), int(intent["mtime_ns"])))
+        crashpoint("undo.before-replace")
         os.replace(tmp, path)
     except BaseException:
         with contextlib.suppress(OSError):
@@ -227,9 +230,14 @@ def undo(
     path = find_journal(dirs, apply_id)
     summary = summarize(path)
     report = UndoReport(summary.session, dry_run=dry_run)
-    ops = [op for op in reversed(summary.ops)]
-    progress.stage("Undoing", total_items=len(ops))
     with exclusive_lock(dirs.state / "apply.lock", purpose="undo"):
+        # A run that was killed leaves operations without an outcome. Their files say what happened; settle them first
+        # so that what took effect is reversed too (with --dry-run only the conclusion is used, nothing is written).
+        for resolution in reconcile_journal(path, registry, dirs, write=not dry_run, summary=summary):
+            report.lines.append(UndoLine(resolution.seq, resolution.op, resolution.path,
+                                         "interrupted-" + resolution.outcome, resolution.note))
+        ops = [op for op in reversed(summary.ops)]
+        progress.stage("Undoing", total_items=len(ops))
         journal = None if dry_run else Journal(path)
         try:
             for op in ops:

@@ -48,6 +48,7 @@ from duplio.hashing.algorithms import default_full_algorithm
 from duplio.hashing.cache import HashCache
 from duplio.plan.executor import QUARANTINE_DIR, new_apply_id, safe_tag
 from duplio.plan.journal import Journal, exclusive_lock
+from duplio.plan.reconcile import KnownLocations, record_failure
 from duplio.scan.inventory import FileEntry, Inventory, Root
 from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.fmt import iso_now
@@ -638,12 +639,13 @@ def _keep_both(action: SyncAction, envs: dict[int, TransferEnv], plan: SyncPlan,
         return SyncResult(action, "skipped", "changed since the scan")
     renamed = lb.join(lroot.path, action.conflict_rel)
     lb.makedirs(lb.parent(renamed))
-    seq = journal.intent(op="sync-rename", src_root=lroot.location.uri, src=loser.path, rel=loser.rel,
-                         dst_root=lroot.location.uri, dst=renamed, size=loser.size, mtime_ns=loser.mtime_ns)
+    rename_intent = {"op": "sync-rename", "src_root": lroot.location.uri, "src": loser.path, "rel": loser.rel,
+                     "dst_root": lroot.location.uri, "dst": renamed, "size": loser.size, "mtime_ns": loser.mtime_ns}
+    seq = journal.intent(**rename_intent)
     try:
         lb.rename(loser.path, renamed)
     except BaseException as exc:
-        journal.failed(seq, str(exc) or type(exc).__name__)
+        record_failure(journal, seq, rename_intent, exc, KnownLocations(lroot.location))
         raise
     journal.done(seq, dst=renamed)
     # 1. winner's version takes the original name on the loser's side
@@ -683,8 +685,11 @@ def _delete(action: SyncAction, plan: SyncPlan, state: SyncState, dirs: AppDirs,
         return SyncResult(action, "skipped", "this location is read-only")
     q_root = backend.join(root.path, f"{QUARANTINE_DIR}/{apply_id}")
     dst = backend.join(q_root, entry.rel)
-    seq = journal.intent(op="quarantine", src_root=root.location.uri, src=entry.path, rel=entry.rel,
-                         size=entry.size, mtime_ns=entry.mtime_ns, reason="sync")
+    local_dst = str(dirs.quarantine / apply_id / safe_tag(backend.id) / Path(*entry.rel.split("/")))
+    delete_intent = {"op": "quarantine", "src_root": root.location.uri, "src": entry.path, "rel": entry.rel,
+                     "size": entry.size, "mtime_ns": entry.mtime_ns, "reason": "sync", "planned_dst": dst,
+                     "fallback_dst": local_dst}
+    seq = journal.intent(**delete_intent)
     fallback = False
     dst_root_uri = root.location.uri
     try:
@@ -701,7 +706,7 @@ def _delete(action: SyncAction, plan: SyncPlan, state: SyncState, dirs: AppDirs,
 
             fallback = True
             local = registry.local()
-            dst = str(dirs.quarantine / apply_id / safe_tag(backend.id) / Path(*entry.rel.split("/")))
+            dst = local_dst
             dst_root_uri = str(dirs.quarantine)
             copy_verified((backend, entry.path), (local, dst), algorithm=default_full_algorithm(),
                           expected_size=entry.size, mtime_ns=entry.mtime_ns)
@@ -712,7 +717,7 @@ def _delete(action: SyncAction, plan: SyncPlan, state: SyncState, dirs: AppDirs,
                     local.remove(dst)
                 raise
     except BaseException as exc:
-        journal.failed(seq, str(exc) or type(exc).__name__)
+        record_failure(journal, seq, delete_intent, exc, KnownLocations(root.location), dirs)
         raise
     journal.done(seq, dst_root=dst_root_uri, dst=dst, fallback=fallback, reclaimed=0)
     state.drop(action.key)

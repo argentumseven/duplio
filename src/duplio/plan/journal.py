@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from duplio.errors import LockError
+from duplio.util.faults import crashpoint, torn_write
 from duplio.util.fmt import iso_now
 from duplio.util.text import json_dumps
 
@@ -38,14 +39,23 @@ class Journal:
             for rec in read_journal(self.path):
                 self._seq = max(self._seq, int(rec.get("seq", 0)))
         self._fh = open(self.path, "a", encoding="utf-8")  # noqa: SIM115
+        if existing and not _ends_with_newline(self.path):
+            # The last write of an earlier run was cut short. Start a new line so that the next record is not glued
+            # onto the fragment (which would make both unreadable).
+            self._fh.write("\n")
+            self._fh.flush()
         if not existing:
             self._write({"type": "header", "format": JOURNAL_FORMAT, "version": 1, **(header or {})})
 
     def _write(self, record: dict[str, Any]) -> None:
         record.setdefault("ts", iso_now())
-        self._fh.write(json_dumps(record) + "\n")
+        crashpoint("journal.before")
+        line = json_dumps(record) + "\n"
+        torn_write("journal.torn", self._fh, line)
+        self._fh.write(line)
         self._fh.flush()
         os.fsync(self._fh.fileno())
+        crashpoint("journal.after")
 
     def intent(self, **fields: Any) -> int:
         with self._lock:
@@ -89,9 +99,20 @@ def read_journal(path: str | Path) -> list[dict[str, Any]]:
             try:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
-                # A torn final line after a crash: everything before it is intact.
-                break
+                continue  # a line cut short by a crash (or damaged): the records around it are still good
     return records
+
+
+def _ends_with_newline(path: Path) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                return True
+            handle.seek(-1, os.SEEK_END)
+            return handle.read(1) == b"\n"
+    except OSError:
+        return True
 
 
 @dataclass

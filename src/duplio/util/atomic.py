@@ -15,6 +15,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import IO, Any
 
+from duplio.util.faults import crashpoint
 from duplio.util.text import json_dumps
 
 
@@ -47,8 +48,10 @@ def atomic_open(path: str | os.PathLike[str], mode: str = "wb") -> Iterator[IO[A
             yield handle
             handle.flush()
             os.fsync(handle.fileno())
+        crashpoint("atomic.before-replace")
         os.replace(tmp_name, target)
         fsync_dir(target.parent)
+        crashpoint("atomic.after-replace")
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp_name)

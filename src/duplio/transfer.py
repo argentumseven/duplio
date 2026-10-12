@@ -50,7 +50,8 @@ def copy_verified(
     def discard_unverified() -> None:
         # We created the destination (overwrite=False means nothing was there) but could not confirm it.
         state["committed"] = False
-        dst[0].remove(dst[1])
+        with contextlib.suppress(FileNotFoundError):
+            dst[0].remove(dst[1])
 
     def once() -> str:
         if state["committed"] and not overwrite:
@@ -92,37 +93,19 @@ def _copy_once(
     src_backend, src_path = src
     dst_backend, dst_path = dst
     hasher = get_algorithm(algorithm).new()
-    total = 0
-    buf = bytearray(READ_BUFFER)
-    view = memoryview(buf)
-    with src_backend.open_read(src_path) as reader, dst_backend.open_write(dst_path, overwrite=overwrite) as writer:
-        readinto = getattr(reader, "readinto", None)
-        while True:
-            if cancel is not None:
-                cancel.check()
-            if readinto is not None:
-                n = readinto(view)
-                if not n:
-                    break
-                chunk = view[:n]
-            else:
-                data = reader.read(READ_BUFFER)
-                if not data:
-                    break
-                n = len(data)
-                chunk = memoryview(data)
-            hasher.update(chunk)
-            if limiter is not None:
-                limiter.acquire(n, cancel)
-            writer.write(chunk)
-            total += n
-            if on_bytes is not None:
-                on_bytes(n)
-        if expected_size is not None and total != expected_size:
-            raise SizeMismatch(f"{src_path}: read {total} bytes, expected {expected_size} (file changed?)")
-        digest = hasher.hexdigest()
-        if expected_digest is not None and digest != expected_digest:
-            raise VerificationError(f"{src_path}: content no longer matches the scanned digest")
+    view = memoryview(bytearray(READ_BUFFER))
+    streamed = False
+    try:
+        with src_backend.open_read(src_path) as reader, dst_backend.open_write(dst_path, overwrite=overwrite) as writer:
+            total, digest = _stream(reader, writer, hasher, view, src_path, expected_size, expected_digest, cancel,
+                                    on_bytes, limiter)
+            streamed = True
+    except BaseException:
+        if streamed and not overwrite:
+            # Everything was written, and the destination's commit (the rename) may or may not have happened before
+            # the error. From here on, whatever sits under the real name is our own unverified output.
+            state["committed"] = True
+        raise
     state["committed"] = True  # the destination now exists under its real name; verification is still to come
     if verify:
         try:
@@ -142,3 +125,38 @@ def _copy_once(
     if mtime_ns is not None:
         dst_backend.set_mtime(dst_path, mtime_ns)
     return digest
+
+
+def _stream(reader, writer, hasher, view, src_path: str, expected_size: int | None, expected_digest: str | None,  # type: ignore[no-untyped-def]
+            cancel: CancelToken | None, on_bytes: Callable[[int], None] | None,
+            limiter: RateLimiter | None) -> tuple[int, str]:
+    """Copy everything from ``reader`` to ``writer`` while hashing; returns ``(bytes, digest)``."""
+    total = 0
+    readinto = getattr(reader, "readinto", None)
+    while True:
+        if cancel is not None:
+            cancel.check()
+        if readinto is not None:
+            n = readinto(view)
+            if not n:
+                break
+            chunk = view[:n]
+        else:
+            data = reader.read(READ_BUFFER)
+            if not data:
+                break
+            n = len(data)
+            chunk = memoryview(data)
+        hasher.update(chunk)
+        if limiter is not None:
+            limiter.acquire(n, cancel)
+        writer.write(chunk)
+        total += n
+        if on_bytes is not None:
+            on_bytes(n)
+    if expected_size is not None and total != expected_size:
+        raise SizeMismatch(f"{src_path}: read {total} bytes, expected {expected_size} (file changed?)")
+    digest = hasher.hexdigest()
+    if expected_digest is not None and digest != expected_digest:
+        raise VerificationError(f"{src_path}: content no longer matches the scanned digest")
+    return total, digest

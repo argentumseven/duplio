@@ -23,6 +23,7 @@ from collections.abc import Callable, Iterator
 from typing import IO
 
 from duplio.errors import UnsupportedOperation
+from duplio.util.faults import crashpoint
 from duplio.util.text import temp_name
 from duplio.vfs.base import (
     Backend,
@@ -330,6 +331,7 @@ class LocalBackend(Backend):
                 os.fsync(handle.fileno())
             _drop_page_cache(handle.fileno())
             handle.close()
+            crashpoint("fs.write.before-commit")
             if tmp != path:
                 if overwrite:
                     os.replace(tmp, path)
@@ -338,6 +340,7 @@ class LocalBackend(Backend):
                 from duplio.util.atomic import fsync_dir
 
                 fsync_dir(directory)
+            crashpoint("fs.write.committed")
         except BaseException:
             handle.close()
             with contextlib.suppress(OSError):
@@ -351,11 +354,15 @@ class LocalBackend(Backend):
         st = os.lstat(path)
         if stat_mod.S_ISDIR(st.st_mode):
             raise IsADirectoryError(errno.EISDIR, "refusing to remove a directory", path)
+        crashpoint("fs.remove.before")
         os.unlink(path)
+        crashpoint("fs.remove.after")
 
     def rename(self, src: str, dst: str) -> None:
         os.makedirs(os.path.dirname(os.path.abspath(dst)), exist_ok=True)
+        crashpoint("fs.rename.before")
         rename_noreplace(src, dst)
+        crashpoint("fs.rename.after")
 
     def remove_empty_dirs(self, path: str, stop_at: str) -> None:
         stop = os.path.normpath(os.path.abspath(stop_at))
@@ -368,6 +375,7 @@ class LocalBackend(Backend):
             current = os.path.dirname(current)
 
     def set_mtime(self, path: str, mtime_ns: int) -> None:
+        crashpoint("fs.set-mtime.before", can_fail=False)
         try:
             st = os.lstat(path)
             os.utime(path, ns=(st.st_atime_ns, mtime_ns))
@@ -375,9 +383,12 @@ class LocalBackend(Backend):
             pass
 
     def hardlink(self, src: str, dst: str) -> None:
+        crashpoint("fs.hardlink.before")
         os.link(src, dst)
+        crashpoint("fs.hardlink.after")
 
     def reflink(self, src: str, dst: str) -> None:
+        crashpoint("fs.reflink.before")
         if sys.platform.startswith("linux"):
             import fcntl
 
@@ -402,7 +413,9 @@ class LocalBackend(Backend):
     def trash(self, path: str) -> None:
         if _send2trash is None:
             raise UnsupportedOperation("install Send2Trash to use the system trash")
+        crashpoint("fs.trash.before")
         _send2trash.send2trash(path)
+        crashpoint("fs.trash.after")
 
     def same_file(self, a: str, b: str) -> bool | None:
         if self.normalize(a) == self.normalize(b):

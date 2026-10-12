@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from duplio.util.appdirs import AppDirs
+from duplio.util.faults import crashpoint
 from duplio.util.fmt import iso_now
 from duplio.util.text import fs_bytes, fs_str
 
@@ -142,7 +143,9 @@ class SyncState:
         with self._lock:
             if finished:
                 self._conn.execute("INSERT OR REPLACE INTO meta VALUES ('last_run', ?)", (iso_now(),))
+            crashpoint("syncstate.before-commit")
             self._conn.commit()
+            crashpoint("syncstate.after-commit")
 
     def close(self) -> None:
         with self._lock:
