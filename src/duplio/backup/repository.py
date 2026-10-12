@@ -48,6 +48,8 @@ from typing import Any
 
 from duplio import __version__
 from duplio.backup import lockfile
+from duplio.backup.chunker import Chunker
+from duplio.backup.chunker import build as build_chunker
 from duplio.backup.crypto import MAGIC, PasswordRequired, RepoCrypto, require_library
 from duplio.backup.repo_gc import (
     DEFAULT_GRACE_S,
@@ -267,6 +269,7 @@ class Repository:
         self.config = config
         self.crypto = crypto
         self.chunk_size = int(config.get("chunk_size", DEFAULT_CHUNK))
+        self._chunker: Chunker | None = None
         self.compression = str(config.get("compression", "auto"))
         self._index: set[str] | None = None
         self._index_lock = threading.Lock()
@@ -285,15 +288,24 @@ class Repository:
         compression: str = "auto",
         password: str | None = None,
         scrypt_n: int | None = None,
+        chunker: str = "fixed",
     ) -> Repository:
-        """Create a repository; with ``password`` everything stored in it is encrypted."""
+        """Create a repository; with ``password`` everything stored in it is encrypted.
+
+        ``chunker`` is ``"fixed"`` (blocks of ``chunk_size``) or ``"cdc"`` (content-defined chunks averaging
+        ``chunk_size``; survives insertions in large files, needs numpy and is slower).
+        """
         b = location.backend
         if password is not None:
             require_library()
         if compression not in ("auto", "always", "never"):
             raise RepositoryError("compression must be auto, always or never")
+        if chunker not in ("fixed", "cdc"):
+            raise RepositoryError("chunker must be fixed or cdc")
         if not 64 * 1024 <= chunk_size <= 64 * 1024 * 1024:
             raise RepositoryError("chunk size must be between 64 KiB and 64 MiB")
+        if chunker == "cdc" and chunk_size > 16 * 1024 * 1024:
+            raise RepositoryError("with content-defined chunking the average chunk size is at most 16 MiB")
         info = b.stat(location.path)
         if info is not None:
             if not info.is_dir:
@@ -315,16 +327,20 @@ class Repository:
             "compression": compression,
             "created_by": f"duplio {__version__}",
         }
+        if chunker == "cdc":
+            config["chunker"] = {"type": "cdc", "min": chunk_size // 4, "avg": chunk_size, "max": chunk_size * 4}
         crypto = None
         if password is not None:
             from duplio.backup.crypto import DEFAULT_SCRYPT_N
 
             crypto, config["encryption"] = RepoCrypto.create(password, repo_id, scrypt_n=scrypt_n or DEFAULT_SCRYPT_N)
+        repo = cls(location, config, crypto)
+        _ = repo.chunker  # fail now, not at the first backup, if the chunker cannot be built (numpy missing)
         for sub in ("objects", "trees", "snapshots", "locks"):
             b.makedirs(b.join(location.path, sub))
         with b.open_write(b.join(location.path, CONFIG_NAME)) as handle:
             handle.write(json.dumps(config, indent=2).encode())
-        return cls(location, config, crypto)
+        return repo
 
     @classmethod
     def open(cls, location: Location, *, password: str | None = None) -> Repository:
@@ -390,6 +406,18 @@ class Repository:
     @property
     def encrypted(self) -> bool:
         return self.crypto is not None
+
+    @property
+    def chunker(self) -> Chunker:
+        """How files are cut into chunks, as this repository's configuration says."""
+        if self._chunker is None:
+            spec = self.config.get("chunker") or {"type": "fixed", "size": self.chunk_size}
+            # Boundaries must not let anyone holding the repository recognise a known file: the gear table is keyed
+            # (by the secret key when encrypted, otherwise by the repository's random id).
+            seed = (bytes.fromhex(self.crypto.object_id(b"duplio-chunker-seed")) if self.crypto is not None
+                    else str(self.config["id"]).encode())
+            self._chunker = build_chunker(spec, seed=seed)
+        return self._chunker
 
     def change_password(self, new_password: str, *, scrypt_n: int | None = None) -> None:
         """Re-wrap the master key under a new password. Data is untouched; the old password stops working."""
@@ -645,6 +673,7 @@ class Repository:
         info = source.backend.stat(source.path)
         if info is None or not info.is_dir:
             raise RepositoryError(f"source folder not found: {source.display}")
+        _ = self.chunker  # a repository whose chunker cannot run (numpy missing) fails here, not once per file
 
         with self.lock("backup") as lease:
             parent = None
@@ -778,16 +807,12 @@ class Repository:
                 raise FileNotFoundError("the file disappeared before it could be read")
             chunks: list[str] = []
             new_bytes = stored = total = 0
-            remaining = before.size  # never read past the size seen first: a file that keeps growing must not hold us
             with b.open_read(raw.path) as handle:
-                while remaining > 0:
+                # never read past the size seen first: a file that keeps growing must not hold us
+                for data in self.chunker.split(handle, limit=before.size):
                     cancel.check()
                     if lease is not None:
                         lease.check()
-                    data = _read_exact(handle, min(self.chunk_size, remaining))
-                    if not data:
-                        break
-                    remaining -= len(data)
                     oid, nstored, is_new = self.put(data, compress=compress)
                     chunks.append(oid)
                     total += len(data)
@@ -882,12 +907,10 @@ class Repository:
         """Does an existing file already hold exactly this snapshot entry?"""
         try:
             with backend.open_read(path) as handle:
-                for oid in entry.chunks:
-                    if self.oid(_read_exact(handle, self.chunk_size)) != oid:
-                        return False
-                return not handle.read(1)
-        except OSError:
-            return False
+                # one byte more than the entry holds, so that a longer file does not look identical
+                return [self.oid(c) for c in self.chunker.split(handle, limit=entry.size + 1)] == entry.chunks
+        except (OSError, RepositoryError):
+            return False  # unreadable, or cannot be chunked here: not confirmed identical
 
     # ------------------------------------------------------------------ maintenance
     def check(

@@ -100,15 +100,20 @@ def backup(password_file: str | None) -> None:
 
 @backup.command("init")
 @click.argument("repo")
-@click.option("--chunk-size", type=SIZE, default=DEFAULT_CHUNK, show_default=True)
+@click.option("--chunk-size", type=SIZE, default=DEFAULT_CHUNK, show_default=True,
+              help="Block size (fixed) or average chunk size (cdc).")
+@click.option("--chunker", type=click.Choice(["fixed", "cdc"]), default="fixed", show_default=True,
+              help="fixed = fast, shares whole files and edits that keep bytes in place · cdc = content-defined, also "
+                   "shares data after bytes are inserted into big files (needs numpy: pip install 'duplio[cdc]').")
 @click.option("--compression", type=click.Choice(["auto", "always", "never"]), default="auto", show_default=True)
 @click.option("--encrypt", is_flag=True, help="Encrypt everything before it is stored (AES-256-GCM; needs a password).")
 @handle_errors
-def backup_init(repo: str, chunk_size: int, compression: str, encrypt: bool) -> None:
+def backup_init(repo: str, chunk_size: int, chunker: str, compression: str, encrypt: bool) -> None:
     """Create a new, empty repository."""
     app = get_app()
     password = _new_password(app) if encrypt else None
-    r = Repository.init(app.registry.open(repo), chunk_size=chunk_size, compression=compression, password=password)
+    r = Repository.init(app.registry.open(repo), chunk_size=chunk_size, compression=compression, password=password,
+                        chunker=chunker)
     app.console.print(Text.assemble(("Repository created: ", "green"), r.loc.display, (f"  (id {r.config['id'][:12]})", "dim")))
     if encrypt:
         app.console.print(Panel(Text("Everything in this repository is encrypted with a key protected by your password. "
