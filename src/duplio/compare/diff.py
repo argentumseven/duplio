@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import time
 from collections import defaultdict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from duplio.compare.engine import Engine
@@ -328,3 +328,36 @@ def _classify(
                         note="a file of the same size on the other side could not be read, so this cannot be ruled out "
                              "as already there")
     return DiffItem(side, Kind.ONLY, entry, [], extra_copies=extra_only, group=gid)
+
+
+def swap_sides(diff: DiffResult) -> DiffResult:
+    """The same comparison seen from the other side: B becomes the first location and A the second.
+
+    Nothing is read again. It lets a window show "what B has that A lacks" and copy it over with the same planning code that
+    copies A into B, without hashing every file a second time.
+    """
+    inventory = diff.inventory
+    roots = [replace(inventory.roots[1], index=0), replace(inventory.roots[0], index=1)]
+    mapped: dict[int, FileEntry] = {}
+
+    def swapped(entry: FileEntry) -> FileEntry:
+        found = mapped.get(entry.id)
+        if found is None:
+            found = replace(entry, root=1 - entry.root)
+            mapped[entry.id] = found
+        return found
+
+    entries = [swapped(e) for e in inventory.entries]
+    items = [
+        DiffItem(1 - i.side, i.kind, swapped(i.entry), [swapped(o) for o in i.others], i.extra_copies, i.newer, i.group, i.note)
+        for i in diff.items
+    ]
+    items.sort(key=lambda i: (KIND_ORDER.index(i.kind), i.side, i.entry.rel))
+    groups = [
+        DuplicateGroup(g.id, g.size, [swapped(m) for m in g.members], g.digest, g.algorithm, g.confidence, g.method,
+                       {k: [swapped(a) for a in v] for k, v in g.aliases.items()})
+        for g in diff.groups
+    ]
+    flipped = Inventory(roots=roots, entries=entries, walk_stats=list(inventory.walk_stats))
+    return DiffResult(inventory=flipped, options=diff.options, items=items, groups=groups, stats=diff.stats,
+                      tolerance_ns=diff.tolerance_ns, case_folded=diff.case_folded, elapsed=diff.elapsed, errors=list(diff.errors))

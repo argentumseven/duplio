@@ -69,6 +69,7 @@ class IngestItem:
     date_source: str | None = None
     message: str = ""
     digest: str | None = None  # content digest verified in the library during this run
+    mtime_ns: int = 0  # modification time of the source file (lets a window show its picture)
 
 
 @dataclass
@@ -301,6 +302,9 @@ def ingest(
 
     if options.free_source and not options.dry_run:
         _free_source(source, library, verified_sources, report, cancel, progress, algo)
+    times = {raw.rel: raw.mtime_ns for raw in sources}
+    for item in report.items:
+        item.mtime_ns = times.get(item.source_rel, 0)
     return report
 
 
