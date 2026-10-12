@@ -39,7 +39,8 @@ is read again.
 
 - [Install](#install) (or just double-click a launcher)
 - [Quick start](#quick-start)
-- [The terminal UI](#the-terminal-ui)
+- [The window](#the-window)
+- [The text screen](#the-text-screen)
 - [Phones, cameras and network shares](#phones-cameras-and-network-shares)
 - [Pictures on slow drives](#pictures-on-slow-drives)
 - [How duplicates are detected](#how-duplicates-are-detected)
@@ -76,10 +77,10 @@ is read again.
 The launcher runs Duplio straight from its folder. **Nothing is installed, compiled or downloaded**: the libraries Duplio
 needs are bundled in [`vendor/`](vendor/README.md) (all pure Python, so the same files work everywhere). The one thing the
 computer must have is Python 3.11 or newer, which is free; if it is missing the launcher says how to get it (on Windows
-it offers to install it through the built-in `winget`, after asking). With no arguments the launcher opens the guided
-screen; with arguments it runs that command: `./duplio.sh scan ~/Pictures`.
+it offers to install it through the built-in `winget`, after asking). With no arguments the launcher opens the window
+(see [The window](#the-window)); with arguments it runs that command: `./duplio.sh scan ~/Pictures`.
 
-What works with nothing else installed: every command, the guided screen, duplicate finding, compare/merge/sync, plain
+What works with nothing else installed: every command, the window and the text screen, duplicate finding, compare/merge/sync, plain
 backups, picture previews (Duplio decodes the thumbnails itself), and network drives over SFTP, WebDAV and FTP.
 What needs an optional package, because it contains compiled code that cannot be bundled for every computer:
 similar-image search (Pillow), encrypted backups (cryptography), native `smb://` (smbprotocol; a mounted share works
@@ -112,7 +113,8 @@ Run `duplio doctor` to see what is installed, which phone tools (`adb`, `jmtpfs`
 ## Quick start
 
 ```bash
-duplio                                             # guided interface (the same as: duplio ui)
+duplio                                             # the window: two folders side by side, with pictures
+duplio ui                                          # the same things as a text screen, for a terminal
 
 duplio scan ~/Pictures ~/Downloads                 # read-only: what is duplicated?
 duplio dedupe ~/Pictures ~/Downloads               # scan → plan → confirm → quarantine
@@ -139,9 +141,50 @@ A typical clean-up has three steps, and you can stop after any of them:
 
 `duplio dedupe` does all three in one go and asks for confirmation before it changes anything.
 
-## The terminal UI
+## The window
 
-`duplio ui` opens a keyboard- and mouse-driven interface:
+`duplio` (or a double-click on the launcher) opens a window. **Every screen puts two folders next to each other:
+folder A on the left, folder B on the right, one row per file, with the real thumbnail of each picture.** Folder A is
+blue and folder B is red everywhere, the colours of the two figures in the icon, so a glance at a picture's border says
+which folder it is in. Each folder box takes a typed path, a recent folder, **Choose folder…**, or **Phone or server…**
+(a plugged-in phone, a drive, an SMB share, SFTP, WebDAV or FTP). The **⇄** button swaps A and B.
+
+| Screen | What A and B are | What you see | What you can do |
+|---|---|---|---|
+| **Compare two folders** | any two folders | every file of A with what B has for it: identical, renamed or moved, different content, only in A, only in B | copy the missing files A → B or B → A (all of them, or just the pictures you clicked) |
+| **Is it backed up?** | A: what you want to protect. B: the backup | a verdict ("Everything in A is safe in B" or "12 of 340 files in A are NOT in B"), and the files that are missing | copy what is missing into the backup |
+| **Find duplicates** | A alone, or A and B (B can be a *reference* that is never changed) | every set of identical files as a row of pictures, each marked KEEP, REMOVE or LOCKED | click a picture to change its mark, choose a rule ("keep the oldest"…), move the REMOVE copies to the quarantine, undo |
+| **Keep in sync** | the two sides of a two-way sync | what a sync would do, with arrows; a file changed on both sides is kept as two versions | preview, then **Sync now** |
+| **Import from phone** | A: a phone or card. B: your library | what is new on the phone and what the library already has (even under another name) | import only the new files, sorted into folders by date |
+| **History & undo** | | every change Duplio has made | undo one, or free the space by emptying its quarantine |
+| **Settings** | | picture memory, hidden files, patterns Duplio must never touch | |
+
+Looking never changes anything. A comparison reads both folders; only a button that says what it will do (**Copy 12
+selected: A → B**, **Move to quarantine**, **Sync now**, **Import**) changes files, and it first shows the full list of
+what will happen and asks. The rules are the ones the commands follow ([SAFETY.md](docs/SAFETY.md)): a copy never replaces a
+file (a clash is kept under a new name), every copy is read back and compared, removed files go to a quarantine and not into
+the void, and *History & undo* reverses a whole action.
+
+**Pictures.** The thumbnail is the small preview already inside each photo (or Duplio's own decoder of it), so a phone or a
+NAS is not made to send whole photos. Pictures from slow drives are remembered while the window is open (or longer, in
+*Settings*); a file that exists only in the cloud shows a cloud symbol and is not downloaded unless you right-click it and
+ask. Double-click a picture to open the file; right-click for *Show in its folder*, *Copy its address* and more. Pillow
+makes the thumbnails faster when it is installed, but is not required.
+
+**What the window needs.** Tk, which comes with Python on Windows and macOS (python.org's installer) and is a separate
+package on most Linux systems: `sudo apt install python3-tk` (Debian, Ubuntu), `sudo dnf install python3-tkinter`
+(Fedora). The launchers pick a Python that has Tk when the computer has several. On a computer without Tk, or without a
+screen, `duplio` says why in one line and opens the text screen instead; `duplio gui` says what is missing and exits.
+
+> The window was exercised on Linux under a virtual screen (Xvfb), with automated tests that drive every screen against
+> real folders: comparing, copying both ways, the backup verdict, duplicates with removal and undo, sync, import, history.
+> It has **not** been run on Windows or macOS by its author. Tk looks and behaves slightly differently there (fonts, the
+> folder chooser, high-resolution scaling); if something looks wrong, `duplio ui` (text) and every command still work.
+
+## The text screen
+
+`duplio ui` opens a keyboard- and mouse-driven interface in the terminal (no pictures except through the
+picture pane below; the window above is the one that shows two folders against each other):
 
 - **Home** has eight workflows and a live list of connected phones, shares and drives.
 - **Find duplicates**: add locations, either typed in, picked from the detected devices, or chosen with the folder browser (**Browse…**, or `Ctrl+O` in any folder box; it walks local folders, USB drives, phones and network servers, and remembers a remote folder's listing for two minutes so going up and down a NAS does not ask it again; `F5` asks again). Mark any location as *reference* (used for matching, never changed). Then choose the mode and verification level.
@@ -791,6 +834,8 @@ src/duplio/
   devices/      phone / share / drive discovery
   reporting/    JSON / CSV / HTML exports
   cli/          click commands and Rich rendering
+  gui/          the window (Tk): A-against-B pages, thumbnails, jobs on background threads; model.py holds the
+                logic that needs no screen
   tui/          Textual application (incl. the folder browser and the picture pane)
   transfer.py   the single verified-copy primitive (retry + bandwidth limit)
   notify.py     webhook / command / e-mail notifications
@@ -811,12 +856,15 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how the parts fit together 
 ```bash
 pip install -e ".[all,dev]"
 pytest              # 800+ tests: engine, safety, odd file names, backends (fake ADB/SMB; real WebDAV, FTP and SFTP servers
-                    # run inside the tests), pictures, launchers, backups, merge, sync, CLI, TUI, crash sweeps
+                    # run inside the tests), pictures, launchers, backups, merge, sync, CLI, TUI, the window, crash sweeps
 DUPLIO_SWEEP=full pytest tests/test_crash_sweep.py   # kill every operation at every durable step (the release gate)
 python benchmarks/scale.py --files 300000 --dir /big/disk   # time and memory on a large tree
 ruff check src tests && mypy src
 python tools/refresh_vendor.py                               # rebuild vendor/ (needs internet access)
 ```
+
+The window's logic is tested everywhere; the tests that drive the real window need Tk and a screen, and are skipped
+without them. On a machine with no screen: `sudo apt install python3-tk xvfb` and `xvfb-run pytest tests/test_gui_flows.py`.
 
 The network-drive tests start WsgiDAV, pyftpdlib and paramiko's SFTP server inside the test process; without those
 packages (they are in the `dev` extra) those tests are skipped.

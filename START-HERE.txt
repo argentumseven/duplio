@@ -22,8 +22,21 @@ LINUX
   2. Run:  ./duplio.sh
      (If it says "permission denied":  chmod +x duplio.sh   and try again.)
 
-A window opens with big numbered buttons. Use the arrow keys and Enter, or press a number.
-Press  ?  for help at any time, and  Ctrl+Q  to leave.
+A window opens. Every screen shows two folders next to each other, A on the left (blue) and B on
+the right (red), with the real pictures:
+
+  Compare two folders   what is in one and not the other, and copy the difference over
+  Is it backed up?      is everything in A also in B (your backup)?
+  Find duplicates       identical files, side by side; clear the extra copies safely
+  Keep in sync          make two folders match without destroying anything
+  Import from phone     bring only the new photos from a phone or card into your library
+  History & undo        put back anything Duplio changed
+
+Looking never changes anything. Before a button changes files it shows you the whole list.
+
+If the window does not open, this computer's Python has no "Tk" (Linux: sudo apt install python3-tk;
+Windows/Mac: install Python from python.org). Duplio then opens a text screen instead:
+arrow keys and Enter, ? for help, Ctrl+Q to leave.
 
 Looking at pictures on a slow or far-away drive (a NAS, a cloud drive, a USB stick)? Duplio
 fetches only the small preview built into each photo and remembers it, so browsing stays quick.

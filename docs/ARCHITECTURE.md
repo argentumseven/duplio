@@ -7,9 +7,9 @@ in one scan.
 
 ```
             ┌───────────────┐   ┌────────────────┐
-            │  cli (click)  │   │  tui (textual) │       presentation: no business logic
-            └──────┬────────┘   └───────┬────────┘
-                   └─────────┬──────────┘
+            │  cli (click)  │   │ tui (textual) │ gui (tk)   presentation: no business logic
+            └──────┬────────┘   └───────┬───────┴────┬───┘
+                   └─────────┬──────────┴────────────┘
       ┌──────────────┬───────┴──────┬──────────────────┐
       │   compare    │     plan     │      backup      │  engines: pure logic + progress events
       │ engine       │ rules        │ repository       │
@@ -201,13 +201,31 @@ its notification policy around `duplio run`.
 
 ## Presentation
 
-The CLI (`cli/`) and the TUI (`tui/`) only gather input, call engines and render
+The CLI (`cli/`), the TUI (`tui/`) and the window (`gui/`) only gather input, call engines and render
 results. Engines report progress through the `ProgressSink` protocol
 (`events.py`):
 
 - the CLI uses `RichProgress`;
 - the TUI uses `PolledProgress`: worker threads update counters, and the UI polls them ten times a second, so a fast scan never floods the event loop;
+- the window uses `GuiProgress` (`gui/jobs.py`): each action runs as a `Job` on a worker thread, a progress dialog polls its
+  counters, and the result or the error comes back to the window's thread;
 - tests use `RecordingProgress`.
+
+### The window (`gui/`)
+
+Tk is not thread-safe, so the rule is: **worker threads never call Tk.** `jobs.py` runs engines on threads; the thumbnailer
+(`thumbs.py`) decodes pictures on workers into plain PPM bytes and the window's own timer turns them into images; a worker that
+must ask a question (a password) goes through `Context.call_in_ui`.
+
+- `model.py` is everything that needs no screen: `Tile` (one file as shown), `PairRow` (A on the left, B on the right, what lies
+  between), `GroupRow` (every copy of one duplicate, with keep/remove/locked marks), `backup_verdict`, `sync_rows`,
+  `ingest_rows`. It is what the tests exercise on any Python.
+- `compare/diff.py: swap_sides` turns a comparison into the view from the other folder without reading anything again, so
+  "copy B → A" uses the same planner as "copy A → B".
+- `widgets.py: VirtualList` is a canvas that draws only the rows in view, so a folder of 100,000 files scrolls; `paint.py`
+  draws the cards; `pages/pairpage.py` is the template for every two-folder screen (Compare, Is it backed up?, Keep in sync,
+  Import), which only say how the answer is worded and what the buttons do.
+- A Python without Tk is detected before anything is imported (`gui/__init__.py: tk_problem`), and `duplio` falls back to the text screen.
 
 Cancellation is cooperative (`CancelToken`): workers check it between files and
 inside read loops, and journaled work is always left consistent.
