@@ -70,14 +70,19 @@ def snapshot_create(source: str, dest: str, label: str, tags: tuple[str, ...], e
              f"{human_duration(time.monotonic() - started)}"),
     ]
     if report.changed_during:
-        rows.append(Text(f"{len(report.changed_during):,} files changed while being copied (kept as read).", style="yellow"))
+        rows.append(Text(f"{len(report.changed_during):,} files changed while being copied; they are kept as read but "
+                         "flagged, and will be copied again next time:", style="yellow"))
+        rows.extend(Text(f"  {rel}", style="yellow") for rel in report.changed_during[:10])
+        rows.append(Text("For a consistent copy of live data (databases, VM disks) snapshot the file system first "
+                         "and copy from that (see the README, 'Files that change while they are backed up').", style="dim"))
     for rel, err in report.errors[:10]:
         rows.append(Text(f"could not copy {rel}: {err}", style="yellow"))
     from rich.console import Group
 
-    app.console.print(Panel(Group(*rows), title="Snapshot complete" if not report.errors else "Snapshot finished with errors",
-                            border_style="green" if not report.errors else "yellow"))
-    if report.errors:
+    clean = not report.errors and not report.changed_during
+    app.console.print(Panel(Group(*rows), title="Snapshot complete" if clean else "Snapshot finished with problems",
+                            border_style="green" if clean else "yellow"))
+    if not clean:
         sys.exit(1)
 
 

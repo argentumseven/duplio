@@ -125,11 +125,14 @@ def backup_init(repo: str, chunk_size: int, compression: str, encrypt: bool) -> 
 @click.option("-x", "--exclude", multiple=True, metavar="GLOB")
 @click.option("-i", "--include", multiple=True, metavar="GLOB")
 @click.option("--rehash", is_flag=True, help="Read every file even if unchanged since the last snapshot.")
+@click.option("--ignore-ctime", is_flag=True,
+              help="Do not read a file again just because its change time moved (permissions, extended attributes); "
+                   "size and modification time must still match.")
 @click.option("--cross-filesystems", is_flag=True)
 @guard_options
 @handle_errors
 def backup_run(source: str, repo: str, label: str, tags: tuple[str, ...], exclude: tuple[str, ...],
-               include: tuple[str, ...], rehash: bool, cross_filesystems: bool, bwlimit: str | None,
+               include: tuple[str, ...], rehash: bool, ignore_ctime: bool, cross_filesystems: bool, bwlimit: str | None,
                expect_mounted: bool | None, sentinel: str | None) -> None:
     """Snapshot SOURCE into REPO (only new data is stored)."""
     app = get_app()
@@ -142,7 +145,7 @@ def backup_run(source: str, repo: str, label: str, tags: tuple[str, ...], exclud
 
     def work(cancel):  # type: ignore[no-untyped-def]
         with progress_for(app) as progress:
-            return r.backup(src, scan_filter=flt, label=label, tags=list(tags), rehash=rehash,
+            return r.backup(src, scan_filter=flt, label=label, tags=list(tags), rehash=rehash, ignore_ctime=ignore_ctime,
                             one_file_system=not cross_filesystems, progress=progress, cancel=cancel)
 
     report = run_cancellable(work)
@@ -156,11 +159,17 @@ def backup_run(source: str, repo: str, label: str, tags: tuple[str, ...], exclud
         body.append(Text(f"{len(report.errors):,} files could not be read:", style="yellow"))
         body.extend(Text(f"  {p}: {e}", style="yellow") for p, e in report.errors[:10])
     if report.changed_during_backup:
-        body.append(Text(f"{len(report.changed_during_backup):,} files kept changing while being read (stored as read).", style="yellow"))
+        body.append(Text(f"{len(report.changed_during_backup):,} files kept changing while being read. They are stored as "
+                         "read but flagged (restore warns about them) and are read again next time:", style="yellow"))
+        body.extend(Text(f"  {p}", style="yellow") for p in report.changed_during_backup[:10])
+        body.append(Text("For a consistent copy of live data (databases, VM disks) back up from a file-system snapshot "
+                         "(see the README, 'Files that change while they are backed up').", style="dim"))
     from rich.console import Group
 
-    app.console.print(Panel(Group(*body), title="Backup complete", border_style="green" if not report.errors else "yellow"))
-    if report.errors:
+    clean = not report.errors and not report.changed_during_backup
+    app.console.print(Panel(Group(*body), title="Backup complete" if clean else "Backup finished with problems",
+                            border_style="green" if clean else "yellow"))
+    if not clean:
         sys.exit(1)
 
 
@@ -176,11 +185,13 @@ def backup_snapshots(repo: str) -> None:
         app.console.print("No snapshots yet.")
         return
     table = Table(box=box.SIMPLE_HEAD, expand=True)
-    for col in ("Snapshot", "Time", "Label", "Source", "Files", "Size", "New", "Tags"):
+    for col in ("Snapshot", "Time", "Label", "Source", "Files", "Size", "New", "Problems", "Tags"):
         table.add_column(col, no_wrap=col not in ("Source",))
     for s in snaps:
         table.add_row(t(s.id), t(s.time[:19].replace("T", " ")), t(s.label), t(s.source), f"{s.files:,}",
-                      human_size(s.bytes), human_size(s.new_bytes), t(",".join(s.tags)))
+                      human_size(s.bytes), human_size(s.new_bytes),
+                      t(f"{s.errors} unreadable, {s.unstable} unstable", "yellow") if s.problems else "",
+                      t(",".join(s.tags)))
     app.console.print(table)
 
 
@@ -223,6 +234,11 @@ def backup_restore(repo: str, snapshot: str, target: str, include: tuple[str, ..
                                     f"{len(report.renamed):,} restored beside existing files"))
     for p, e in report.errors[:20]:
         app.console.print(Text(f"{p}: {e}", style="red"))
+    if report.unstable:
+        app.console.print(Text(f"{plural(len(report.unstable), 'restored file')} had been changing while it was backed up and "
+                               "may be internally inconsistent (for example a half-written database): "
+                               + ", ".join(printable(p) for p in report.unstable[:5])
+                               + ("…" if len(report.unstable) > 5 else ""), style="yellow"))
     if report.conflicts:
         app.console.print(Text("Use --conflict rename to restore conflicting files next to the existing ones.", style="dim"))
     if report.errors:

@@ -47,7 +47,7 @@ from duplio.util.fmt import iso_now
 from duplio.util.text import json_dumps
 from duplio.util.throttle import RateLimiter
 from duplio.util.timecmp import is_racy, mtimes_match, tolerance_for
-from duplio.vfs.base import RawEntry, WalkStats
+from duplio.vfs.base import RawEntry, WalkStats, same_state
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import Location
 
@@ -260,7 +260,8 @@ class SnapshotSet:
                             else:
                                 report.copied += 1
                                 meta.new_bytes += raw.size
-                            if after is not None and (after.size != raw.size or after.mtime_ns != raw.mtime_ns):
+                            if after is None or current is None or not same_state(current, after) or (
+                                    after.size != raw.size or after.mtime_ns != raw.mtime_ns):
                                 report.changed_during.append(raw.rel)
                     except Exception as exc:
                         from duplio.errors import CancelledError, LockLostError
@@ -278,6 +279,7 @@ class SnapshotSet:
             cancel.check()
             meta.reused_files = report.linked
             meta.errors = len(report.errors)
+            meta.unstable = len(report.changed_during)
             meta.files = report.linked + report.copied
             lease.verify()  # publishing: the lock must still be ours
             db.rename(building, db.join(self.loc.path, name))

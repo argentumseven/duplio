@@ -57,6 +57,11 @@ def _load_libc() -> ctypes.CDLL | None:
 _LIBC = _load_libc()
 
 
+def _change_time(st: os.stat_result) -> int | None:
+    """The inode change time. On Windows ``st_ctime`` is the creation time, which says nothing about changes."""
+    return None if os.name == "nt" else st.st_ctime_ns
+
+
 def rename_noreplace(src: str, dst: str) -> None:
     """Rename ``src`` to ``dst``, failing with ``FileExistsError`` if ``dst`` exists.
 
@@ -239,6 +244,7 @@ class LocalBackend(Backend):
                     mtime_ns=st.st_mtime_ns,
                     inode=(st.st_dev, st.st_ino) if st.st_ino else None,
                     nlink=st.st_nlink,
+                    ctime_ns=_change_time(st),
                 )
             # Reverse so traversal order is alphabetical-ish and deterministic.
             subdirs.sort(reverse=True)
@@ -258,6 +264,7 @@ class LocalBackend(Backend):
             inode=(st.st_dev, st.st_ino) if st.st_ino else None,
             nlink=st.st_nlink,
             mode=stat_mod.S_IMODE(st.st_mode),
+            ctime_ns=_change_time(st),
         )
 
     def open_read(self, path: str) -> IO[bytes]:

@@ -26,6 +26,7 @@ import contextlib
 import os
 import secrets
 import shutil
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -49,6 +50,7 @@ from duplio.util.appdirs import AppDirs, get_app_dirs
 from duplio.util.atomic import atomic_write_json
 from duplio.util.fmt import iso_now
 from duplio.util.text import json_dumps
+from duplio.util.timecmp import is_racy
 from duplio.vfs.base import Backend
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import BackendRegistry, Location
@@ -100,6 +102,17 @@ def safe_tag(text: str) -> str:
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in text)[:80]
 
 
+_REVERSIBLE = frozenset({ActionType.QUARANTINE, ActionType.TRASH})  # steps that can be undone afterwards
+
+
+@dataclass(frozen=True)
+class _KeeperVerdict:
+    """A kept copy that was hashed and matched: what it looked like then, and when."""
+
+    state: tuple[int, int, int | None, tuple[int, int] | None]  # size, mtime, change time, identity
+    verified_ns: int
+
+
 class _Skip(Exception):
     """Item skipped for a benign, expected reason (e.g. file changed)."""
 
@@ -124,7 +137,7 @@ class Executor:
         self.apply_id = new_apply_id()
         self.locations: dict[int, Location] = {}
         self.unavailable: dict[int, str] = {}
-        self._keeper_ok: dict[tuple[int, str], bool] = {}
+        self._keeper_ok: dict[tuple[int, str], _KeeperVerdict] = {}
         self._quarantined: dict[int, list[dict[str, object]]] = {}
         self._removed: set[tuple[int, str]] = set()
         self.journal: Journal | None = None
@@ -275,6 +288,40 @@ class Executor:
         info = kb.stat(k.path)
         return info is not None and info.is_file and info.size == k.size
 
+    def _keeper_verified(self, item: PlanItem, kb: Backend) -> bool:
+        """Is the kept copy, right now, the content the plan says it is?
+
+        The verdict for a kept copy is not simply remembered for the rest of the run: a long run can outlast a change
+        to the file. Before an irreversible step (delete, replace by a link) it is hashed again every time. For
+        steps that can be undone (quarantine, system trash) an earlier verdict is reused only while the file still has
+        the same size, times and identity, and was not modified so close to the earlier check that a further edit
+        could have left them unchanged.
+        """
+        k = item.keeper
+        assert item.algorithm is not None
+        info = kb.stat(k.path)
+        if info is None or not info.is_file or info.size != k.size:
+            self._keeper_ok.pop((k.root, k.path), None)
+            return False
+        key = (k.root, k.path)
+        now_ns = time.time_ns()
+        cached = self._keeper_ok.get(key)
+        reusable = (
+            item.op in _REVERSIBLE
+            and cached is not None
+            and info.ctime_ns is not None  # without a change time there is nothing that cannot be forged
+            and cached.state == (info.size, info.mtime_ns, info.ctime_ns, info.inode)
+            and not is_racy(info.mtime_ns, cached.verified_ns, kb.capabilities(k.path).mtime_resolution_ns)
+        )
+        if reusable:
+            return True
+        ok = self._fresh_digest(kb, k.path, item.algorithm, k.size) == item.digest
+        if ok:
+            self._keeper_ok[key] = _KeeperVerdict((info.size, info.mtime_ns, info.ctime_ns, info.inode), now_ns)
+        else:
+            self._keeper_ok.pop(key, None)
+        return ok
+
     def _fresh_digest(self, backend: Backend, path: str, algorithm: str, size: int) -> str:
         caps = backend.capabilities(path)
         if algorithm in caps.remote_hash_algorithms:
@@ -291,14 +338,8 @@ class Executor:
         if item.digest is None or item.algorithm is None:
             raise SafetyError("plan item has no digest; refusing to act on unverified content")
         bytes_mode = self.opts.verify == "bytes" or not get_algorithm(item.algorithm).cryptographic
-        key = (k.root, k.path)
         if not bytes_mode:
-            if key not in self._keeper_ok:
-                if not self._keeper_present(kb, k):
-                    self._keeper_ok[key] = False
-                else:
-                    self._keeper_ok[key] = self._fresh_digest(kb, k.path, item.algorithm, k.size) == item.digest
-            if not self._keeper_ok[key]:
+            if not self._keeper_verified(item, kb):
                 raise SafetyError("the kept copy is missing or its content changed since the scan")
             if self._fresh_digest(vb, v.path, item.algorithm, v.size) != item.digest:
                 raise _Skip("content changed since the scan")

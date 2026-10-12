@@ -68,18 +68,46 @@ def test_backup_reads_again_a_file_edited_in_the_same_timestamp_step(registry: B
     assert (tmp_path / "out" / "notes.txt").read_bytes() == b"version TWO"  # was: the stale ONE
 
 
-def test_backup_trusts_old_files_and_rehash_distrusts_them(registry: BackendRegistry, tmp_path: Path) -> None:
+def test_backup_notices_an_edit_that_put_the_old_modification_time_back(registry: BackendRegistry,
+                                                                       tmp_path: Path) -> None:
+    # Size and modification time can both be restored by whoever (or whatever) edited the file; the change time
+    # cannot, so a long-settled file edited behind the back of its timestamp is still read again.
     src = tmp_path / "src"
     f = write(src / "archive.txt", b"version ONE", mtime=T0)  # long settled
     repo = Repository.init(registry.open(str(tmp_path / "repo")))
     repo.backup(registry.open(str(src)))
     silent_edit(f, b"version TWO")
-    repo.backup(registry.open(str(src)))  # size and time are all it has: the documented limit of incremental backup
+    repo.backup(registry.open(str(src)))
+    repo.restore("latest", registry.open(str(tmp_path / "out")))
+    assert (tmp_path / "out" / "archive.txt").read_bytes() == b"version TWO"  # was: the stale ONE
+
+
+def test_ignoring_the_change_time_leaves_size_and_time_as_the_only_clues(registry: BackendRegistry,
+                                                                         tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    f = write(src / "archive.txt", b"version ONE", mtime=T0)
+    repo = Repository.init(registry.open(str(tmp_path / "repo")))
+    repo.backup(registry.open(str(src)))
+    silent_edit(f, b"version TWO")
+    repo.backup(registry.open(str(src)), ignore_ctime=True)  # the documented limit of that option
     repo.restore("latest", registry.open(str(tmp_path / "out1")))
     assert (tmp_path / "out1" / "archive.txt").read_bytes() == b"version ONE"
     repo.backup(registry.open(str(src)), rehash=True)  # --rehash reads everything
     repo.restore("latest", registry.open(str(tmp_path / "out2")))
     assert (tmp_path / "out2" / "archive.txt").read_bytes() == b"version TWO"
+
+
+def test_a_file_replaced_by_another_with_the_same_size_and_time_is_noticed(registry: BackendRegistry,
+                                                                           tmp_path: Path) -> None:
+    src = tmp_path / "src"
+    f = write(src / "archive.txt", b"version ONE", mtime=T0)
+    repo = Repository.init(registry.open(str(tmp_path / "repo")))
+    repo.backup(registry.open(str(src)))
+    other = write(src / "replacement.tmp", b"version TWO", mtime=T0)
+    other.replace(f)  # an editor's "write a new file, rename over the old one": new inode, same size and time
+    repo.backup(registry.open(str(src)), ignore_ctime=True)  # even without the change time, the identity differs
+    repo.restore("latest", registry.open(str(tmp_path / "out")))
+    assert (tmp_path / "out" / "archive.txt").read_bytes() == b"version TWO"
 
 
 # ---------------------------------------------------------------- hard-link snapshots

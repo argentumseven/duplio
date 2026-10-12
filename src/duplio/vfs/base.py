@@ -78,6 +78,20 @@ class StatInfo:
     inode: tuple[int, int] | None = None  # (device, inode) when meaningful
     nlink: int = 1
     mode: int | None = None
+    ctime_ns: int | None = None  # inode change time where it is a real change time (POSIX); it cannot be set by users
+
+
+def same_state(before: StatInfo, after: StatInfo) -> bool:
+    """Did a file keep the same size, times and identity between two looks?
+
+    Times or identities a backend does not provide are not compared. Used to notice a file that was written while
+    it was being read or copied.
+    """
+    if before.size != after.size or before.mtime_ns != after.mtime_ns:
+        return False
+    if before.ctime_ns is not None and after.ctime_ns is not None and before.ctime_ns != after.ctime_ns:
+        return False
+    return not (before.inode is not None and after.inode is not None and before.inode != after.inode)
 
 
 class RemoteDigest(NamedTuple):
@@ -98,6 +112,7 @@ class RawEntry:
     mtime_ns: int
     inode: tuple[int, int] | None = None
     nlink: int = 1
+    ctime_ns: int | None = None
 
 
 class WalkFilter(Protocol):

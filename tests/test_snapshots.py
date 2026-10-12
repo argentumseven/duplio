@@ -222,4 +222,4 @@ def test_cli_exit_status_with_errors(tmp_path: Path, source: Path, monkeypatch: 
     monkeypatch.setattr(mod, "copy_verified", flaky)
     monkeypatch.setattr("duplio.vfs.retry.time.sleep", lambda s: None)
     result = invoke("snapshot", "create", str(source), str(tmp_path / "snaps"))
-    assert result.exit_code == 1 and "finished with errors" in result.output
+    assert result.exit_code == 1 and "finished with problems" in result.output

@@ -101,11 +101,11 @@ def apply_policy(
                 reasons[snap.id].append(name)
         if members and not reasons[members[0].id]:
             reasons[members[0].id].append("newest (always kept)")
-        # A snapshot that had read errors is incomplete; the newest one that had none must survive as well, or
+        # A snapshot that had read errors, or files that kept changing, is not trustworthy; the newest one that had none must survive as well, or
         # thinning could leave only incomplete ones.
-        complete = next((snap for snap in members if not snap.errors), None)
+        complete = next((snap for snap in members if not snap.problems), None)
         if complete is not None and not reasons[complete.id]:
-            reasons[complete.id].append("newest without errors (always kept)")
+            reasons[complete.id].append("newest without problems (always kept)")
         for snap in members:
             if reasons.get(snap.id):
                 keep.append((snap, reasons[snap.id]))

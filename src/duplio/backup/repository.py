@@ -38,6 +38,7 @@ import random
 import secrets
 import socket
 import threading
+import time
 import zlib
 from collections import defaultdict
 from collections.abc import Iterator
@@ -68,7 +69,7 @@ from duplio.util.fmt import iso_now, utc_stamp_ms
 from duplio.util.text import json_dumps
 from duplio.util.throttle import RateLimiter
 from duplio.util.timecmp import is_racy
-from duplio.vfs.base import RawEntry
+from duplio.vfs.base import RawEntry, same_state
 from duplio.vfs.local import LocalBackend
 from duplio.vfs.location import Location
 
@@ -79,6 +80,7 @@ OBJECT_MAGIC = b"DPO1"
 FLAG_RAW = 0
 FLAG_ZLIB = 1
 DEFAULT_CHUNK = 4 * 1024 * 1024
+STABLE_READ_ATTEMPTS = 3  # reads of a file that changes while being read before it is flagged unstable
 
 # Already-compressed formats: compressing them again wastes CPU for nothing.
 INCOMPRESSIBLE = frozenset(
@@ -138,13 +140,20 @@ class TreeEntry:
     mtime_ns: int
     chunks: list[str]
     mode: int | None = None
+    ctime_ns: int | None = None  # change time when the file was read (POSIX); a later change shows up here
+    ino: int | None = None  # inode number on file systems where that identifies a file
+    unstable: bool = False  # the file kept changing while it was read: the stored content may mix old and new parts
 
     def to_list(self) -> list[Any]:
-        return [self.path, self.size, self.mtime_ns, self.chunks, self.mode]
+        return [self.path, self.size, self.mtime_ns, self.chunks, self.mode, self.ctime_ns, self.ino,
+                1 if self.unstable else 0]
 
     @classmethod
     def from_list(cls, row: list[Any]) -> TreeEntry:
-        return cls(str(row[0]), int(row[1]), int(row[2]), list(row[3]), row[4] if len(row) > 4 else None)
+        def at(i: int) -> Any:
+            return row[i] if len(row) > i else None
+
+        return cls(str(row[0]), int(row[1]), int(row[2]), list(row[3]), at(4), at(5), at(6), bool(at(7)))
 
 
 @dataclass
@@ -162,7 +171,13 @@ class SnapshotMeta:
     stored_bytes: int = 0
     reused_files: int = 0
     errors: int = 0
+    unstable: int = 0  # files that kept changing while they were read
     duplio_version: str = __version__
+
+    @property
+    def problems(self) -> int:
+        """Files that could not be read plus files stored from a moving target: a snapshot with any is not "clean"."""
+        return self.errors + self.unstable
 
     def to_dict(self) -> dict[str, Any]:
         return {"format": "duplio-snapshot", "version": 1, **self.__dict__}
@@ -242,6 +257,7 @@ class RestoreReport:
     renamed: list[str] = field(default_factory=list)
     errors: list[tuple[str, str]] = field(default_factory=list)
     bytes: int = 0
+    unstable: list[str] = field(default_factory=list)  # restored, but backed up while changing: may be inconsistent
 
 
 class Repository:
@@ -614,6 +630,7 @@ class Repository:
         label: str = "",
         tags: list[str] | None = None,
         rehash: bool = False,
+        ignore_ctime: bool = False,
         one_file_system: bool = True,
         progress: ProgressSink | None = None,
         cancel: CancelToken | None = None,
@@ -679,19 +696,28 @@ class Repository:
             todo: list[RawEntry] = []
             parent_ns = int(parent.timestamp * 1e9) if parent is not None else 0
             resolution = source.caps.mtime_resolution_ns
+            stable_inodes = source.caps.stable_inodes
             for raw in files:
                 prev = parent_tree.get(raw.rel)
                 if (
                     not rehash
                     and prev is not None
+                    and not prev.unstable  # stored from a moving target: always read again
                     and prev.size == raw.size
                     and prev.mtime_ns == raw.mtime_ns
+                    # Size and times are hints, not proof. The change time cannot be set by users, so a file edited
+                    # and then given its old modification time back is still noticed (as borg and restic do).
+                    and (ignore_ctime or prev.ctime_ns is None or raw.ctime_ns is None or prev.ctime_ns == raw.ctime_ns)
+                    and (not stable_inodes or prev.ino is None or raw.inode is None or prev.ino == raw.inode[1])
                     # Same size and time prove nothing for a file changed around the time of the parent snapshot:
                     # it may have been edited again within the same timestamp step. Those are read again.
                     and not is_racy(raw.mtime_ns, parent_ns, resolution)
                     and all(c in index for c in prev.chunks)
                 ):
-                    entries[raw.rel] = TreeEntry(raw.rel, raw.size, raw.mtime_ns, list(prev.chunks), prev.mode)
+                    entries[raw.rel] = TreeEntry(
+                        raw.rel, raw.size, raw.mtime_ns, list(prev.chunks), prev.mode, raw.ctime_ns,
+                        raw.inode[1] if stable_inodes and raw.inode else None,
+                    )
                     report.snapshot.reused_files += 1
                 else:
                     todo.append(raw)
@@ -725,6 +751,7 @@ class Repository:
 
             run_jobs([Job(device, caps.max_parallel_reads, make_job(r)) for r in todo], cancel=cancel)
             ordered = [entries[k] for k in sorted(entries)]
+            report.snapshot.unstable = len(report.changed_during_backup)
             report.snapshot.files = len(ordered)
             report.snapshot.bytes = sum(e.size for e in ordered)
             self._write_snapshot(report.snapshot, ordered, lease)
@@ -734,26 +761,33 @@ class Repository:
         self, source: Location, raw: RawEntry, cancel: CancelToken, progress: ProgressSink,
         lease: lockfile.Lease | None = None,
     ) -> tuple[TreeEntry, int, int, bool]:
+        """Read one file into the repository. Returns ``(entry, new_bytes, stored_bytes, unstable)``.
+
+        The file is looked at before and after it is read; if it changed in between (size, modification time, change
+        time or identity) the read is repeated. A file that never holds still is kept as read but flagged
+        ``unstable``, so it is reported, counts against the snapshot, and is read again next time.
+        """
         b = source.backend
         compress = self.compression == "always" or (
             self.compression == "auto" and extension(raw.rel) not in INCOMPRESSIBLE
         )
-        mode = None
-        if isinstance(b, LocalBackend):
-            with contextlib.suppress(OSError):
-                mode = os.stat(raw.path).st_mode & 0o7777
-        changed = False
-        for attempt in range(3):
+        stable_inodes = source.caps.stable_inodes
+        for attempt in range(STABLE_READ_ATTEMPTS):
+            before = b.stat(raw.path)
+            if before is None or not before.is_file:
+                raise FileNotFoundError("the file disappeared before it could be read")
             chunks: list[str] = []
             new_bytes = stored = total = 0
+            remaining = before.size  # never read past the size seen first: a file that keeps growing must not hold us
             with b.open_read(raw.path) as handle:
-                while True:
+                while remaining > 0:
                     cancel.check()
                     if lease is not None:
                         lease.check()
-                    data = _read_exact(handle, self.chunk_size)
+                    data = _read_exact(handle, min(self.chunk_size, remaining))
                     if not data:
                         break
+                    remaining -= len(data)
                     oid, nstored, is_new = self.put(data, compress=compress)
                     chunks.append(oid)
                     total += len(data)
@@ -762,15 +796,16 @@ class Repository:
                         stored += nstored
                     progress.advance(nbytes=len(data))
             after = b.stat(raw.path)
-            if after is not None and after.size == total and after.mtime_ns == raw.mtime_ns and total == raw.size:
-                return TreeEntry(raw.rel, total, raw.mtime_ns, chunks, mode), new_bytes, stored, False
-            changed = True
-            if after is not None:
-                raw = RawEntry(raw.path, raw.rel, after.size, after.mtime_ns, raw.inode, raw.nlink)
-            if attempt < 2:
-                continue
-        # Still changing after retries: keep what was read, flagged as such.
-        return TreeEntry(raw.rel, total, raw.mtime_ns, chunks, mode), new_bytes, stored, changed
+            held_still = after is not None and total == before.size and same_state(before, after)
+            entry = TreeEntry(
+                raw.rel, total, before.mtime_ns, chunks, before.mode, before.ctime_ns,
+                before.inode[1] if stable_inodes and before.inode else None, unstable=not held_still,
+            )
+            if held_still:
+                return entry, new_bytes, stored, False
+            if attempt + 1 < STABLE_READ_ATTEMPTS:
+                time.sleep(0.1 * (attempt + 1))  # give a writer a moment to finish
+        return entry, new_bytes, stored, True
 
     # ------------------------------------------------------------------ restore
     def restore(
@@ -836,6 +871,8 @@ class Repository:
                         os.chmod(dst, entry.mode)
                 report.restored += 1
                 report.bytes += entry.size
+                if entry.unstable:
+                    report.unstable.append(entry.path)
             except (OSError, RepositoryError) as exc:
                 report.errors.append((entry.path, str(exc)))
             progress.advance(items=1, nbytes=entry.size)
