@@ -140,6 +140,21 @@ rules about showing and asking.
 | A picture shown is a picture of the file in that tile; looking at pictures never decides anything | `Tile.key` includes the side and the file; previews are for display only (see above) | `test_thumbnails_become_upright_pictures_that_fit_the_box` |
 | Work never freezes the window and never touches Tk from a worker thread; a failure is shown, not swallowed | `gui/jobs.py` (worker threads, a cancel button), thumbnails are made on workers and turned into images on the window's thread | `test_a_job_reports_its_result_and_its_progress`, `test_a_job_can_be_stopped_and_a_failure_is_kept_not_lost` |
 
+## Looking at a big folder stays safe and bounded
+
+| Guarantee | Where | Test |
+|---|---|---|
+| A picture is fetched from a drive once at a time: when the window and the background fetcher want the same one, the second waits for the first | `PreviewService.get` | `test_two_requests_for_one_picture_read_the_drive_once` |
+| When the picture buffer is full, fetching stops and says why; it does not throw away pictures of the open folder to fetch them again | `FolderPrefetcher`, `ThumbStore.trim` (the open folder's pictures are trimmed last, and the size limit still holds) | `test_a_full_buffer_stops_the_fetch_instead_of_throwing_pictures_away`, `test_pictures_of_the_folder_on_screen_are_trimmed_last_but_the_limit_always_holds`, `test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_away` |
+| An almost full disk, or a drive that stops answering, stops the fetch with a reason; it does not keep hammering | `FolderPrefetcher` | `test_an_almost_full_disk_stops_the_fetch`, `test_a_drive_that_stops_answering_stops_the_fetch_with_a_reason` |
+| A full disk or a damaged index never loses a fetched picture or stops the window | `PreviewService.get`, `ThumbStore._open_index` | `test_a_full_disk_does_not_lose_a_picture_that_was_just_fetched`, `test_totals_survive_a_restart_and_a_damaged_index_is_started_again` |
+| The pictures held in memory have a byte budget that shrinks when the computer is short of memory; what was let go comes back from the buffer, not the drive | `Thumbnailer` | `test_finished_pictures_are_kept_up_to_a_byte_budget_and_come_back_from_the_buffer_not_the_drive`, `test_the_picture_budget_shrinks_when_the_computer_is_short_of_memory_and_comes_back` |
+| Scrolling cannot pile up unbounded work; read-ahead waits for what is on screen | `Thumbnailer` (bounded queues, back-pressure) | `test_scrolling_cannot_pile_up_unbounded_work`, `test_read_ahead_waits_for_what_is_on_screen` |
+| Cloud-only files are skipped, not downloaded, by the background fetch | `FolderPrefetcher` | `test_cloud_only_files_are_skipped_not_downloaded` |
+| Browsing a remote folder reads a small part of each photo, once, and walking away and back reads nothing | the whole path | `test_browsing_a_remote_folder_reads_each_picture_once_and_only_a_little_of_it` |
+| A picture from an earlier folder is never shown on another file | pictures are keyed by the file's location, size and modification time | `test_a_picture_from_an_earlier_scan_never_appears_on_a_file_of_the_next` |
+| Sorting and filtering change only what is shown, never what is selected or changed | `gui/sorting.py` | `test_the_two_folder_pages_sort_what_they_show` |
+
 ## Merge and sync never destroy
 
 | Guarantee | Where | Test |

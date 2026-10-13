@@ -146,18 +146,21 @@ A typical clean-up has three steps, and you can stop after any of them:
 `duplio` (or a double-click on the launcher) opens a window. **Every screen puts two folders next to each other:
 folder A on the left, folder B on the right, one row per file, with the real thumbnail of each picture.** Folder A is
 blue and folder B is red everywhere, the colours of the two figures in the icon, so a glance at a picture's border says
-which folder it is in. Each folder box takes a typed path, a recent folder, **Choose folder…**, or **Phone or server…**
+which folder it is in. The look is dark by default (near-black with amber and red accents, like the text screen); *Settings →
+Colours* switches to a light one for the next start. Every list can be put in the order you want (name, date, size, type or
+folder, ascending or descending; duplicates also by number of copies), and the choice is remembered. Each folder box takes a typed path, a recent folder, **Choose folder…**, or **Phone or server…**
 (a plugged-in phone, a drive, an SMB share, SFTP, WebDAV or FTP). The **⇄** button swaps A and B.
 
 | Screen | What A and B are | What you see | What you can do |
 |---|---|---|---|
+| **Browse a folder** | one folder, on any drive | a wall of thumbnails or a list; folders to enter, Up and Back, a filter | open a file, copy its address; sort by name, date, size or type ([Browsing a folder](#browsing-a-folder-and-the-picture-buffer)) |
 | **Compare two folders** | any two folders | every file of A with what B has for it: identical, renamed or moved, different content, only in A, only in B | copy the missing files A → B or B → A (all of them, or just the pictures you clicked) |
 | **Is it backed up?** | A: what you want to protect. B: the backup | a verdict ("Everything in A is safe in B" or "12 of 340 files in A are NOT in B"), and the files that are missing | copy what is missing into the backup |
 | **Find duplicates** | A alone, or A and B (B can be a *reference* that is never changed) | every set of identical files as a row of pictures, each marked KEEP, REMOVE or LOCKED | click a picture to change its mark, choose a rule ("keep the oldest"…), move the REMOVE copies to the quarantine, undo |
 | **Keep in sync** | the two sides of a two-way sync | what a sync would do, with arrows; a file changed on both sides is kept as two versions | preview, then **Sync now** |
 | **Import from phone** | A: a phone or card. B: your library | what is new on the phone and what the library already has (even under another name) | import only the new files, sorted into folders by date |
 | **History & undo** | | every change Duplio has made | undo one, or free the space by emptying its quarantine |
-| **Settings** | | picture memory, hidden files, patterns Duplio must never touch | |
+| **Settings** | | colours (dark or light), picture buffer and memory, hidden files, patterns Duplio must never touch | |
 
 Looking never changes anything. A comparison reads both folders; only a button that says what it will do (**Copy 12
 selected: A → B**, **Move to quarantine**, **Sync now**, **Import**) changes files, and it first shows the full list of
@@ -265,6 +268,31 @@ duplio previews warm sftp://me@nas/photos/trip              # fetch a folder's p
 
 The saved index holds no file names (entries are looked up by a hash of the drive, path, size and modification time), and a
 file that changes gets a new key, so an edited photo is never shown as its old self.
+
+### Browsing a folder, and the picture buffer
+
+**Browse a folder** in the window is a plain folder viewer for any drive, with the picture handling above behind it: a wall
+of thumbnails (or a list), folders to go into, Up and Back, a filter box and sorting by name, date, size or type. Open it on
+a Tresorit, NAS, phone or SFTP folder and move around freely:
+
+- The folder is read in one trip (a WebDAV PROPFIND, an FTP MLSD, an SFTP readdir carry every size and time), and listings
+  of slow drives are remembered for five minutes, so Back and Up are instant. *Refresh* asks the drive again.
+- Its pictures are fetched in the background into a buffer on disk, **nearest the part you are looking at first**, ahead of
+  your scrolling. A folder of three thousand photos fills in a few seconds from a local disk; from a remote one it takes as
+  long as the drive needs, and each picture costs the few kilobytes of its embedded preview, once.
+- What is on screen is shown from the buffer. If memory runs short the pictures held in memory shrink (never below 48 MB),
+  and any that were let go are made again from the buffer, **never fetched from the drive again**.
+- **Failsafes.** The buffer has a size limit (Settings, 1 GB by default, roughly 1 to 4 MB per hundred pictures) and the picture
+  memory has its own (Automatic: an eighth of the computer's memory, between 192 MB and 1 GB). When the buffer is full,
+  fetching **stops and says so** instead of evicting pictures of the folder you are looking at only to fetch them again; the
+  pictures of the open folder are also the last the buffer lets go. Fetching also stops, saying why, when the disk the buffer
+  is on is almost full (under 1 GB free) or when the drive stops answering (25 reads in a row fail). The queues are bounded,
+  so scrolling through a huge folder cannot pile up work. A full disk or damaged cache index never loses a picture that was
+  just fetched or stops the window: the index is simply started again.
+- Cloud-only files are still not downloaded unless you tick *Also fetch pictures of cloud-only files*. Some cloud drives
+  download the whole file even for a small read; Duplio reads each file once and keeps the picture, so it happens once.
+- To keep the pictures **between runs** (so opening the same folder tomorrow costs nothing), choose *between runs* under
+  *Remember pictures* in Settings. They are then stored unencrypted in Duplio's cache folder, which is why it is off by default.
 
 **A picture is only a picture.** Previews are for your eyes. They are never used to decide that files are identical, which
 files to remove, or whether a copy is safe: those decisions always come from re-reading the real files (see
@@ -809,12 +837,14 @@ skip_hidden = false
 [previews]               # pictures from slow, remote and cloud drives (see "Pictures on slow drives")
 mode = "auto"            # auto: slow/remote/cloud drives · always · off
 keep = "session"         # session: gone when Duplio closes · persistent: kept (UNENCRYPTED) between runs
-max_size = "1GB"         # limit of the persistent cache
+max_size = "1GB"         # limit of the picture buffer on disk (persistent or not)
 size_px = 256            # longest side of a stored picture
 prefetch = 12            # pictures fetched ahead of the one on screen
 small_download = "1MB"   # a picture this small may be read whole on a slow drive without asking
 max_download = "64MB"    # never read more than this of one file to make a picture
 online_only = false      # fetch cloud-only files' pictures without asking (this downloads them)
+memory = 0               # memory the window may use for pictures on screen, in bytes (0: automatic)
+prefetch_folder = true   # Browse: fetch a whole folder's pictures in the background
 ```
 
 ## Project layout
@@ -834,8 +864,9 @@ src/duplio/
   devices/      phone / share / drive discovery
   reporting/    JSON / CSV / HTML exports
   cli/          click commands and Rich rendering
-  gui/          the window (Tk): A-against-B pages, thumbnails, jobs on background threads; model.py holds the
-                logic that needs no screen
+  gui/          the window (Tk): A-against-B pages, folder browser, thumbnails, jobs on background threads; model.py,
+                sorting.py, listing.py, prefetch.py, memory.py and palette.py hold the logic that needs no screen
+  assets/       the pixel mark (logo_data.py is generated by tools/make_logo.py from the icon, keeping its transparency)
   tui/          Textual application (incl. the folder browser and the picture pane)
   transfer.py   the single verified-copy primitive (retry + bandwidth limit)
   notify.py     webhook / command / e-mail notifications

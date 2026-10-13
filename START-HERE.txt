@@ -25,6 +25,7 @@ LINUX
 A window opens. Every screen shows two folders next to each other, A on the left (blue) and B on
 the right (red), with the real pictures:
 
+  Browse a folder       look inside any folder (a NAS, a phone, a cloud drive) as a wall of pictures
   Compare two folders   what is in one and not the other, and copy the difference over
   Is it backed up?      is everything in A also in B (your backup)?
   Find duplicates       identical files, side by side; clear the extra copies safely

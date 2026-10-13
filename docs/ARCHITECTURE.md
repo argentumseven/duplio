@@ -225,6 +225,12 @@ must ask a question (a password) goes through `Context.call_in_ui`.
 - `widgets.py: VirtualList` is a canvas that draws only the rows in view, so a folder of 100,000 files scrolls; `paint.py`
   draws the cards; `pages/pairpage.py` is the template for every two-folder screen (Compare, Is it backed up?, Keep in sync,
   Import), which only say how the answer is worded and what the buttons do.
+- `listing.py` reads one folder (one trip to a remote drive, sizes and times included) for the folder browser; `prefetch.py`
+  fills the picture buffer with a whole folder in the background, with its failsafes; `thumbs.py` turns buffered pictures into
+  Tk images within a byte budget (`memory.py` knows how much memory there is and how much is free); `preview/store.py` is the
+  buffer itself (running totals, batched use times, pinned pictures, a damaged index started again).
+- `palette.py` holds the colours in two themes, chosen once at start (`DUPLIO_THEME`, or the choice saved by Settings); the
+  pixel mark is `assets/logo_data.py` with its own transparency, blended onto whatever it is shown on.
 - A Python without Tk is detected before anything is imported (`gui/__init__.py: tk_problem`), and `duplio` falls back to the text screen.
 
 Cancellation is cooperative (`CancelToken`): workers check it between files and
