@@ -146,8 +146,12 @@ A typical clean-up has three steps, and you can stop after any of them:
 `duplio` (or a double-click on the launcher) opens a window. **Every screen puts two folders next to each other:
 folder A on the left, folder B on the right, one row per file, with the real thumbnail of each picture.** Folder A is
 blue and folder B is red everywhere, the colours of the two figures in the icon, so a glance at a picture's border says
-which folder it is in. The look is dark by default (near-black with amber and red accents, like the text screen); *Settings →
-Colours* switches to a light one for the next start. Every list can be put in the order you want (name, date, size, type or
+which folder it is in. The look is the text screen's, in a window: one monospace typeface throughout, near-black background, red
+screen titles, amber headings, flat buttons with a thin rule above and below (red for the main action, green for a safe copy,
+bright red for anything that removes), a numbered list of screens on the left, and a bar of keys along the bottom
+(**Ctrl+1** to **Ctrl+8** jump to a screen, **Ctrl+Q** quits). *Settings → Colours* switches to a light version for the next
+start. Button labels are short and toolbars wrap onto a second line in a narrow window, so no text is cut off; a test
+checks every screen at three window widths. Every list can be put in the order you want (name, date, size, type or
 folder, ascending or descending; duplicates also by number of copies), and the choice is remembered. Each folder box takes a typed path, a recent folder, **Choose folder…**, or **Phone or server…**
 (a plugged-in phone, a drive, an SMB share, SFTP, WebDAV or FTP). The **⇄** button swaps A and B.
 
@@ -162,8 +166,8 @@ folder, ascending or descending; duplicates also by number of copies), and the c
 | **History & undo** | | every change Duplio has made | undo one, or free the space by emptying its quarantine |
 | **Settings** | | colours (dark or light), picture buffer and memory, hidden files, patterns Duplio must never touch | |
 
-Looking never changes anything. A comparison reads both folders; only a button that says what it will do (**Copy 12
-selected: A → B**, **Move to quarantine**, **Sync now**, **Import**) changes files, and it first shows the full list of
+Looking never changes anything. A comparison reads both folders; only a button that says what it will do (**Copy 5 files**,
+**Remove 3 copies**, **Sync now**, **Import new files**) changes files, and it first shows the full list of
 what will happen and asks. The rules are the ones the commands follow ([SAFETY.md](docs/SAFETY.md)): a copy never replaces a
 file (a clash is kept under a new name), every copy is read back and compared, removed files go to a quarantine and not into
 the void, and *History & undo* reverses a whole action.

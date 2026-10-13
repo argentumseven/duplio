@@ -10,7 +10,7 @@ from duplio.backup.ingest import DEFAULT_LAYOUT, IngestOptions, IngestReport, in
 from duplio.gui.model import RowKind, ingest_rows
 from duplio.gui.pages.pairpage import PairPage
 from duplio.gui.style import PALETTE
-from duplio.gui.widgets import Btn
+from duplio.gui.widgets import Btn, autowrap
 from duplio.util.fmt import human_size, plural
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ class ImportPage(PairPage):
                 "(even if it has another name). Nothing is removed from the phone.")
     a_title, a_hint = "Phone or camera card", "a plugged-in phone, a card, or any folder of photos"
     b_title, b_hint = "Your library", "the folder where your photos live"
-    run_text = "Show what would be imported"
+    run_text = "Preview import"
     again_text = "Check again"
     job_title = "Looking at the phone and the library"
     selectable = False
@@ -63,10 +63,12 @@ class ImportPage(PairPage):
 
     def build_actions(self, bar: tk.Frame) -> None:
         f = self.ctx.fonts
-        self.import_button = Btn(bar, "Import the new files", self.import_now, kind="success", fonts=f, padx=22, pady=9)
-        self.import_button.pack(side="left")
-        tk.Label(bar, text="Every file is checked after it is copied · nothing is removed from the phone", font=f.small, bg=PALETTE["bg"],
-                 fg=PALETTE["muted"]).pack(side="left", padx=14)
+        self.import_button = Btn(bar, "Import new files", self.import_now, kind="success", fonts=f, padx=22, pady=9)
+        self.import_button.pack(anchor="w")
+        note = tk.Label(bar, text="Every file is checked after it is copied, and nothing is removed from the phone.", font=f.small,
+                        bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
+        note.pack(fill="x", pady=(6, 0))
+        autowrap(note, margin=4, minimum=200)
 
     def build_options(self, dry_run: bool) -> IngestOptions:
         return IngestOptions(layout=LAYOUTS[self.layout_box.current()][1], media_only=bool(self.media_only.get()), dry_run=dry_run)

@@ -157,8 +157,11 @@ class Painter:
         c.create_text(text_x, ty + 2, text=shorten(tile.name, text_w, f.bold), anchor="nw", font=f.bold, fill=PALETTE["text"], tags=tags)
         c.create_text(text_x, ty + 24, text=shorten(tile.folder or "(top folder)", text_w, f.small, middle=True), anchor="nw",
                       font=f.small, fill=PALETTE["muted"], tags=tags)
-        c.create_text(text_x, ty + 44, text=tile.details, anchor="nw", font=f.small, fill=PALETTE["muted"], tags=tags)
-        line = ty + 66
+        line = ty + 44
+        for part in [x.strip() for x in tile.details.split("·")][:2]:  # the size, then the date: each on a line of its own
+            c.create_text(text_x, line, text=shorten(part, text_w, f.small), anchor="nw", font=f.small, fill=PALETTE["muted"], tags=tags)
+            line += 18
+        line += 2
         if tile.online_only:
             c.create_text(text_x, line, text="☁ only in the cloud", anchor="nw", font=f.small, fill=PALETTE["warn"], tags=tags)
             line += 20
@@ -220,8 +223,11 @@ class Painter:
         relation = row.relation.replace("A", names[0]).replace("B", names[1]) if names != ("A", "B") else row.relation
         items = [c.create_text(cx, 0, text=glyph, fill=color, font=f.title, anchor="n", tags=(rtag,)),
                  c.create_text(cx, 0, text=relation, fill=color, font=f.bold, width=width, justify="center", anchor="n", tags=(rtag,))]
-        if row.note:
-            items.append(c.create_text(cx, 0, text=shorten(row.note, width * 2, f.tiny), fill=PALETTE["muted"], font=f.tiny, width=width,
+        note = row.note
+        if note.lower().startswith(relation.lower()):  # the note would only repeat what is printed above it
+            note = note[len(relation):].lstrip(" :;,-")
+        if note:
+            items.append(c.create_text(cx, 0, text=shorten(note, width * 3, f.tiny), fill=PALETTE["muted"], font=f.tiny, width=width,
                                        justify="center", anchor="n", tags=(rtag,)))
         heights = []
         for item in items:

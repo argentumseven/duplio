@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import tkinter
 from tkinter import font as tkfont
@@ -12,29 +13,43 @@ from duplio.gui.palette import PALETTE, SIDE_COLOR, SIDE_SOFT
 __all__ = ["PALETTE", "SIDE_COLOR", "SIDE_SOFT", "Fonts", "apply_style", "enable_hidpi", "shorten"]  # the colours are re-exported from palette
 
 
+MONO_FAMILIES = ("Cascadia Mono", "JetBrains Mono", "Consolas", "SF Mono", "Menlo", "DejaVu Sans Mono", "Liberation Mono",
+                 "Ubuntu Mono", "Noto Sans Mono", "Courier New")
+
+
+def pick_mono(root: tkinter.Misc) -> str:
+    """The first good monospaced font this computer has; the whole window is set in it, like the text screen."""
+    have = {name.casefold(): name for name in tkfont.families(root)}
+    for name in MONO_FAMILIES:
+        if name.casefold() in have:
+            return have[name.casefold()]
+    return str(tkfont.nametofont("TkFixedFont").actual("family"))
+
+
 class Fonts:
-    """Named fonts made from the system's own, so text looks native on Windows, macOS and Linux."""
+    """Named fonts. Everything is monospaced, as in the text screen; the names say what a font is for, not its family."""
 
     def __init__(self, master: tkinter.Misc) -> None:
-        base = tkfont.nametofont("TkDefaultFont")
-        family = base.actual("family")
-        size = abs(int(base.actual("size"))) or 10
+        family = pick_mono(master)
+        size = abs(int(tkfont.nametofont("TkDefaultFont").actual("size"))) or 10
         if sys.platform == "win32":
             size = max(size, 10)
         elif sys.platform == "darwin":
             size = max(size, 12)
         else:
-            size = max(size, 10)
+            size = 10
+        self.family = family
         self.base = tkfont.Font(master, family=family, size=size)
         self.small = tkfont.Font(master, family=family, size=max(size - 1, 8))
         self.tiny = tkfont.Font(master, family=family, size=max(size - 2, 7))
         self.bold = tkfont.Font(master, family=family, size=size, weight="bold")
-        self.heading = tkfont.Font(master, family=family, size=size + 4, weight="bold")
-        self.title = tkfont.Font(master, family=family, size=size + 9, weight="bold")
-        self.big = tkfont.Font(master, family=family, size=size + 3, weight="bold")
-        self.mono = tkfont.Font(master, family=tkfont.nametofont("TkFixedFont").actual("family"), size=size - 1)
-        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
-            tkfont.nametofont(name).configure(family=family, size=size)
+        self.heading = tkfont.Font(master, family=family, size=size + 1, weight="bold")
+        self.title = tkfont.Font(master, family=family, size=size + 5, weight="bold")
+        self.big = tkfont.Font(master, family=family, size=size + 2, weight="bold")
+        self.mono = self.small  # (the name older code uses for the small fixed-width text)
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont", "TkFixedFont", "TkTooltipFont"):
+            with contextlib.suppress(tkinter.TclError):
+                tkfont.nametofont(name).configure(family=family, size=size)
 
 
 def enable_hidpi() -> None:

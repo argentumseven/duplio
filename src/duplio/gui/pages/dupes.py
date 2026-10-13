@@ -22,8 +22,8 @@ from duplio.gui.model import (
 )
 from duplio.gui.paint import THUMB_SIZES, Painter
 from duplio.gui.sorting import GROUP_FIELDS, choose, label_of, sort_group_rows
-from duplio.gui.style import PALETTE
-from duplio.gui.widgets import Btn, ChipBar, VirtualList, autowrap, tag_value
+from duplio.gui.style import PALETTE, shorten
+from duplio.gui.widgets import Btn, ChipBar, FlowFrame, VirtualList, autowrap, tag_value
 from duplio.plan.executor import ApplyOptions, apply_plan
 from duplio.plan.model import ActionType
 from duplio.plan.planner import build_plan
@@ -73,11 +73,11 @@ class DuplicatesPage(Page):
             ttk.Radiobutton(self.options, text=text, value=value, variable=self.scope).pack(anchor="w", pady=1)
         self.run_row = tk.Frame(body, bg=PALETTE["bg"])
         Btn(self.run_row, "Find duplicates", self.run, kind="primary", fonts=f, padx=22, pady=9).pack(side="left")
-        self.summary = tk.Frame(body, bg=PALETTE["bg"])
-        self.summary_text = tk.Label(self.summary, text="", font=f.base, bg=PALETTE["bg"], anchor="w")
-        self.summary_text.pack(side="left")
-        Btn(self.summary, "Change folders", self.edit_folders, fonts=f, padx=10, pady=4).pack(side="right")
-        Btn(self.summary, "Search again", self.run, kind="primary", fonts=f, padx=12, pady=4).pack(side="right", padx=(0, 8))
+        self.summary = FlowFrame(body, PALETTE["bg"], hgap=10, vgap=6)
+        self.summary_text = tk.Label(self.summary, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w")
+        self.summary.add(self.summary_text, gap_after=24)
+        self.summary.add(Btn(self.summary, "Search again", self.run, kind="primary", fonts=f, padx=12, pady=4))
+        self.summary.add(Btn(self.summary, "Change folders", self.edit_folders, fonts=f, padx=10, pady=4))
         self.banner = tk.Frame(body, bg=PALETTE["bg"])
         self.headline = tk.Label(self.banner, text="", font=f.heading, anchor="w", justify="left")
         self.headline.pack(fill="x", padx=16, pady=(10, 0))
@@ -86,34 +86,34 @@ class DuplicatesPage(Page):
         autowrap(self.detail)
         self.chip_bar = ChipBar(body, f, self.filter)
         self.results = tk.Frame(body, bg=PALETTE["bg"])
-        self.tools = tk.Frame(self.results, bg=PALETTE["bg"])
+        self.tools = FlowFrame(self.results, PALETTE["bg"], hgap=8, vgap=6)
         self.tools.pack(side="top", fill="x", pady=(0, 6))
-        tk.Label(self.tools, text="Which copy stays:", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        self.rule_box = ttk.Combobox(self.tools, state="readonly", values=list(RULE_PRESETS), width=34, font=f.small)
+
+        self.rule_box = self.tools.field("Which copy stays", lambda box: ttk.Combobox(box, state="readonly", values=list(RULE_PRESETS), width=32,
+                                                                                    font=f.small), f.small, gap_after=4)
         self.rule_box.current(0)
-        self.rule_box.pack(side="left", padx=(6, 6))
-        Btn(self.tools, "Choose again", self.choose_again, fonts=f, padx=10, pady=4).pack(side="left")
-        tk.Label(self.tools, text="   Picture size", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        self.size_box = ttk.Combobox(self.tools, state="readonly", values=list(THUMB_SIZES), width=8, font=f.small)
+        self.tools.add(Btn(self.tools, "Apply", self.choose_again, fonts=f, padx=10, pady=4), gap_after=18)
+        self.size_box = self.tools.field("Picture size", lambda box: ttk.Combobox(box, state="readonly", values=list(THUMB_SIZES), width=8,
+                                                                                 font=f.small), f.small)
         self.size_box.set(ctx.state.get("thumb_size", "Medium"))
-        self.size_box.pack(side="left", padx=(6, 0))
         self.size_box.bind("<<ComboboxSelected>>", lambda _e: self._resize())
-        tk.Label(self.tools, text="   Sort by", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        self.sort_box = ttk.Combobox(self.tools, state="readonly", values=[v for _k, v in GROUP_FIELDS], width=17, font=f.small)
+        self.sort_box = self.tools.field("Sort by", lambda box: ttk.Combobox(box, state="readonly", values=[v for _k, v in GROUP_FIELDS], width=17,
+                                                                            font=f.small), f.small, gap_after=4)
         self.sort_box.set(label_of(GROUP_FIELDS, ctx.state.get("dupes_sort", "default")))
-        self.sort_box.pack(side="left", padx=(6, 4))
         self.sort_box.bind("<<ComboboxSelected>>", lambda _e: self._resort())
         self.descending = bool(ctx.state.get("dupes_desc", False))
         self.direction = Btn(self.tools, "", self._flip, fonts=f, padx=8, pady=3)
-        self.direction.pack(side="left")
+        self.tools.add(self.direction)
         self._paint_direction()
         self.actions_bar = tk.Frame(self.results, bg=PALETTE["bg"])
         self.actions_bar.pack(side="bottom", fill="x", pady=(10, 0))
         self.remove_button = Btn(self.actions_bar, "", self.remove, kind="danger", fonts=f, padx=18, pady=9)
-        self.remove_button.pack(side="left")
-        self.note = tk.Label(self.actions_bar, text="Removed copies go to a quarantine · History & undo brings them back", font=f.small,
-                             bg=PALETTE["bg"], fg=PALETTE["muted"])
-        self.note.pack(side="left", padx=14)
+        self.remove_button.pack(anchor="w")
+        self.note = tk.Label(self.actions_bar, text="Removed copies go to a quarantine next to where they were; History & undo brings them back. "
+                             "At least one copy of every file always stays.", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"],
+                             anchor="w", justify="left")
+        self.note.pack(fill="x", pady=(6, 0))
+        autowrap(self.note, margin=4, minimum=200)
         holder = tk.Frame(self.results, bg=PALETTE["line"], padx=1, pady=1)
         holder.pack(fill="both", expand=True)
         self.view = VirtualList(holder, f, self._draw, on_click=self._click, on_context=self._context, on_hover=self._hover,
@@ -181,7 +181,7 @@ class DuplicatesPage(Page):
     def show_result(self, result: ScanResult) -> None:
         self.result = result
         a, b = self.folders.values()
-        self.summary_text.configure(text=f"A:  {a}" + (f"      B:  {b}" if b else ""))
+        self.summary_text.configure(text=shorten(f"A: {a}" + (f"   B: {b}" if b else ""), 620, self.ctx.fonts.base, middle=True))
         self.has_result, self.editing = True, False
         roots = result.inventory.roots
         self.rows = build_group_rows(result.groups, roots, self._rules())
@@ -265,9 +265,9 @@ class DuplicatesPage(Page):
         marked = [t for r in self.rows for t in r.removals]
         size = sum(t.size for t in marked)
         if marked:
-            self.remove_button.configure(text=f"Remove {len(marked):,} marked copies  ({human_size(size)})")
+            self.remove_button.configure(text=f"Remove {len(marked):,} copies ({human_size(size)})")
         else:
-            self.remove_button.configure(text="Nothing is marked for removal")
+            self.remove_button.configure(text="Nothing marked")
         self.remove_button.set_enabled(bool(marked))
 
     def _click(self, tags: tuple[str, ...], _event: tk.Event) -> None:

@@ -12,7 +12,7 @@ from duplio.gui.app import Page
 from duplio.gui.memory import GIB, MIB, default_image_budget, describe
 from duplio.gui.palette import THEME, THEME_NAMES
 from duplio.gui.style import PALETTE
-from duplio.gui.widgets import Btn, ScrollFrame
+from duplio.gui.widgets import Btn, ScrollFrame, autowrap
 from duplio.util.fmt import human_size, parse_size
 
 if TYPE_CHECKING:
@@ -30,97 +30,86 @@ class SettingsPage(Page):
         scroll = ScrollFrame(self, PALETTE["bg"])
         scroll.pack(fill="both", expand=True, padx=(28, 12), pady=(10, 14))
         body = scroll.inner
+        bg = PALETTE["bg"]
 
         def heading(text: str) -> None:
-            tk.Label(body, text=text, font=f.heading, bg=PALETTE["bg"], anchor="w").pack(fill="x", pady=(14, 4))
+            tk.Label(body, text=text, font=f.heading, bg=bg, fg=PALETTE["heading"], anchor="w").pack(fill="x", pady=(16, 4))
 
-        def note(text: str) -> None:
-            tk.Label(body, text=text, font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left", wraplength=760).pack(fill="x")
+        def note(text: str, pady: tuple[int, int] = (0, 6)) -> None:
+            label = tk.Label(body, text=text, font=f.small, bg=bg, fg=PALETTE["muted"], anchor="w", justify="left")
+            label.pack(fill="x", pady=pady)
+            autowrap(label, margin=24, minimum=300)
+
+        def choice(text: str, values: list[str], current: str) -> ttk.Combobox:
+            row = tk.Frame(body, bg=bg)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=text, font=f.base, bg=bg, fg=PALETTE["text"], width=32, anchor="w").pack(side="left")
+            box = ttk.Combobox(row, state="readonly", font=f.base, values=values, width=max(len(v) for v in values) + 3)
+            box.set(current)
+            box.pack(side="left")
+            return box
+
+        def check(text: str, variable: tk.BooleanVar) -> None:
+            ttk.Checkbutton(body, text=text, variable=variable).pack(anchor="w", pady=2)
 
         heading("Appearance")
-        row = tk.Frame(body, bg=PALETTE["bg"])
-        row.pack(fill="x", pady=6)
-        tk.Label(row, text="Colours", font=f.base, bg=PALETTE["bg"]).pack(side="left")
-        self.theme = ttk.Combobox(row, state="readonly", width=24, font=f.base, values=list(THEME_NAMES.values()))
-        self.theme.set(THEME_NAMES[THEME])
-        self.theme.pack(side="left", padx=10)
-        tk.Label(row, text="takes effect the next time Duplio starts", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
+        self.theme = choice("Colours", list(THEME_NAMES.values()), THEME_NAMES[THEME])
+        note("Applies the next time Duplio starts.", (2, 4))
 
         heading("Pictures from slow drives")
-        note("Duplio takes the small preview that is already inside a photo and remembers it, so looking at pictures on a phone, "
-             "a NAS or a cloud drive does not download the photos again and again.")
-        row = tk.Frame(body, bg=PALETTE["bg"])
-        row.pack(fill="x", pady=6)
-        tk.Label(row, text="Remember pictures", font=f.base, bg=PALETTE["bg"]).pack(side="left")
-        self.keep = ttk.Combobox(row, state="readonly", width=44, font=f.base,
-                                 values=["only until Duplio is closed (recommended)", "between runs (kept on this computer, NOT encrypted)"])
-        self.keep.current(0 if s.previews.keep == "session" else 1)
-        self.keep.pack(side="left", padx=10)
-        row = tk.Frame(body, bg=PALETTE["bg"])
-        row.pack(fill="x", pady=2)
-        tk.Label(row, text="Use the picture memory for", font=f.base, bg=PALETTE["bg"]).pack(side="left")
-        self.mode = ttk.Combobox(row, state="readonly", width=40, font=f.base,
-                                 values=["slow, remote and cloud drives (recommended)", "every drive", "nothing (always read the drive)"])
-        self.mode.current({"auto": 0, "always": 1, "off": 2}[s.previews.mode])
-        self.mode.pack(side="left", padx=10)
-        row = tk.Frame(body, bg=PALETTE["bg"])
-        row.pack(fill="x", pady=2)
-        tk.Label(row, text="Picture buffer on disk, up to", font=f.base, bg=PALETTE["bg"]).pack(side="left")
+        note("Duplio takes the small preview that is already inside a photo and keeps it, so looking at pictures on a phone, a NAS or "
+             "a cloud drive does not download the photos again and again.")
+        keeps = ["until Duplio closes (recommended)", "between runs (kept unencrypted)"]
+        self.keep = choice("Remember pictures", keeps, keeps[0 if s.previews.keep == "session" else 1])
+        modes = ["slow, remote and cloud drives (recommended)", "every drive", "nothing (always read the drive)"]
+        self.mode = choice("Use the picture memory for", modes, modes[{"auto": 0, "always": 1, "off": 2}[s.previews.mode]])
         self.buffer_sizes = [(512 * MIB, "512 MB"), (GIB, "1 GB"), (2 * GIB, "2 GB"), (4 * GIB, "4 GB"), (8 * GIB, "8 GB"), (16 * GIB, "16 GB")]
-        self.buffer = ttk.Combobox(row, state="readonly", width=10, font=f.base, values=[label for _n, label in self.buffer_sizes])
-        self.buffer.set(next((label for n, label in self.buffer_sizes if n == s.previews.max_bytes), describe(s.previews.max_bytes)))
-        if s.previews.max_bytes not in [n for n, _l in self.buffer_sizes]:
-            self.buffer.configure(values=[describe(s.previews.max_bytes), *[label for _n, label in self.buffer_sizes]])
-        self.buffer.pack(side="left", padx=10)
-        tk.Label(row, text="roughly 1 to 4 MB per hundred pictures", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        note("When the buffer is full Duplio says so and stops fetching, instead of throwing away pictures of the folder you are looking at.")
-        row = tk.Frame(body, bg=PALETTE["bg"])
-        row.pack(fill="x", pady=2)
-        tk.Label(row, text="Memory for pictures on screen, up to", font=f.base, bg=PALETTE["bg"]).pack(side="left")
+        sizes = [label for _n, label in self.buffer_sizes]
+        shown = next((label for n, label in self.buffer_sizes if n == s.previews.max_bytes), describe(s.previews.max_bytes))
+        self.buffer = choice("Picture buffer on disk, up to", sizes if shown in sizes else [shown, *sizes], shown)
+        note("Roughly 1 to 4 MB per hundred pictures. When the buffer is full Duplio says so and stops fetching, instead of throwing away "
+             "pictures of the folder you are looking at.", (2, 6))
         self.memory_sizes = [(0, f"Automatic ({describe(default_image_budget())})"), (256 * MIB, "256 MB"), (512 * MIB, "512 MB"), (GIB, "1 GB"),
                              (2 * GIB, "2 GB"), (4 * GIB, "4 GB")]
-        self.memory = ttk.Combobox(row, state="readonly", width=20, font=f.base, values=[label for _n, label in self.memory_sizes])
-        self.memory.set(next((label for n, label in self.memory_sizes if n == s.previews.memory_bytes), self.memory_sizes[0][1]))
-        self.memory.pack(side="left", padx=10)
-        tk.Label(row, text="shrinks by itself if the computer runs short of memory", font=f.small, bg=PALETTE["bg"],
-                 fg=PALETTE["muted"]).pack(side="left")
+        labels = [label for _n, label in self.memory_sizes]
+        self.memory = choice("Memory for pictures on screen", labels,
+                             next((label for n, label in self.memory_sizes if n == s.previews.memory_bytes), labels[0]))
+        note("Shrinks by itself if the computer runs short of memory.", (2, 6))
         self.whole_folder = tk.BooleanVar(value=s.previews.prefetch_folder)
-        ttk.Checkbutton(body, text="When I open a folder in Browse, fetch all of its pictures in the background (nearest the part I am looking at first)",
-                        variable=self.whole_folder).pack(anchor="w", pady=2)
+        check("Browse: fetch a folder's pictures in the background", self.whole_folder)
         self.cloud = tk.BooleanVar(value=s.previews.online_only)
-        ttk.Checkbutton(body, text="Also show pictures of files that are only stored in the cloud (this downloads them)",
-                        variable=self.cloud).pack(anchor="w", pady=2)
-        row = tk.Frame(body, bg=PALETTE["bg"])
-        row.pack(fill="x", pady=6)
-        self.cache_info = tk.Label(row, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"])
-        Btn(row, "Delete the remembered pictures", self.clear_pictures, fonts=f, padx=12, pady=6).pack(side="left")
+        check("Fetch pictures of cloud-only files too (this downloads them)", self.cloud)
+        row = tk.Frame(body, bg=bg)
+        row.pack(fill="x", pady=8)
+        Btn(row, "Delete pictures", self.clear_pictures, fonts=f, padx=12, pady=6).pack(side="left")
+        self.cache_info = tk.Label(row, text="", font=f.small, bg=bg, fg=PALETTE["muted"])
         self.cache_info.pack(side="left", padx=12)
 
         heading("Searching for duplicates")
         self.hidden = tk.BooleanVar(value=s.skip_hidden)
-        ttk.Checkbutton(body, text="Skip hidden files and folders", variable=self.hidden).pack(anchor="w", pady=2)
+        check("Skip hidden files and folders", self.hidden)
         self.remember = tk.BooleanVar(value=s.cache)
-        ttk.Checkbutton(body, text="Remember file fingerprints between runs (makes repeat searches much faster; removal always re-checks the files)",
-                        variable=self.remember).pack(anchor="w", pady=2)
-        row = tk.Frame(body, bg=PALETTE["bg"])
+        check("Remember file fingerprints between runs", self.remember)
+        note("Makes repeat searches much faster; removing a file always re-checks it first.", (0, 6))
+        row = tk.Frame(body, bg=bg)
         row.pack(fill="x", pady=4)
-        tk.Label(row, text="Ignore files smaller than", font=f.base, bg=PALETTE["bg"]).pack(side="left")
-        self.min_size = ttk.Entry(row, width=10)
+        tk.Label(row, text="Ignore files smaller than", font=f.base, bg=bg, fg=PALETTE["text"], width=32, anchor="w").pack(side="left")
+        self.min_size = ttk.Entry(row, width=10, font=f.base)
         self.min_size.insert(0, human_size(s.min_size).replace(" B", "B") if s.min_size > 1 else "1")
-        self.min_size.pack(side="left", padx=10)
-        tk.Label(row, text="(for example 1, 100KB, 1MB)", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        for label, attr, values in (("Never look in (comma-separated patterns such as *.tmp, **/cache/**)", "exclude", s.exclude),
-                                    ("Never remove files matching (for example **/Originals/**)", "protect", s.protect)):
-            tk.Label(body, text=label, font=f.base, bg=PALETTE["bg"], anchor="w").pack(fill="x", pady=(8, 2))
-            entry = ttk.Entry(body)
+        self.min_size.pack(side="left")
+        tk.Label(row, text="for example 1, 100KB, 1MB", font=f.small, bg=bg, fg=PALETTE["muted"]).pack(side="left", padx=12)
+        for text, attr, values in (("Never look in (patterns, comma-separated: *.tmp, **/cache/**)", "exclude", s.exclude),
+                                   ("Never remove files matching (for example **/Originals/**)", "protect", s.protect)):
+            tk.Label(body, text=text, font=f.base, bg=bg, fg=PALETTE["text"], anchor="w").pack(fill="x", pady=(10, 2))
+            entry = ttk.Entry(body, font=f.base)
             entry.insert(0, ", ".join(values))
             entry.pack(fill="x")
             setattr(self, attr + "_entry", entry)
 
-        row = tk.Frame(body, bg=PALETTE["bg"])
-        row.pack(fill="x", pady=(22, 0))
+        row = tk.Frame(body, bg=bg)
+        row.pack(fill="x", pady=(22, 8))
         Btn(row, "Save settings", self.save, kind="primary", fonts=f, padx=20, pady=9).pack(side="left")
-        self.saved = tk.Label(row, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["ok"])
+        self.saved = tk.Label(row, text="", font=f.base, bg=bg, fg=PALETTE["ok"])
         self.saved.pack(side="left", padx=14)
 
     def on_show(self) -> None:

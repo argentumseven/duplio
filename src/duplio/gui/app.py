@@ -103,14 +103,14 @@ class Page(tk.Frame):
 
     title = ""
     subtitle = ""
+    hints: tuple[tuple[str, str], ...] = ()  # (key, what it does) shown in the key bar while this page is open
 
     def __init__(self, master: tk.Misc, ctx: Context) -> None:
         super().__init__(master, bg=PALETTE["bg"])
         self.ctx = ctx
         head = tk.Frame(self, bg=PALETTE["bg"])
         head.pack(fill="x", padx=28, pady=(16, 4))
-        tk.Label(head, text=self.title, font=ctx.fonts.title, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w").pack(fill="x")
-        tk.Frame(head, bg=PALETTE["primary"], height=2, width=44).pack(anchor="w", pady=(2, 4))
+        tk.Label(head, text=self.title, font=ctx.fonts.title, bg=PALETTE["bg"], fg=PALETTE["title"], anchor="w").pack(fill="x")
         if self.subtitle:
             sub = tk.Label(head, text=self.subtitle, font=ctx.fonts.base, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w",
                            justify="left", wraplength=900)
@@ -124,16 +124,16 @@ class Page(tk.Frame):
         """Called when another page is brought to the front."""
 
 
-NAV = (
-    ("home", "⌂", "Home"),
-    ("browse", "▦", "Browse a folder"),
-    ("compare", "⇆", "Compare two folders"),
-    ("backup", "☑", "Is it backed up?"),
-    ("dupes", "❐", "Find duplicates"),
-    ("sync", "⟳", "Keep in sync"),
-    ("import", "⇩", "Import from phone"),
-    ("history", "↶", "History & undo"),
-    ("settings", "⚙", "Settings"),
+NAV = (  # (page, shortcut number or "", name)
+    ("home", "", "Home"),
+    ("browse", "1", "Browse a folder"),
+    ("compare", "2", "Compare two folders"),
+    ("backup", "3", "Is it backed up?"),
+    ("dupes", "4", "Find duplicates"),
+    ("sync", "5", "Keep in sync"),
+    ("import", "6", "Import from phone"),
+    ("history", "7", "History & undo"),
+    ("settings", "8", "Settings"),
 )
 
 
@@ -186,48 +186,74 @@ class DuplioWindow(tk.Tk):
         f = self.fonts
         self.columnconfigure(1, weight=1)
         self.rowconfigure(0, weight=1)
-        side = tk.Frame(self, bg=PALETTE["sidebar"], width=244)
+        side = tk.Frame(self, bg=PALETTE["sidebar"], width=262)
         side.grid(row=0, column=0, sticky="ns")
         side.grid_propagate(False)
-        self._logo = self._make_logo()
+        self._logo = self.make_logo(2, PALETTE["sidebar"])
         if self._logo is not None:
-            tk.Label(side, image=self._logo, bg=PALETTE["sidebar"]).pack(pady=(20, 4))
+            tk.Label(side, image=self._logo, bg=PALETTE["sidebar"]).pack(pady=(18, 4))
             try:
                 self.iconphoto(True, self._logo)
             except tk.TclError:
                 pass
-        tk.Label(side, text=WORDMARK, font=f.heading, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack()
-        tk.Label(side, text=TAGLINE.replace(". ", ".\n"), font=f.mono, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_muted"],
-                 justify="center").pack(pady=(2, 18))
+        tk.Label(side, text=WORDMARK, font=f.bold, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack()
+        tk.Label(side, text=TAGLINE.replace(". ", ".\n"), font=f.small, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_muted"],
+                 justify="center").pack(pady=(2, 16))
         self._nav: dict[str, tuple[tk.Frame, tk.Frame, tk.Label]] = {}
-        for key, glyph, label in NAV:
+        for key, number, label in NAV:
             row = tk.Frame(side, bg=PALETTE["sidebar"], cursor="hand2")
             row.pack(fill="x")
             bar = tk.Frame(row, bg=PALETTE["sidebar"], width=3)  # lights up on the page that is open
             bar.pack(side="left", fill="y")
-            item = tk.Label(row, text=f"  {glyph}   {label}", font=f.base, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"], anchor="w",
-                            padx=12, pady=11, cursor="hand2")
+            item = tk.Label(row, text=f" {number or '⌂'}  {label}", font=f.base, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"],
+                            anchor="w", padx=12, pady=9, cursor="hand2")
             item.pack(side="left", fill="x", expand=True)
             for widget in (row, bar, item):
                 bind_to(widget, "<Button-1>", partial(self.show, key))
                 bind_to(widget, "<Enter>", partial(self._hover, key, True))
                 bind_to(widget, "<Leave>", partial(self._hover, key, False))
             self._nav[key] = (row, bar, item)
-        tk.Label(side, text="Nothing is removed without\nyour OK, and everything\nis undoable.", font=f.mono, bg=PALETTE["sidebar"],
-                 fg=PALETTE["sidebar_muted"], justify="left").pack(side="bottom", anchor="w", padx=20, pady=18)
-        self.content = tk.Frame(self, bg=PALETTE["bg"])
-        self.content.grid(row=0, column=1, sticky="nsew")
+        tk.Label(side, text="Nothing is removed without\nyour OK, and everything\nis undoable.", font=f.small, bg=PALETTE["sidebar"],
+                 fg=PALETTE["sidebar_muted"], justify="left").pack(side="bottom", anchor="w", padx=18, pady=16)
+        right = tk.Frame(self, bg=PALETTE["bg"])
+        right.grid(row=0, column=1, sticky="nsew")
+        right.columnconfigure(0, weight=1)
+        right.rowconfigure(1, weight=1)
+        tk.Label(right, text=f"Duplio — safe duplicate finder & backup · v{__version__}", font=f.small, bg=PALETTE["bg"],
+                 fg=PALETTE["muted"], pady=5).grid(row=0, column=0, sticky="ew")
+        self.content = tk.Frame(right, bg=PALETTE["bg"])
+        self.content.grid(row=1, column=0, sticky="nsew")
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
+        self._keybar = tk.Frame(right, bg=PALETTE["sidebar"])
+        self._keybar.grid(row=2, column=0, sticky="ew")
+        self.bind_all("<Control-q>", lambda _e: self.close())
+        for key, number, _label in NAV:
+            if number:
+                self.bind_all(f"<Control-Key-{number}>", partial(self._jump, key))
 
-    def _make_logo(self) -> tk.PhotoImage | None:
+    def _jump(self, key: str, _event: tk.Event) -> str:
+        self.show(key)
+        return "break"
+
+    def set_hints(self, hints: tuple[tuple[str, str], ...]) -> None:
+        """The key bar along the bottom: what the keys do here (a key in purple, then what it does)."""
+        for child in self._keybar.winfo_children():
+            child.destroy()
+        f = self.fonts
+        everywhere = (("ctrl+1-8", "Pages"), ("ctrl+q", "Quit"))
+        for key, what in (*hints, *everywhere):
+            tk.Label(self._keybar, text=key, font=f.bold, bg=PALETTE["sidebar"], fg=PALETTE["key"], padx=0, pady=4).pack(side="left", padx=(12, 4))
+            tk.Label(self._keybar, text=what, font=f.small, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack(side="left")
+
+    def make_logo(self, scale: int, background: str) -> tk.PhotoImage | None:
+        """The pixel mark, ``scale`` screen pixels per pixel, laid on ``background`` (it fades into it)."""
         try:
             from duplio.assets.logo import composite, rgb_of
 
-            scale = 3
-            bg = rgb_of(PALETTE["sidebar"])
+            bg = rgb_of(background)
             pixels = bytearray()
-            grid = composite(PALETTE["sidebar"])  # the glow fades into the sidebar's own colour
+            grid = composite(background)  # the glow fades into the colour it is shown on
             for row in grid:
                 line = bytearray()
                 for rgb in row:
@@ -260,6 +286,7 @@ class DuplioWindow(tk.Tk):
             for widget in (row, item):
                 widget.configure(bg=PALETTE["sidebar_active"] if active else PALETTE["sidebar"])
             bar.configure(bg=PALETTE["primary"] if active else PALETTE["sidebar"])
+        self.set_hints(self.pages[key].hints)
         self.pages[key].on_show()
 
     def _drain_ui_calls(self) -> None:

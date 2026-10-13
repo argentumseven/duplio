@@ -229,6 +229,12 @@ must ask a question (a password) goes through `Context.call_in_ui`.
   fills the picture buffer with a whole folder in the background, with its failsafes; `thumbs.py` turns buffered pictures into
   Tk images within a byte budget (`memory.py` knows how much memory there is and how much is free); `preview/store.py` is the
   buffer itself (running totals, batched use times, pinned pictures, a damaged index started again).
+- `style.py` sets one monospace family for every font (the first of `MONO_FAMILIES` that is installed) and the ttk look from the
+  palette. `widgets.py: Btn` is the flat button with a rule above and below; `FlowFrame` lays a toolbar out by measuring, so it
+  wraps onto more lines in a narrow window instead of cutting a button off; `autowrap` wraps a label at the width it is given
+  and always leaves room for its border, because wrapping at the full width makes the label ask for more than it has and the
+  window keeps growing. `tests/test_gui_flows.py: test_no_button_label_or_box_is_ever_cut_off` walks every screen at three window
+  widths and fails if any label or button needs more room than it was given.
 - `palette.py` holds the colours in two themes, chosen once at start (`DUPLIO_THEME`, or the choice saved by Settings); the
   pixel mark is `assets/logo_data.py` with its own transparency, blended onto whatever it is shown on.
 - A Python without Tk is detected before anything is imported (`gui/__init__.py: tk_problem`), and `duplio` falls back to the text screen.

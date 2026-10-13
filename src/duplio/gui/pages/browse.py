@@ -24,7 +24,7 @@ from duplio.gui.memory import describe
 from duplio.gui.paint import BROWSE_SIZES, Painter
 from duplio.gui.sorting import BROWSE_FIELDS, BrowseItem, choose, label_of, sort_browse
 from duplio.gui.style import PALETTE
-from duplio.gui.widgets import Btn, VirtualList, tag_value
+from duplio.gui.widgets import Btn, FlowFrame, VirtualList, autowrap, tag_value
 from duplio.preview.service import PreviewItem
 from duplio.util.fmt import human_size, plural
 from duplio.vfs.location import Location
@@ -74,60 +74,51 @@ class BrowsePage(Page):
         self.address.pack(side="left", fill="x", expand=True)
         self.address.bind("<Return>", lambda _e: self.open_text(self.address.get()))
         self.address.bind("<<ComboboxSelected>>", lambda _e: self.after(10, lambda: self.open_text(self.address.get())))
-        Btn(bar, "Go", lambda: self.open_text(self.address.get()), kind="primary", fonts=f, padx=12, pady=5).pack(side="left", padx=(8, 0))
-        Btn(bar, "Choose folder…", self.choose, fonts=f, padx=10, pady=5).pack(side="left", padx=(6, 0))
-        Btn(bar, "Phone or server…", self.connect, fonts=f, padx=10, pady=5).pack(side="left", padx=(6, 0))
-        Btn(bar, "Refresh", self.refresh, fonts=f, padx=10, pady=5).pack(side="left", padx=(6, 0))
-        # ---- how it is shown
-        tools = tk.Frame(body, bg=PALETTE["bg"])
-        tools.pack(fill="x", pady=(0, 2))
-        more = tk.Frame(body, bg=PALETTE["bg"])
-        more.pack(fill="x", pady=(0, 6))
+        Btn(bar, "Go", lambda: self.open_text(self.address.get()), kind="primary", fonts=f, padx=14, pady=5).pack(side="left", padx=(8, 0))
+        # ---- choosing, and how it is shown (these wrap onto more lines when the window is narrow)
+        tools = FlowFrame(body, PALETTE["bg"], hgap=8, vgap=6)
+        tools.pack(fill="x", pady=(0, 6))
+        tools.add(Btn(tools, "Choose folder…", self.choose, fonts=f, padx=10, pady=4))
+        tools.add(Btn(tools, "Phone or server…", self.connect, fonts=f, padx=10, pady=4))
+        tools.add(Btn(tools, "Refresh", self.refresh, fonts=f, padx=10, pady=4), gap_after=20)
 
-        def label(text: str) -> None:
-            tk.Label(tools, text=text, font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left", padx=(0, 4))
-
-        label("Show")
-        self.view_box = ttk.Combobox(tools, state="readonly", values=VIEWS, width=11, font=f.small)
+        self.view_box = tools.field("Show", lambda box: ttk.Combobox(box, state="readonly", values=VIEWS, width=11, font=f.small), f.small)
         self.view_box.set(st.get("browse_view", VIEWS[0]))
-        self.view_box.pack(side="left", padx=(0, 12))
-        label("Picture size")
-        self.size_box = ttk.Combobox(tools, state="readonly", values=list(BROWSE_SIZES), width=7, font=f.small)
+        self.size_box = tools.field("Picture size", lambda box: ttk.Combobox(box, state="readonly", values=list(BROWSE_SIZES), width=7,
+                                                                            font=f.small), f.small)
         self.size_box.set(st.get("browse_size", "Medium") if st.get("browse_size", "Medium") in BROWSE_SIZES else "Medium")
-        self.size_box.pack(side="left", padx=(0, 12))
-        label("Sort by")
-        self.sort_box = ttk.Combobox(tools, state="readonly", values=[v for _k, v in BROWSE_FIELDS], width=14, font=f.small)
+        self.sort_box = tools.field("Sort by", lambda box: ttk.Combobox(box, state="readonly", values=[v for _k, v in BROWSE_FIELDS], width=14,
+                                                                       font=f.small), f.small, gap_after=4)
         self.sort_box.set(label_of(BROWSE_FIELDS, st.get("browse_sort", "name")))
-        self.sort_box.pack(side="left", padx=(0, 4))
         self.descending = bool(st.get("browse_desc", False))
         self.direction = Btn(tools, "", self._flip, fonts=f, padx=8, pady=3)
-        self.direction.pack(side="left", padx=(0, 12))
+        tools.add(self.direction, gap_after=16)
         self.folders_first = tk.BooleanVar(value=bool(st.get("browse_folders_first", True)))
         self.hidden = tk.BooleanVar(value=bool(st.get("browse_hidden", False)))
         self.only_pictures = tk.BooleanVar(value=False)
         self.cloud = tk.BooleanVar(value=ctx.settings.previews.online_only)
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_a: self._filter_soon())
-        ttk.Entry(tools, textvariable=self.filter_var, width=14).pack(side="right")
-        tk.Label(tools, text="Filter", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="right", padx=(0, 4))
+        tools.field("Filter", lambda box: ttk.Entry(box, textvariable=self.filter_var, width=16, font=f.small), f.small)
         for text, var, command in (("Folders first", self.folders_first, self._view_changed),
-                                   ("Show hidden files", self.hidden, self.refresh), ("Only pictures", self.only_pictures, self._view_changed),
-                                   ("Also fetch pictures of cloud-only files (this downloads them)", self.cloud, self._cloud_changed)):
-            ttk.Checkbutton(more, text=text, variable=var, command=command).pack(side="left", padx=(0, 14))
+                                   ("Hidden files", self.hidden, self.refresh), ("Only pictures", self.only_pictures, self._view_changed),
+                                   ("Cloud-only files too (downloads them)", self.cloud, self._cloud_changed)):
+            tools.add(ttk.Checkbutton(tools, text=text, variable=var, command=command), gap_after=14)
         self._paint_direction()
         for box in (self.view_box, self.size_box, self.sort_box):
             box.bind("<<ComboboxSelected>>", lambda _e: self._view_changed())
         # ---- what is going on
+        self.summary = tk.Label(body, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w")
+        self.summary.pack(fill="x")
         status = tk.Frame(body, bg=PALETTE["bg"])
-        status.pack(fill="x", pady=(0, 2))
-        self.summary = tk.Label(status, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w")
-        self.summary.pack(side="left")
+        status.pack(fill="x", pady=(2, 2))
+        self.fetch_label = tk.Label(status, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
+        self.fetch_label.pack(fill="x")
+        autowrap(self.fetch_label, margin=4, minimum=300)
         self.fetch_button = Btn(status, "", self._fetch_clicked, fonts=f, padx=10, pady=3)
-        self.fetch_button.pack(side="right")
-        self.fetch_label = tk.Label(status, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="e")
-        self.fetch_label.pack(side="right", padx=10)
-        self.buffer_label = tk.Label(body, text="", font=f.mono, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w")
+        self.buffer_label = tk.Label(body, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
         self.buffer_label.pack(fill="x", pady=(0, 6))
+        autowrap(self.buffer_label, margin=4, minimum=300)
         # ---- the folder
         self.selected_label = tk.Label(body, text="", font=f.mono, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w")
         self.selected_label.pack(side="bottom", fill="x", pady=(4, 0))
@@ -472,10 +463,9 @@ class BrowsePage(Page):
             text, button = "Pictures are fetched as you scroll", "Fetch all pictures"
         self.fetch_label.configure(text=text, fg=colour)
         self.fetch_button.configure(text=button)
-        if button:
-            if not self.fetch_button.winfo_ismapped():
-                self.fetch_button.pack(side="right", before=self.fetch_label)
-        else:
+        if button and not self.fetch_button.winfo_ismapped():
+            self.fetch_button.pack(anchor="w", pady=(4, 0))
+        elif not button:
             self.fetch_button.pack_forget()
         self.buffer_label.configure(text=self._buffer_text(), fg=PALETTE["warn"] if thumbs.low_memory else PALETTE["muted"])
 

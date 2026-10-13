@@ -12,7 +12,7 @@ from duplio.gui.model import PairRow, RowKind, Tile
 from duplio.gui.paint import THUMB_SIZES, Painter
 from duplio.gui.sorting import PAIR_FIELDS, choose, label_of, sort_pair_rows
 from duplio.gui.style import PALETTE
-from duplio.gui.widgets import Btn, VirtualList, tag_value
+from duplio.gui.widgets import Btn, FlowFrame, VirtualList, tag_value
 from duplio.util.fmt import human_size
 
 if TYPE_CHECKING:
@@ -34,28 +34,31 @@ class PairView(tk.Frame):
         self.selected: set[str] = set()
         self.tiles: dict[str, Tile] = {}
         f = ctx.fonts
-        bar = tk.Frame(self, bg=PALETTE["bg"])
+        bar = FlowFrame(self, PALETTE["bg"], hgap=8, vgap=6)
         bar.pack(fill="x", pady=(0, 6), side="top")
-        tk.Label(bar, text="Picture size", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        self.size_box = ttk.Combobox(bar, state="readonly", values=list(THUMB_SIZES), width=8, font=f.small)
+
+        self.size_box = bar.field("Picture size", lambda box: ttk.Combobox(box, state="readonly", values=list(THUMB_SIZES), width=8, font=f.small),
+                                  f.small)
         self.size_box.set(ctx.state.get("thumb_size", "Medium"))
-        self.size_box.pack(side="left", padx=(6, 18))
         self.size_box.bind("<<ComboboxSelected>>", lambda _e: self._resize())
-        tk.Label(bar, text="Sort by", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        self.sort_box = ttk.Combobox(bar, state="readonly", values=[v for _k, v in PAIR_FIELDS], width=16, font=f.small)
+        self.sort_box = bar.field("Sort by", lambda box: ttk.Combobox(box, state="readonly", values=[v for _k, v in PAIR_FIELDS], width=18,
+                                                                      font=f.small), f.small, gap_after=4)
         self.sort_box.set(label_of(PAIR_FIELDS, ctx.state.get("pair_sort", "default")))
-        self.sort_box.pack(side="left", padx=(6, 4))
         self.sort_box.bind("<<ComboboxSelected>>", lambda _e: self._resort())
         self.descending = bool(ctx.state.get("pair_desc", False))
         self.direction = Btn(bar, "", self._flip, fonts=f, padx=8, pady=3)
-        self.direction.pack(side="left", padx=(0, 18))
+        bar.add(self.direction, gap_after=18)
         self._paint_direction()
         self.picked = tk.Label(bar, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"])
-        self.picked.pack(side="left")
+        bar.add(self.picked, gap_after=18)
         self.select_all_button = Btn(bar, "Select all", self.select_shown, fonts=f, padx=10, pady=4)
-        self.select_all_button.pack(side="right")
         self.clear_button = Btn(bar, "Clear", self.clear_selection, fonts=f, padx=10, pady=4)
-        self.clear_button.pack(side="right", padx=(0, 8))
+        if selectable:
+            bar.add(self.clear_button)
+            bar.add(self.select_all_button)
+        else:
+            self.select_all_button.destroy()
+            self.clear_button.destroy()
         holder = tk.Frame(self, bg=PALETTE["line"], padx=1, pady=1)
         holder.pack(fill="both", expand=True)
         self.view = VirtualList(holder, f, self._draw_row, on_click=self._click, on_double=self._double, on_context=self._context,
@@ -65,9 +68,6 @@ class PairView(tk.Frame):
         self.painter.selectable = selectable
         if slot_labels:
             self.painter.slot_labels = slot_labels
-        if not selectable:
-            self.select_all_button.pack_forget()
-            self.clear_button.pack_forget()
         self.view.relayout = lambda _w: [self.painter.pair_row_height] * len(self.rows)
         self._last_hover = ""
 
@@ -155,7 +155,7 @@ class PairView(tk.Frame):
             size = sum(t.size for t in tiles)
             self.picked.configure(text=f"{len(tiles):,} selected  ({human_size(size)})")
         else:
-            self.picked.configure(text="Click to select" if self.painter.selectable else "")
+            self.picked.configure(text="")
         if self._on_selection:
             self._on_selection()
 

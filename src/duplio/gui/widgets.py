@@ -7,56 +7,181 @@ import sys
 import tkinter as tk
 from collections.abc import Callable, Sequence
 from functools import partial
+from tkinter import font as tkfont
 from tkinter import ttk
 from typing import Any
 
+from duplio.gui.palette import DARK, shade
 from duplio.gui.style import PALETTE, Fonts
 
 BUTTON_COLORS = {  # kind: (fill, text, fill when the pointer is over it)
     "primary": (PALETTE["primary"], PALETTE["on_primary"], PALETTE["primary_hover"]),
-    "danger": (PALETTE["danger_fill"], PALETTE["white"], PALETTE["danger_hover"]),
+    "danger": (PALETTE["danger_fill"], PALETTE["ink"], PALETTE["danger_hover"]),
     "success": (PALETTE["ok"], PALETTE["ink"], PALETTE["success_hover"]),
     "secondary": (PALETTE["raised"], PALETTE["text"], PALETTE["hover_raised"]),
     "quiet": (PALETTE["bg"], PALETTE["text"], PALETTE["hover_quiet"]),
 }
+_LABEL_OPTIONS = frozenset({"text", "font", "wraplength", "justify", "anchor", "width", "padx", "pady", "textvariable", "image"})
 
 
-class Btn(tk.Label):
-    """A flat button that looks the same everywhere (the system's own buttons cannot be coloured on every system)."""
+def _rules(fill: str, kind: str) -> tuple[str, str]:
+    """The thin lines along the top and bottom edge of a flat button (a lighter one above, a darker one below)."""
+    if kind == "quiet":
+        return fill, fill
+    if DARK:
+        return shade(fill, 1.45), shade(fill, 0.5)
+    return fill, PALETTE["line"]
+
+
+class Btn(tk.Frame):
+    """A flat button like the text screen's: a bold label on a filled bar with a thin rule above and below.
+
+    It is built from widgets of our own because the system's buttons cannot be coloured the same way on every system. It
+    answers ``configure(text=...)`` and ``cget("text")`` like a label, so callers treat it as one."""
 
     def __init__(self, master: tk.Misc, text: str, command: Callable[[], None] | None = None, *, kind: str = "secondary",
                  fonts: Fonts | None = None, width: int | None = None, padx: int = 14, pady: int = 7) -> None:
-        bg, fg, hover = BUTTON_COLORS[kind]
+        fill, fg, hover = BUTTON_COLORS[kind]
         self.kind = kind
-        self._colors = (bg, fg, hover)
+        self._colors = (fill, fg, hover)
         self._command = command
         self._enabled = True
-        super().__init__(master, text=text, bg=bg, fg=fg, padx=padx, pady=pady, cursor="hand2", borderwidth=0, relief="flat",
-                         highlightthickness=1, width=width or 0)
-        border = PALETTE["line"] if kind in ("secondary", "quiet") else bg
-        self.configure(highlightbackground=border, highlightcolor=border)
+        super().__init__(master, bg=fill, cursor="hand2")
+        hi, lo = _rules(fill, kind)
+        self._top = tk.Frame(self, height=1, bg=hi)
+        self._label = tk.Label(self, text=text, bg=fill, fg=fg, padx=padx, pady=max(pady - 2, 2), cursor="hand2", borderwidth=0,
+                               width=width or 0)
         if fonts is not None:
-            self.configure(font=fonts.bold if kind in ("primary", "danger", "success") else fonts.base)
-        self.bind("<Enter>", lambda _e: self._enabled and self.configure(bg=self._colors[2]))
-        self.bind("<Leave>", lambda _e: self.configure(bg=self._colors[0] if self._enabled else PALETTE["line"]))
-        self.bind("<ButtonRelease-1>", self._clicked)
+            self._label.configure(font=fonts.bold)
+        self._bottom = tk.Frame(self, height=1, bg=lo)
+        self._top.pack(fill="x")
+        self._label.pack(fill="both", expand=True)
+        self._bottom.pack(fill="x")
+        self._rules = (hi, lo)
+        for widget in (self, self._top, self._label, self._bottom):
+            widget.bind("<Enter>", self._enter)
+            widget.bind("<Leave>", self._leave)
+            widget.bind("<ButtonRelease-1>", self._clicked)
+
+    # ---- behaves like a label for the text -----------------------------------------------------
+    def configure(self, cnf: Any = None, **kw: Any) -> Any:  # type: ignore[override]
+        if cnf:
+            kw = {**cnf, **kw}
+        label_kw = {k: kw.pop(k) for k in list(kw) if k in _LABEL_OPTIONS}
+        if label_kw and hasattr(self, "_label"):
+            self._label.configure(**label_kw)
+        if kw:
+            return super().configure(**kw)
+        return None
+
+    config = configure  # type: ignore[assignment]
+
+    def cget(self, key: str) -> Any:
+        return self._label.cget(key) if key in _LABEL_OPTIONS else super().cget(key)
+
+    # ---- the pointer ------------------------------------------------------------------------------
+    def _paint(self, fill: str) -> None:
+        super().configure(bg=fill)
+        self._label.configure(bg=fill)
+
+    def _enter(self, _event: tk.Event) -> None:
+        if self._enabled:
+            self._paint(self._colors[2])
+
+    def _leave(self, _event: tk.Event) -> None:
+        self._paint(self._colors[0] if self._enabled else PALETTE["trough"])
 
     def _clicked(self, event: tk.Event) -> None:
         if not self._enabled or self._command is None:
             return
-        if 0 <= event.x <= self.winfo_width() and 0 <= event.y <= self.winfo_height():
+        x, y = event.x_root - self.winfo_rootx(), event.y_root - self.winfo_rooty()
+        if 0 <= x <= self.winfo_width() and 0 <= y <= self.winfo_height():
             self._command()
 
     def set_enabled(self, enabled: bool) -> None:
         self._enabled = enabled
-        bg, fg, _hover = self._colors
+        fill, fg, _hover = self._colors
         if enabled:
-            self.configure(bg=bg, fg=fg, cursor="hand2")
+            self._paint(fill)
+            self._label.configure(fg=fg, cursor="hand2")
+            self._top.configure(bg=self._rules[0])
+            self._bottom.configure(bg=self._rules[1])
+            super().configure(cursor="hand2")
         else:
-            self.configure(bg=PALETTE["line"], fg=PALETTE["muted"], cursor="arrow")
+            self._paint(PALETTE["trough"])
+            self._label.configure(fg=PALETTE["muted"], cursor="arrow")
+            self._top.configure(bg=PALETTE["trough"])
+            self._bottom.configure(bg=PALETTE["trough"])
+            super().configure(cursor="arrow")
 
     def set_command(self, command: Callable[[], None] | None) -> None:
         self._command = command
+
+
+class FlowFrame(tk.Frame):
+    """Widgets laid out left to right that wrap onto the next line when the window is too narrow, so none is ever cut off.
+
+    Create the children with the flow frame as their parent and hand each one to :meth:`add`."""
+
+    def __init__(self, master: tk.Misc, bg: str, hgap: int = 8, vgap: int = 6) -> None:
+        super().__init__(master, bg=bg, height=1)
+        self._children: list[tk.Widget] = []
+        self._gaps = (hgap, vgap)
+        self._pending = False
+        self.bind("<Configure>", lambda _e: self._soon())
+
+    def add(self, widget: tk.Widget, *, gap_after: int | None = None) -> tk.Widget:
+        self._children.append(widget)
+        if gap_after is not None:
+            widget._flow_gap = gap_after  # type: ignore[attr-defined]
+        widget.bind("<Configure>", lambda _e: self._soon(), add="+")
+        self._soon()
+        return widget
+
+    def field(self, text: str, make: Callable[[tk.Frame], tk.Widget], font: tkfont.Font, *, gap_after: int = 16) -> Any:
+        """A small label with the widget it names, kept together on one line; returns the widget ``make`` built."""
+        box = tk.Frame(self, bg=str(self.cget("bg")))
+        tk.Label(box, text=text, font=font, bg=str(self.cget("bg")), fg=PALETTE["muted"]).pack(side="left", padx=(0, 6))
+        widget = make(box)
+        widget.pack(side="left")
+        self.add(box, gap_after=gap_after)
+        return widget
+
+    def remove(self, widget: tk.Widget) -> None:
+        if widget in self._children:
+            self._children.remove(widget)
+            widget.place_forget()
+            self._soon()
+
+    def _soon(self) -> None:
+        if not self._pending:
+            self._pending = True
+            self.after_idle(self._layout)
+
+    def _layout(self) -> None:
+        self._pending = False
+        width = self.winfo_width()
+        if width <= 1:
+            return
+        hgap, vgap = self._gaps
+        rows: list[list[tuple[tk.Widget, int, int, int]]] = [[]]  # (widget, x, width, height)
+        x = 0
+        for widget in self._children:
+            w, h = widget.winfo_reqwidth(), widget.winfo_reqheight()
+            if x > 0 and x + w > width:
+                rows.append([])
+                x = 0
+            rows[-1].append((widget, x, w, h))
+            x += w + getattr(widget, "_flow_gap", hgap)
+        y = 0
+        for line in rows:
+            tallest = max((h for _w, _x, _wd, h in line), default=0)
+            for widget, left, _wd, h in line:
+                widget.place(x=left, y=y + (tallest - h) // 2)  # centred on the line, so labels sit level with their boxes
+            y += tallest + vgap
+        total = max(y - vgap, 1)
+        if int(str(self.cget("height"))) != total:
+            self.configure(height=total)
 
 
 class Tooltip:
@@ -100,11 +225,11 @@ def attach_tooltip(widget: tk.Misc, tip: Tooltip, text: str | Callable[[], str])
     widget.bind("<ButtonPress>", lambda _e: tip.hide(), add="+")
 
 
-class ChipBar(tk.Frame):
-    """A row of filter chips, each with a count. Clicking one selects it."""
+class ChipBar(FlowFrame):
+    """A row of filter chips, each with a count. Clicking one selects it. Wraps rather than running off the edge."""
 
     def __init__(self, master: tk.Misc, fonts: Fonts, on_select: Callable[[str], None]) -> None:
-        super().__init__(master, bg=PALETTE["bg"])
+        super().__init__(master, PALETTE["bg"], hgap=8, vgap=6)
         self._fonts = fonts
         self._on_select = on_select
         self._chips: dict[str, tk.Label] = {}
@@ -115,13 +240,14 @@ class ChipBar(tk.Frame):
         """``chips`` is ``(key, title, count, color)``."""
         for child in self.winfo_children():
             child.destroy()
+        self._children.clear()
         self._chips.clear()
         self._labels.clear()
         self.current = selected
         for key, title, count, color in chips:
-            chip = tk.Label(self, text=f"{title}  {count:,}", font=self._fonts.bold, padx=12, pady=6, cursor="hand2",
-                            borderwidth=1, relief="solid", highlightthickness=0)
-            chip.pack(side="left", padx=(0, 8))
+            chip = tk.Label(self, text=f"{title}  {count:,}", font=self._fonts.bold, padx=10, pady=4, cursor="hand2",
+                            borderwidth=0, highlightthickness=1)
+            self.add(chip)
             bind_to(chip, "<Button-1>", partial(self.select, key))
             self._chips[key] = chip
             self._labels[key] = (color, title)
@@ -137,10 +263,10 @@ class ChipBar(tk.Frame):
         for key, chip in self._chips.items():
             color, _title = self._labels[key]
             if key == self.current:
-                chip.configure(bg=color, fg=PALETTE["ink"])
+                chip.configure(bg=color, fg=PALETTE["ink"], highlightbackground=color)
             else:
-                chip.configure(bg=PALETTE["panel"], fg=color if color != PALETTE["muted"] else PALETTE["text"])
-            chip.configure(highlightbackground=PALETTE["line"])
+                chip.configure(bg=PALETTE["panel"], fg=color if color != PALETTE["muted"] else PALETTE["text"],
+                               highlightbackground=PALETTE["line"])
 
 
 class VirtualList(tk.Frame):
@@ -393,7 +519,16 @@ class ScrollFrame(tk.Frame):
 
 def autowrap(label: tk.Label, margin: int = 36, minimum: int = 200) -> None:
     """Make a label's text wrap at the width it is given, so nothing is cut off when the window is resized."""
-    label.bind("<Configure>", lambda e: label.configure(wraplength=max(e.width - margin, minimum)), add="+")
+    # A label asks for its wrapped width plus about 6px of border and padding. If the text were wrapped at the full width it is
+    # given, that request would be bigger than the box and the window would keep growing, so always leave room for the border.
+    room = max(margin, 10)
+
+    def fit(event: tk.Event) -> None:  # type: ignore[type-arg]
+        width = max(event.width - room, minimum)
+        if int(float(str(label.cget("wraplength")))) != width:
+            label.configure(wraplength=width)
+
+    label.bind("<Configure>", fit, add="+")
 
 
 def bind_to(widget: tk.Misc, sequence: str, callback: Callable[[], object]) -> None:

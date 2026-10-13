@@ -12,7 +12,7 @@ from duplio.compare.diff import Basis
 from duplio.gui.model import RowKind, sync_rows
 from duplio.gui.pages.pairpage import PairPage
 from duplio.gui.style import PALETTE
-from duplio.gui.widgets import Btn
+from duplio.gui.widgets import Btn, autowrap
 from duplio.scan.filters import ScanFilter
 from duplio.scan.inventory import RootRole, make_roots, scan
 from duplio.util.fmt import human_size, plural
@@ -33,7 +33,7 @@ class SyncPage(PairPage):
                 "until you press Sync.")
     a_title, a_hint = "Folder A", "one of the two folders"
     b_title, b_hint = "Folder B", "the other one"
-    run_text = "Preview what would change"
+    run_text = "Preview sync"
     again_text = "Preview again"
     job_title = "Working out what would change"
     selectable = False
@@ -58,8 +58,11 @@ class SyncPage(PairPage):
         self.deletions.current(0)
         self.deletions.pack(side="left")
         self.content = tk.BooleanVar(value=False)
-        ttk.Checkbutton(opts, text="Compare what is inside the files, not just size and date (slower; avoids copying files that were only touched)",
-                        variable=self.content).pack(anchor="w", pady=(4, 6))
+        ttk.Checkbutton(opts, text="Compare file contents, not just size and date", variable=self.content).pack(anchor="w", pady=(4, 0))
+        content_note = tk.Label(opts, text="Slower, but a file that was only touched is not copied again.", font=f.small, bg=PALETTE["bg"],
+                                fg=PALETTE["muted"], anchor="w", justify="left")
+        content_note.pack(fill="x", padx=(24, 0), pady=(0, 6))
+        autowrap(content_note, margin=28, minimum=200)
         self.options_frame = opts
         self.layout()
 
@@ -75,10 +78,11 @@ class SyncPage(PairPage):
     def build_actions(self, bar: tk.Frame) -> None:
         f = self.ctx.fonts
         self.sync_button = Btn(bar, "Sync now", self.sync_now, kind="success", fonts=f, padx=22, pady=9)
-        self.sync_button.pack(side="left")
-        self.copy_note = tk.Label(bar, text="Replaced files are kept in .duplio-versions · 'History & undo' reverses a whole sync",
-                                  font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"])
-        self.copy_note.pack(side="left", padx=14)
+        self.sync_button.pack(anchor="w")
+        self.copy_note = tk.Label(bar, text="Replaced files are kept in .duplio-versions, deleted ones go to the quarantine, and History & undo "
+                                  "reverses a whole sync.", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
+        self.copy_note.pack(fill="x", pady=(6, 0))
+        autowrap(self.copy_note, margin=4, minimum=200)
 
     def build_options(self) -> SyncOptions:
         return SyncOptions(on_conflict=CONFLICTS[self.conflict.current()][1], deletions=DELETIONS[self.deletions.current()][1],

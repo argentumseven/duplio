@@ -13,7 +13,7 @@ from duplio.gui.folders import FolderPair
 from duplio.gui.model import PairRow, RowKind, build_pair_rows, count_rows
 from duplio.gui.pages.pairview import PairView
 from duplio.gui.style import PALETTE, shorten
-from duplio.gui.widgets import Btn, ChipBar, autowrap
+from duplio.gui.widgets import Btn, ChipBar, FlowFrame, autowrap
 from duplio.scan.filters import ScanFilter
 from duplio.scan.inventory import RootRole, make_roots, scan
 from duplio.util.fmt import human_size, plural
@@ -63,14 +63,14 @@ class PairPage(Page):
         self.run_button.pack(side="left")
         self.problems = tk.Label(body, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["warn"], cursor="hand2")
         self.problems.bind("<Button-1>", lambda _e: self.show_problems())
-        self.summary = tk.Frame(body, bg=PALETTE["bg"])
+        self.summary = FlowFrame(body, PALETTE["bg"], hgap=10, vgap=6)
         self.summary_a = tk.Label(self.summary, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w")
         self.summary_b = tk.Label(self.summary, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w")
-        self.summary_a.pack(side="left")
-        tk.Label(self.summary, text="  ⇄  ", font=f.big, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
-        self.summary_b.pack(side="left")
-        Btn(self.summary, "Change folders", self.edit_folders, fonts=f, padx=10, pady=4).pack(side="right")
-        Btn(self.summary, self.again_text, self.run, kind="primary", fonts=f, padx=12, pady=4).pack(side="right", padx=(0, 8))
+        self.summary.add(self.summary_a)
+        self.summary.add(tk.Label(self.summary, text="⇄", font=f.big, bg=PALETTE["bg"], fg=PALETTE["muted"]))
+        self.summary.add(self.summary_b, gap_after=24)
+        self.summary.add(Btn(self.summary, self.again_text, self.run, kind="primary", fonts=f, padx=12, pady=4))
+        self.summary.add(Btn(self.summary, "Change folders", self.edit_folders, fonts=f, padx=10, pady=4))
         self.has_result = False
         self.banner = tk.Frame(body, bg=PALETTE["bg"])
         self.headline = tk.Label(self.banner, text="", font=f.heading, anchor="w", justify="left", wraplength=900)
@@ -87,7 +87,9 @@ class PairPage(Page):
         self.actions.pack(side="bottom", fill="x", pady=(10, 0))
         self.build_actions(self.actions)
         self.pairs.pack(fill="both", expand=True)
-        self.placeholder = tk.Label(body, text=self.placeholder_text(), font=f.base, bg=PALETTE["bg"], fg=PALETTE["muted"], justify="left")
+        self.placeholder = tk.Label(body, text=self.placeholder_text(), font=f.base, bg=PALETTE["bg"], fg=PALETTE["muted"], justify="left",
+                                    anchor="w")
+        autowrap(self.placeholder, margin=4, minimum=200)
         self.layout()
 
     # ---- what is on screen, in order -------------------------------------------------------------
@@ -105,7 +107,7 @@ class PairPage(Page):
             self.chip_bar.pack(fill="x", pady=(0, 8))
             self.results.pack(fill="both", expand=True)
         else:
-            self.placeholder.pack(anchor="w", pady=30)
+            self.placeholder.pack(fill="x", pady=30)
 
     editing = False
 
@@ -115,15 +117,16 @@ class PairPage(Page):
 
     def build_actions(self, bar: tk.Frame) -> None:
         f = self.ctx.fonts
-        buttons = tk.Frame(bar, bg=PALETTE["bg"])
+        buttons = FlowFrame(bar, PALETTE["bg"], hgap=10, vgap=6)
         buttons.pack(fill="x")
         self.copy_ab = Btn(buttons, "", lambda: self.copy(0), kind="success", fonts=f, padx=18, pady=9)
-        self.copy_ab.pack(side="left")
+        buttons.add(self.copy_ab)
         self.copy_ba = Btn(buttons, "", lambda: self.copy(1), kind="primary", fonts=f, padx=18, pady=9)
         if self.allow_reverse:
-            self.copy_ba.pack(side="left", padx=(10, 0))
-        self.copy_note = tk.Label(bar, text="", font=f.mono, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w")
+            buttons.add(self.copy_ba)
+        self.copy_note = tk.Label(bar, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
         self.copy_note.pack(fill="x", pady=(6, 0))
+        autowrap(self.copy_note, margin=4, minimum=200)
 
     # ---- wording a subclass may change ---------------------------------------------------------------
     def placeholder_text(self) -> str:
@@ -168,8 +171,8 @@ class PairPage(Page):
         """Show an answer: the folded folders, the banner, the filter chips and the rows."""
         self.all_rows = rows
         a, b = self.folders.values()
-        self.summary_a.configure(text=shorten(f"{self.summary_names[0]}:  {a}", 420, self.ctx.fonts.base, middle=True))
-        self.summary_b.configure(text=shorten(f"{self.summary_names[1]}:  {b}", 420, self.ctx.fonts.base, middle=True))
+        self.summary_a.configure(text=shorten(f"{self.summary_names[0]}: {a}", 380, self.ctx.fonts.base, middle=True))
+        self.summary_b.configure(text=shorten(f"{self.summary_names[1]}: {b}", 380, self.ctx.fonts.base, middle=True))
         self.has_result, self.editing = True, False
         color, soft = {"ok": (PALETTE["ok"], PALETTE["ok_soft"]), "warn": (PALETTE["warn"], PALETTE["warn_soft"]),
                        "bad": (PALETTE["bad"], PALETTE["bad_soft"])}[kind]
@@ -210,11 +213,12 @@ class PairPage(Page):
             n_only = sum(1 for r in self.all_rows if r.kind is (RowKind.ONLY_A if side == 0 else RowKind.ONLY_B))
             src, dst = self.names[side], self.names[1 - side]
             if n_sel:
-                button.configure(text=f"Copy {n_sel:,} selected: {src} → {dst}")
+                button.configure(text=f"Copy {n_sel:,} picked  {src} → {dst}")
             else:
-                button.configure(text=f"Copy all {n_only:,} files only in {src}: {src} → {dst}")
+                button.configure(text=f"Copy {n_only:,} files  {src} → {dst}")
             button.set_enabled(bool(n_sel or n_only))
-        self.copy_note.configure(text="Nothing is overwritten · every copy is checked · undoable")
+        self.copy_note.configure(text="Copies only what the other side lacks (or just the pictures you clicked). Nothing is overwritten, every copy "
+                                      "is checked, and History can undo it.")
 
     def copy(self, direction: int) -> None:
         if self.diff is None:

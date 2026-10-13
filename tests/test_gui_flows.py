@@ -527,3 +527,71 @@ def test_browsing_a_remote_folder_reads_each_picture_once_and_only_a_little_of_i
         pump(window, timeout=0.5)
         assert sum(1 for method, _path in dav.app.requests if method == "GET") == gets
         assert page.listing.total == 20
+
+
+# --------------------------------------------------------------------------- nothing is cut off
+def cut_off(root: Any) -> list[str]:
+    """Widgets whose text does not fit in the room they were given (a button, label or box narrower than what it has to show)."""
+    import tkinter as tk
+    from tkinter import ttk
+
+    problems: list[str] = []
+
+    def walk(widget: Any) -> None:
+        for child in widget.winfo_children():
+            walk(child)
+        if not widget.winfo_ismapped() or widget.winfo_width() <= 1:
+            return
+        kinds = (tk.Label, ttk.Checkbutton, ttk.Radiobutton, ttk.Combobox, ttk.Entry)
+        if isinstance(widget, kinds) and widget.winfo_width() + 1 < widget.winfo_reqwidth():
+            text = widget.cget("text") if "text" in widget.keys() else ""  # noqa: SIM118 (a Tk widget's keys(), not a dict's)
+            problems.append(f"{widget.winfo_class()} {str(widget)!r} {text!r}: given {widget.winfo_width()}px, needs {widget.winfo_reqwidth()}px")
+
+    walk(root)
+    return problems
+
+
+@pytest.mark.parametrize("width", [1280, 1100, 900])
+def test_no_button_label_or_box_is_ever_cut_off(tmp_path: Path, window: Any, width: int) -> None:
+    from duplio.gui.app import NAV
+
+    a, b = make_demo_folders(tmp_path)
+    make_pictures(tmp_path / "pics", 12)
+    Dialogs(window.ctx)
+    window.geometry(f"{width}x760")
+    pump(window, timeout=0.3)
+    problems: dict[str, list[str]] = {}
+
+    def check(name: str) -> None:
+        pump(window, timeout=0.5)
+        found = cut_off(window.pages[window.current]) + cut_off(window._keybar)
+        if found:
+            problems[name] = found
+
+    for key, _number, _title in NAV:
+        window.show(key)
+        check(f"{key} (start)")
+    for key in ("compare", "backup", "sync", "import"):
+        page = page_for(window, key, a, b)
+        page.run()
+        answer = {"compare": "diff", "backup": "diff", "sync": "plan", "import": "report"}[key]
+        wait(window, lambda p=page, a=answer: getattr(p, a) is not None)
+        check(f"{key} (answer)")
+    page = page_for(window, "dupes", a, b)
+    page.run()
+    wait(window, lambda: page.result is not None)
+    check("dupes (answer)")
+    window.show("browse")
+    browse = window.pages["browse"]
+    browse.open_text(str(tmp_path / "pics"))
+    wait(window, lambda: browse.listing is not None and browse.listing.path == str(tmp_path / "pics"))
+    wait(window, lambda: prefetch_done(window))
+    check("browse (a folder)")
+    browse.view_box.set("Details")
+    browse._view_changed()
+    check("browse (details)")
+    window.show("history")
+    check("history")
+    window.show("settings")
+    check("settings")
+    assert not problems, "\n".join(f"{page}: " + "; ".join(items) for page, items in problems.items())
