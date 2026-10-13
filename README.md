@@ -276,11 +276,21 @@ file that changes gets a new key, so an edited photo is never shown as its old s
 ### Browsing a folder, and the picture buffer
 
 **Browse a folder** in the window is a plain folder viewer for any drive, with the picture handling above behind it: a wall
-of thumbnails (or a list), folders to go into, Up and Back, a filter box and sorting by name, date, size or type. Open it on
-a Tresorit, NAS, phone or SFTP folder and move around freely:
+of thumbnails (or a list), folders to go into, and one short row of controls:
+
+- **Back**, **Up**, the address (type or paste one and press Enter), **Reload**, and **Places**. *Places* is a menu of
+  everywhere to start from: your folders, **every drive down to its very top** (`/` and what is mounted on it, or each drive
+  letter), plugged-in phones and cards, the places you opened recently, and *Phone, drive or server…* for a NAS, an SFTP,
+  WebDAV, FTP or SMB server. Picking a phone or a server opens it right here.
+- *Show* (thumbnails or a list), *Picture size*, *Order* (one choice: "Newest first", "Largest first", "Name, A to Z"…) and a
+  *Filter* box. Folders always come first. Whether hidden files are shown and whether cloud-only pictures are fetched are
+  Settings choices, not buttons on this page.
+- Keys: `Enter` opens, `Backspace` goes up, `F5` reloads.
+
+Open it on a Tresorit, NAS, phone or SFTP folder and move around freely:
 
 - The folder is read in one trip (a WebDAV PROPFIND, an FTP MLSD, an SFTP readdir carry every size and time), and listings
-  of slow drives are remembered for five minutes, so Back and Up are instant. *Refresh* asks the drive again.
+  of slow drives are remembered for five minutes, so Back and Up are instant. *Reload* asks the drive again.
 - Its pictures are fetched in the background into a buffer on disk, **nearest the part you are looking at first**, ahead of
   your scrolling. A folder of three thousand photos fills in a few seconds from a local disk; from a remote one it takes as
   long as the drive needs, and each picture costs the few kilobytes of its embedded preview, once.
@@ -293,7 +303,7 @@ a Tresorit, NAS, phone or SFTP folder and move around freely:
   is on is almost full (under 1 GB free) or when the drive stops answering (25 reads in a row fail). The queues are bounded,
   so scrolling through a huge folder cannot pile up work. A full disk or damaged cache index never loses a picture that was
   just fetched or stops the window: the index is simply started again.
-- Cloud-only files are still not downloaded unless you tick *Also fetch pictures of cloud-only files*. Some cloud drives
+- Cloud-only files are still not downloaded unless you switch on *Fetch pictures of cloud-only files too* in Settings. Some cloud drives
   download the whole file even for a small read; Duplio reads each file once and keeps the picture, so it happens once.
 - To keep the pictures **between runs** (so opening the same folder tomorrow costs nothing), choose *between runs* under
   *Remember pictures* in Settings. They are then stored unencrypted in Duplio's cache folder, which is why it is off by default.

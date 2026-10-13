@@ -544,10 +544,15 @@ def tag_value(tags: Sequence[str], prefix: str) -> str | None:
 
 
 def center_on(win: tk.Toplevel, parent: tk.Misc, width: int, height: int) -> None:
+    """Put ``win`` over the middle of ``parent``, never larger than the screen and never partly off it."""
     parent.update_idletasks()
+    screen_w, screen_h = win.winfo_screenwidth(), win.winfo_screenheight()
+    width, height = min(width, screen_w - 40), min(height, screen_h - 100)
     x = parent.winfo_rootx() + max((parent.winfo_width() - width) // 2, 0)
     y = parent.winfo_rooty() + max((parent.winfo_height() - height) // 3, 0)
+    x, y = max(0, min(x, screen_w - width - 10)), max(0, min(y, screen_h - height - 60))
     win.geometry(f"{width}x{height}+{x}+{y}")
+    win.minsize(min(width, 420), min(height, 260))
 
 
 def font_height(font: Any) -> int:

@@ -369,32 +369,25 @@ def test_browse_sorts_and_filters_what_is_shown(tmp_path: Path, window: Any) -> 
     make_pictures(root, 12)
     (root / "zzz folder").mkdir()
     page = open_folder(window, root)
-    assert page.shown[0].name == "zzz folder"  # folders first by default
-    page.sort_box.set("Date modified")
-    page.descending = True
-    page._paint_direction()
+    assert page.shown[0].name == "zzz folder"  # folders always come first
+    page.sort_box.set("Newest first")
     page._view_changed()
-    assert [i.name for i in page.shown if not i.is_dir][:2] == ["IMG_011.jpg", "IMG_010.jpg"]  # newest first
-    page.sort_box.set("Size")
+    assert [i.name for i in page.shown if not i.is_dir][:2] == ["IMG_011.jpg", "IMG_010.jpg"]
+    assert page.shown[0].name == "zzz folder"
+    page.sort_box.set("Largest first")
     page._view_changed()
     sizes = [i.size for i in page.shown if not i.is_dir]
     assert sizes == sorted(sizes, reverse=True)
-    page.folders_first.set(False)
-    page.sort_box.set("Name")
-    page.descending = False
+    page.sort_box.set("Name, A to Z")
     page._view_changed()
-    assert page.shown[0].name == "IMG_000.jpg" and page.shown[-1].name == "zzz folder"
+    assert page.shown[1].name == "IMG_000.jpg" and page.shown[-1].name == "IMG_011.jpg"
     page.filter_var.set("img_00")
     pump(window, timeout=0.6)
     assert [i.name for i in page.shown] == [f"IMG_00{n}.jpg" for n in range(10)]  # a part of a name, any case
     page.view_box.set("Details")
     page._view_changed()
     assert page.details and page.view.count == 10
-    page.only_pictures.set(True)
-    page.filter_var.set("")
-    pump(window, timeout=0.6)
-    assert [i.name for i in page.shown if not i.is_dir] == [f"IMG_{n:03d}.jpg" for n in range(12)]
-    assert sum(1 for i in page.shown if i.is_dir) == 1  # folders stay: they are how you move on
+    assert window.ctx.state.get("browse_sort") == "name" and window.ctx.state.get("browse_desc") is False  # and it is remembered
 
 
 def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_away(tmp_path: Path, window: Any) -> None:
@@ -407,7 +400,7 @@ def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_awa
     status = window.ctx.prefetcher.status()
     assert status.state == "stopped" and "buffer is full" in status.reason
     wait(window, lambda: "Stopped" in page.fetch_label.cget("text"))
-    assert "Settings" in page.fetch_label.cget("text") and page.fetch_button.cget("text") == "Fetch again"
+    assert "Settings" in page.fetch_label.cget("text") and page.fetch_button.cget("text") == "Try again"
     store = window.ctx.previews.buffer_for(page._preview_items()[0])
     assert store is not None and store.total_bytes <= 30_000  # and the limit held
 
@@ -595,3 +588,175 @@ def test_no_button_label_or_box_is_ever_cut_off(tmp_path: Path, window: Any, wid
     window.show("settings")
     check("settings")
     assert not problems, "\n".join(f"{page}: " + "; ".join(items) for page, items in problems.items())
+
+
+# --------------------------------------------------------------------------- dialogs can always be closed, and never freeze the window
+def close_with_the_window_manager(dialog: Any) -> None:
+    """What the title-bar close button does: run whatever the dialog registered for WM_DELETE_WINDOW."""
+    dialog.tk.call(dialog.protocol("WM_DELETE_WINDOW"))
+
+
+def test_every_dialog_closes_with_its_close_button(window: Any, tmp_path: Path) -> None:
+    from duplio.gui.dialogs import (
+        ConfirmDialog,
+        ConnectDialog,
+        FolderPicker,
+        MessageDialog,
+        PasswordDialog,
+    )
+
+    ctx = window.ctx
+    dialogs = [ConnectDialog(ctx), FolderPicker(ctx, str(tmp_path)), ConfirmDialog(ctx, "Title", "Do it?", ["a"], [("x", "y")]),
+               MessageDialog(ctx, "Title", "Done", ["a line"]), PasswordDialog(ctx, "nas", "me")]
+    for dialog in dialogs:
+        pump(window, timeout=0.2)
+        assert dialog.winfo_exists()
+        close_with_the_window_manager(dialog)
+        pump(window, timeout=0.1)
+        assert not dialog.winfo_exists(), type(dialog).__name__
+    assert window.grab_current() is None  # nothing is left holding the keyboard and mouse
+
+
+def test_every_dialog_closes_with_escape(window: Any, tmp_path: Path) -> None:
+    from duplio.gui.dialogs import ConnectDialog, FolderPicker
+
+    for dialog in (ConnectDialog(window.ctx), FolderPicker(window.ctx, str(tmp_path))):
+        pump(window, timeout=0.2)
+        dialog.focus_force()
+        pump(window, timeout=0.1)
+        dialog.focus_get().event_generate("<Escape>", when="now") if dialog.focus_get() is not None else dialog.event_generate("<Escape>")
+        pump(window, timeout=0.2)
+        assert not dialog.winfo_exists()
+
+
+def test_the_phone_dialog_opens_at_once_and_can_be_closed_while_it_is_still_looking(window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+    import time
+
+    import duplio.devices as devices
+    from duplio.gui.dialogs import ConnectDialog
+
+    release = threading.Event()
+
+    def slow_discover(*_a: Any, **_k: Any) -> list[Any]:
+        release.wait(10)  # the Android bridge starting up, or a stale phone mount
+        return []
+
+    monkeypatch.setattr(devices, "discover", slow_discover)
+    began = time.monotonic()
+    dialog = ConnectDialog(window.ctx)
+    assert time.monotonic() - began < 1.5  # it did not wait for the search
+    pump(window, timeout=0.3)
+    assert "Looking" in dialog.device_note.cget("text")
+    assert dialog.device_list.size() >= 1  # the drives of this computer are there already
+    close_with_the_window_manager(dialog)
+    pump(window, timeout=0.2)
+    assert not dialog.winfo_exists()
+    release.set()
+    pump(window, timeout=0.3)  # the late answer arrives for a window that is gone, and nothing goes wrong
+
+
+def test_the_phone_dialog_lists_what_was_found_and_refuses_one_that_is_not_ready(window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import duplio.devices as devices
+    from duplio.devices.discovery import Device
+    from duplio.gui.dialogs import ConnectDialog
+
+    monkeypatch.setattr(devices, "discover", lambda *_a, **_k: [Device("phone", "Pixel 8", "adb://abc/sdcard", "", True),
+                                                                  Device("phone", "Old phone", "/gvfs/old", "", False)])
+    dialog = ConnectDialog(window.ctx)
+    wait(window, lambda: any("Pixel 8" in dialog.device_list.get(i) for i in range(dialog.device_list.size())))
+    rows = [dialog.device_list.get(i) for i in range(dialog.device_list.size())]
+    assert any(r.startswith("drive:") for r in rows) and any("(not ready)" in r for r in rows)
+    dialog.device_list.selection_set(next(i for i, r in enumerate(rows) if "Old phone" in r))
+    dialog._use_device()
+    assert dialog.winfo_exists() and "not ready" in dialog.device_note.cget("text")  # explained, and still open
+    dialog.device_list.selection_clear(0, "end")
+    dialog.device_list.selection_set(next(i for i, r in enumerate(rows) if "Pixel 8" in r))
+    dialog._use_device()
+    pump(window, timeout=0.1)
+    assert dialog.result == "adb://abc/sdcard" and not dialog.winfo_exists()
+
+
+def test_the_folder_picker_has_the_drives_and_the_top_of_a_drive_can_be_reached(window: Any, tmp_path: Path) -> None:
+    from duplio.gui.dialogs import FolderPicker
+
+    picker = FolderPicker(window.ctx, str(tmp_path))
+    wait(window, lambda: picker.here is not None)
+    labels = [picker.places.get(i).strip() for i in range(picker.places.size())]
+    assert "Drives" in labels and "Folders" in labels and any("Whole computer" in label or ":\\" in label for label in labels)
+    assert picker.up_button._enabled
+    for _ in range(40):  # keep going up: the top of the drive is reached, and Up then switches itself off
+        if not picker.up_button._enabled:
+            break
+        before = picker.here.uri
+        picker.up()
+        wait(window, lambda before=before: picker.here.uri != before)
+    assert not picker.up_button._enabled
+    picker._cancel()
+
+
+def menu_labels(menu: Any) -> list[str]:
+    return [menu.entrycget(i, "label").strip() for i in range(menu.index("end") + 1) if menu.type(i) == "command"]
+
+
+def press(menu: Any, label: str) -> None:
+    menu.invoke(next(i for i in range(menu.index("end") + 1) if menu.type(i) == "command" and menu.entrycget(i, "label").strip() == label))
+
+
+def test_the_places_menu_offers_every_drive_the_phones_and_what_was_open_recently(tmp_path: Path, window: Any) -> None:
+    from duplio.gui.places import Place, Places
+
+    ctx = window.ctx
+    ctx.state.remember(str(tmp_path))
+    ctx.places.snapshot = lambda: Places((Place("Home", str(tmp_path)),), (Place("Whole computer  (/)", "/"), Place("/mnt/usb", str(tmp_path))),
+                                         (Place("phone: Pixel", str(tmp_path)),), True)  # type: ignore[method-assign]
+    window.show("browse")
+    page = window.pages["browse"]
+    pump(window, timeout=0.3)
+    menu = page._places_menu()
+    labels = menu_labels(menu)
+    assert labels[:2] == ["Folders", "Home"] and "Drives" in labels and "Whole computer  (/)" in labels and "/mnt/usb" in labels
+    assert "Phones and devices" in labels and "phone: Pixel" in labels and "Recent" in labels and str(tmp_path) in labels
+    assert labels[-1] == "Phone, drive or server…"
+    press(menu, "/mnt/usb")
+    wait(window, lambda: page.listing is not None and page.listing.path == str(tmp_path))  # picking a place opens it
+
+
+def test_the_places_menu_says_when_no_phone_was_found(window: Any) -> None:
+    from duplio.gui.places import Place, Places
+
+    window.ctx.places.snapshot = lambda: Places((Place("Home", "/"),), (Place("Whole computer  (/)", "/"),), (), True)  # type: ignore[method-assign]
+    window.show("browse")
+    assert any(label.startswith("none found") for label in menu_labels(window.pages["browse"]._places_menu()))
+
+
+def test_a_wrong_address_is_explained_in_the_page_and_the_way_out_still_works(tmp_path: Path, window: Any) -> None:
+    make_pictures(tmp_path / "ok", 2)
+    page = open_folder(window, tmp_path / "ok")
+    page.open_text(str(tmp_path / "no such folder"))
+    wait(window, lambda: page.here is not None and page.here.display.endswith("no such folder") and page._job is not None and page._job.finished)
+    pump(window, timeout=0.2)
+    assert "could not be read" in page.summary.cget("text") and page.up_button._enabled  # not a dialog; and Up is still there
+    page.go_up()
+    wait(window, lambda: page.listing is not None and page.listing.path == str(tmp_path))
+    page.open_text("sftp://")  # not an address at all
+    assert page.summary.cget("text").startswith("Cannot open that")
+
+
+def test_browse_has_only_the_controls_that_matter(window: Any) -> None:
+    from duplio.gui.widgets import Btn
+
+    window.show("browse")
+    page = window.pages["browse"]
+    pump(window, timeout=0.3)
+
+    def buttons(widget: Any) -> list[str]:
+        found = [widget.cget("text")] if isinstance(widget, Btn) else []
+        for child in widget.winfo_children():
+            found += buttons(child)
+        return found
+
+    shown = sorted(b for b in buttons(page) if b)
+    assert shown == sorted(["◀ Back", "▲ Up", "Places ▾", "Reload"])  # the rest lives in the Places menu or in Settings
+    for gone in ("folders_first", "only_pictures", "hidden", "cloud", "direction"):
+        assert not hasattr(page, gone), gone

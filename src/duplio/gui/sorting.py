@@ -21,6 +21,10 @@ PAIR_FIELDS = (("default", "Differences first"), ("name", "Name"), ("modified", 
 GROUP_FIELDS = (("default", "Most space first"), ("name", "Name"), ("copies", "Number of copies"), ("size", "File size"),
                 ("modified", "Date modified"), ("folder", "Folder"))
 BROWSE_FIELDS = (("name", "Name"), ("modified", "Date modified"), ("size", "Size"), ("type", "Type"))
+# One choice says both what to order by and which way, so the page needs no separate direction button: (field, descending, label)
+BROWSE_ORDERS = (("name", False, "Name, A to Z"), ("name", True, "Name, Z to A"), ("modified", True, "Newest first"),
+                 ("modified", False, "Oldest first"), ("size", True, "Largest first"), ("size", False, "Smallest first"),
+                 ("type", False, "Type, A to Z"), ("type", True, "Type, Z to A"))
 
 
 def natural_key(text: str) -> tuple[tuple[int, Any], ...]:
@@ -147,3 +151,13 @@ def choose(fields: Sequence[tuple[str, str]], label: str) -> str:
 def label_of(fields: Sequence[tuple[str, str]], key: str) -> str:
     return next((v for k, v in fields if k == key), fields[0][1])
 
+
+
+def order_label(field: str, descending: bool) -> str:
+    """The label of the browse order for ``field`` and direction (the first one if it is not known)."""
+    return next((label for f, d, label in BROWSE_ORDERS if f == field and d == descending), BROWSE_ORDERS[0][2])
+
+
+def order_of(label: str) -> tuple[str, bool]:
+    """``(field, descending)`` for a label from :data:`BROWSE_ORDERS`."""
+    return next(((f, d) for f, d, text in BROWSE_ORDERS if text == label), (BROWSE_ORDERS[0][0], BROWSE_ORDERS[0][1]))

@@ -12,23 +12,41 @@ from typing import TYPE_CHECKING, Any
 
 from duplio.gui.jobs import Job
 from duplio.gui.model import build_server_address
+from duplio.gui.places import Place
 from duplio.gui.style import PALETTE, shorten
-from duplio.gui.widgets import Btn, center_on
+from duplio.gui.widgets import Btn, autowrap, center_on
 from duplio.util.fmt import human_duration, human_size
 
 if TYPE_CHECKING:
     from duplio.gui.app import Context
 
 
-def _modal(win: tk.Toplevel, master: tk.Misc) -> None:
+def _modal(win: tk.Toplevel, master: tk.Misc, on_close: Callable[[], None]) -> None:
+    """Make ``win`` a dialog: on top of the window and taking the keyboard.
+
+    The title-bar close button always does something (``on_close``), so no dialog can ever be left that cannot be dismissed.
+    """
     win.transient(master.winfo_toplevel())  # type: ignore[arg-type]
-    win.protocol("WM_DELETE_WINDOW", lambda: None)
+    win.protocol("WM_DELETE_WINDOW", on_close)
     win.update_idletasks()
+    win.lift()
     try:
         win.grab_set()
     except tk.TclError:
         pass  # the window is not visible yet on some systems; the dialog still works, just not exclusively
-    win.focus_set()
+    win.focus_force()
+
+
+def _dismiss(win: tk.Toplevel) -> None:
+    """Close a dialog; safe to call twice and from any of its buttons."""
+    try:
+        win.grab_release()
+    except tk.TclError:
+        pass
+    try:
+        win.destroy()
+    except tk.TclError:
+        pass
 
 
 class ProgressDialog(tk.Toplevel):
@@ -61,7 +79,7 @@ class ProgressDialog(tk.Toplevel):
                              fg=PALETTE["muted"])
         self.note.pack(side="left")
         center_on(self, ctx.window, 600, 230)
-        _modal(self, ctx.window)
+        _modal(self, ctx.window, self._cancel)  # closing the window stops the job; the dialog goes when the job has stopped
         self.bar.start(60)
         self._indeterminate = True
         self.after(100, self._poll)
@@ -100,8 +118,7 @@ class ProgressDialog(tk.Toplevel):
             self.after(100, self._poll)
             return
         self.bar.stop()
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
         if self.job.cancelled:
             if self._on_cancel:
                 self._on_cancel()
@@ -133,17 +150,15 @@ class PasswordDialog(tk.Toplevel):
         self.entry.bind("<Return>", lambda _e: self._ok())
         self.bind("<Escape>", lambda _e: self._cancel())
         center_on(self, ctx.window, 480, 210)
-        _modal(self, ctx.window)
+        _modal(self, ctx.window, self._cancel)
         self.entry.focus_set()
 
     def _ok(self) -> None:
         self.result = self.entry.get()
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def _cancel(self) -> None:
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def show(self) -> str | None:
         self.wait_window()
@@ -189,16 +204,14 @@ class ConfirmDialog(tk.Toplevel):
         Btn(row, "Cancel", self._no, fonts=f).pack(side="right", padx=(0, 8))
         self.bind("<Escape>", lambda _e: self._no())
         center_on(self, ctx.window, 700, 260 + (230 if rows else 0) + 24 * len(details))
-        _modal(self, ctx.window)
+        _modal(self, ctx.window, self._no)
 
     def _yes(self) -> None:
         self.result = True
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def _no(self) -> None:
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def show(self) -> bool:
         self.wait_window()
@@ -230,11 +243,10 @@ class MessageDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _e: self._close())
         self.bind("<Return>", lambda _e: self._close())
         center_on(self, ctx.window, 620, 190 + 28 * len(lines))
-        _modal(self, ctx.window)
+        _modal(self, ctx.window, self._close)
 
     def _close(self) -> None:
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def _then(self, command: Callable[[], object]) -> Callable[[], None]:
         """A button action that closes this dialog first and then does ``command``."""
@@ -244,6 +256,8 @@ class MessageDialog(tk.Toplevel):
             command()
 
         return run
+
+
 
 
 # --------------------------------------------------------------------------- the folder browser
@@ -256,32 +270,37 @@ class FolderPicker(tk.Toplevel):
         self.result: str | None = None
         self.here: Any = None
         self._request = 0
+        self._places_version = -1
         self._inbox: queue.SimpleQueue[tuple[int, str, Any]] = queue.SimpleQueue()
         self.title(title)
         self.configure(bg=PALETTE["panel"])
         f = ctx.fonts
         outer = tk.Frame(self, bg=PALETTE["panel"], padx=16, pady=14)
         outer.pack(fill="both", expand=True)
-        tk.Label(outer, text=title, font=f.heading, bg=PALETTE["panel"], anchor="w").pack(fill="x")
+        # The buttons are packed first so that they stay on screen however small the window is made.
+        row = tk.Frame(outer, bg=PALETTE["panel"])
+        row.pack(side="bottom", fill="x", pady=(10, 0))
+        Btn(row, "Use this folder", self._choose, kind="primary", fonts=f).pack(side="right")
+        Btn(row, "Cancel", self._cancel, fonts=f).pack(side="right", padx=(0, 8))
+        self.status = tk.Label(outer, text="", font=f.small, bg=PALETTE["panel"], fg=PALETTE["muted"], anchor="w")
+        self.status.pack(side="bottom", fill="x", pady=(8, 0))
+        tk.Label(outer, text=title, font=f.heading, bg=PALETTE["panel"], fg=PALETTE["heading"], anchor="w").pack(fill="x")
         bar = tk.Frame(outer, bg=PALETTE["panel"])
         bar.pack(fill="x", pady=(10, 8))
-        Btn(bar, "↑ Up", self.up, fonts=f, padx=10, pady=5).pack(side="left")
-        self.where = ttk.Entry(bar)
-        self.where.pack(side="left", fill="x", expand=True, padx=8)
+        self.up_button = Btn(bar, "▲ Up", self.up, fonts=f, padx=10, pady=5)
+        self.up_button.pack(side="left")
+        self.where = ttk.Entry(bar, font=f.base)
+        self.where.pack(side="left", fill="x", expand=True, padx=(8, 0))
         self.where.bind("<Return>", lambda _e: self.go(self.where.get()))
-        Btn(bar, "Go", lambda: self.go(self.where.get()), fonts=f, padx=10, pady=5).pack(side="left")
-        Btn(bar, "Refresh", lambda: self.go(self.where.get(), refresh=True), fonts=f, padx=10, pady=5).pack(side="left", padx=(8, 0))
         middle = tk.Frame(outer, bg=PALETTE["panel"])
         middle.pack(fill="both", expand=True)
         places = tk.Frame(middle, bg=PALETTE["panel"])
         places.pack(side="left", fill="y", padx=(0, 12))
-        tk.Label(places, text="Places", font=f.bold, bg=PALETTE["panel"], anchor="w").pack(fill="x")
-        self.places = tk.Listbox(places, width=26, height=14, activestyle="none", borderwidth=1, relief="solid", font=f.base,
-                                 exportselection=False, highlightthickness=0)
+        self.places = tk.Listbox(places, width=30, height=14, activestyle="none", borderwidth=1, relief="solid", font=f.base,
+                                 exportselection=False, highlightthickness=0, bg=PALETTE["field"], fg=PALETTE["text"])
         self.places.pack(fill="y", expand=True)
         self.places.bind("<<ListboxSelect>>", self._place_chosen)
-        self._place_targets: list[str] = []
-        self._fill_places()
+        self._place_targets: list[str | None] = []
         listing = tk.Frame(middle, bg=PALETTE["panel"])
         listing.pack(side="left", fill="both", expand=True)
         self.tree = ttk.Treeview(listing, columns=("name",), show="tree", selectmode="browse", height=14)
@@ -291,38 +310,38 @@ class FolderPicker(tk.Toplevel):
         scroll.pack(side="right", fill="y")
         self.tree.bind("<Double-Button-1>", self._open_selected)
         self.tree.bind("<Return>", self._open_selected)
-        self.status = tk.Label(outer, text="", font=f.small, bg=PALETTE["panel"], fg=PALETTE["muted"], anchor="w")
-        self.status.pack(fill="x", pady=(8, 0))
-        row = tk.Frame(outer, bg=PALETTE["panel"])
-        row.pack(fill="x", pady=(10, 0))
-        Btn(row, "Use this folder", self._choose, kind="primary", fonts=f).pack(side="right")
-        Btn(row, "Cancel", self._cancel, fonts=f).pack(side="right", padx=(0, 8))
         self.bind("<Escape>", lambda _e: self._cancel())
+        self._fill_places()
         center_on(self, ctx.window, 860, 560)
-        _modal(self, ctx.window)
+        _modal(self, ctx.window, self._cancel)
+        ctx.places.refresh()
         self.go(start or os.path.expanduser("~"))
         self.after(80, self._drain)
 
     def _fill_places(self) -> None:
-        from duplio.tui.widgets import location_suggestions
-
+        """Folders, drives, phones and recent places, under small headings. The scan for phones runs in the background."""
+        found = self.ctx.places.snapshot()
+        self._places_version = self.ctx.places.version
+        recent = [Place(shorten(r, 210, self.ctx.fonts.base, middle=True), r) for r in self.ctx.state.recent[:6]]
+        groups = (("Folders", found.folders), ("Drives", found.drives),
+                  ("Phones and devices", found.devices if found.scanned else (Place("looking…", ""),)), ("Recent", recent))
         self.places.delete(0, "end")
         self._place_targets = []
-        try:
-            entries = location_suggestions()
-        except Exception:
-            entries = []
-        for label, target in entries:
-            self.places.insert("end", label.replace("folder: ", ""))
-            self._place_targets.append(target)
-        for recent in self.ctx.state.recent[:6]:
-            self.places.insert("end", "recent: " + shorten(recent, 190, self.ctx.fonts.base, middle=True))
-            self._place_targets.append(recent)
+        for heading, items in groups:
+            if not items:
+                continue
+            self.places.insert("end", heading)
+            self.places.itemconfigure("end", foreground=PALETTE["heading"], selectforeground=PALETTE["heading"],
+                                      selectbackground=PALETTE["field"])
+            self._place_targets.append(None)
+            for place in items:
+                self.places.insert("end", "  " + place.label)
+                self._place_targets.append(place.target or None)
 
     def _place_chosen(self, _e: tk.Event) -> None:
         sel = self.places.curselection()
-        if sel:
-            self.go(self._place_targets[sel[0]])
+        if sel and sel[0] < len(self._place_targets) and self._place_targets[sel[0]]:
+            self.go(self._place_targets[sel[0]] or "")
 
     # ---- loading, off the window's thread ---------------------------------
     def go(self, text: str, refresh: bool = False) -> None:
@@ -349,6 +368,8 @@ class FolderPicker(tk.Toplevel):
         threading.Thread(target=work, name="duplio-picker", daemon=True).start()
 
     def _drain(self) -> None:
+        if not self.winfo_exists():
+            return
         try:
             while True:
                 request, status, payload = self._inbox.get_nowait()
@@ -360,8 +381,9 @@ class FolderPicker(tk.Toplevel):
                     self._show(*payload)
         except queue.Empty:
             pass
-        if self.winfo_exists():
-            self.after(80, self._drain)
+        if self.ctx.places.version != self._places_version:
+            self._fill_places()
+        self.after(80, self._drain)
 
     def _show(self, loc: Any, entries: list[tuple[str, bool]]) -> None:
         self.here = loc
@@ -373,6 +395,8 @@ class FolderPicker(tk.Toplevel):
         for name in folders:
             self.tree.insert("", "end", iid=name, text="  ▸  " + name)
         self.status.configure(text=f"{len(folders)} folders, {files} files here  ·  {loc.caps.label}", fg=PALETTE["muted"])
+        above = loc.backend.parent(loc.path)
+        self.up_button.set_enabled(bool(above) and above != loc.path)
 
     def _open_selected(self, _e: tk.Event | None = None) -> None:
         sel = self.tree.selection()
@@ -390,12 +414,10 @@ class FolderPicker(tk.Toplevel):
         if self.here is None:
             return
         self.result = self.here.uri
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def _cancel(self) -> None:
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def show(self) -> str | None:
         self.wait_window()
@@ -414,39 +436,49 @@ SERVER_KINDS = [
 
 
 class ConnectDialog(tk.Toplevel):
-    """Pick a phone, a drive or a recent place, or fill in a server's details. Returns an address."""
+    """Pick a phone or a drive, or fill in a server's details. Returns an address.
+
+    Looking for phones can take a few seconds, so it happens on a worker thread; the dialog opens at once and can be closed
+    at any moment (its close button, Esc and Cancel all work, while it is still looking too).
+    """
 
     def __init__(self, ctx: Context) -> None:
         super().__init__(ctx.window)
         self.ctx = ctx
         self.result: str | None = None
+        self._found: queue.SimpleQueue[list[Any]] = queue.SimpleQueue()
+        self._looking = False
         self.title("Phone, drive or server")
         self.configure(bg=PALETTE["panel"])
         f = ctx.fonts
         outer = tk.Frame(self, bg=PALETTE["panel"], padx=20, pady=16)
         outer.pack(fill="both", expand=True)
-        tk.Label(outer, text="Connect to a phone, drive or server", font=f.heading, bg=PALETTE["panel"], anchor="w").pack(fill="x")
+        row = tk.Frame(outer, bg=PALETTE["panel"])  # packed first, so Cancel is always on screen
+        row.pack(side="bottom", fill="x", pady=(14, 0))
+        Btn(row, "Cancel", self._cancel, fonts=f).pack(side="right")
+        tk.Label(outer, text="Connect to a phone, drive or server", font=f.heading, bg=PALETTE["panel"], fg=PALETTE["heading"],
+                 anchor="w").pack(fill="x")
         notebook = ttk.Notebook(outer)
         notebook.pack(fill="both", expand=True, pady=(12, 0))
 
         devices = tk.Frame(notebook, bg=PALETTE["panel"], padx=12, pady=12)
         notebook.add(devices, text="Phones and drives")
-        tk.Label(devices, text="Plugged-in phones, cameras and drives that Duplio can see:", font=f.base, bg=PALETTE["panel"],
-                 anchor="w").pack(fill="x")
+        buttons = tk.Frame(devices, bg=PALETTE["panel"])
+        buttons.pack(side="bottom", fill="x", pady=(8, 0))
+        Btn(buttons, "Use the selected one", self._use_device, kind="primary", fonts=f).pack(side="right")
+        Btn(buttons, "Look again", self._look, fonts=f).pack(side="left")
+        self.device_note = tk.Label(devices, text="", font=f.small, bg=PALETTE["panel"], fg=PALETTE["muted"], anchor="w", justify="left")
+        self.device_note.pack(side="bottom", fill="x", pady=(8, 0))
+        autowrap(self.device_note, margin=4, minimum=240)
         self.device_list = tk.Listbox(devices, height=9, activestyle="none", font=f.base, borderwidth=1, relief="solid",
-                                      exportselection=False)
-        self.device_list.pack(fill="both", expand=True, pady=(8, 8))
-        self._device_targets: list[str] = []
-        self.device_note = tk.Label(devices, text="", font=f.small, bg=PALETTE["panel"], fg=PALETTE["muted"], anchor="w",
-                                    justify="left", wraplength=520)
-        self.device_note.pack(fill="x")
+                                      exportselection=False, bg=PALETTE["field"], fg=PALETTE["text"])
+        self.device_list.pack(fill="both", expand=True)
+        self._device_targets: list[tuple[str, bool]] = []
         self.device_list.bind("<Double-Button-1>", lambda _e: self._use_device())
-        Btn(devices, "Use the selected one", self._use_device, kind="primary", fonts=f).pack(anchor="e", pady=(8, 0))
-        self._fill_devices()
 
         server = tk.Frame(notebook, bg=PALETTE["panel"], padx=12, pady=12)
         notebook.add(server, text="Server")
-        self.kind = ttk.Combobox(server, state="readonly", values=[k[0] for k in SERVER_KINDS], width=60)
+        self.kind = ttk.Combobox(server, state="readonly", values=[k[0] for k in SERVER_KINDS], width=60, font=f.base)
         self.kind.current(0)
         self.kind.bind("<<ComboboxSelected>>", self._kind_changed)
         self.fields: dict[str, ttk.Entry] = {}
@@ -455,48 +487,84 @@ class ConnectDialog(tk.Toplevel):
         for n, (key, label) in enumerate((("host", "Server name or address (for example nas.local)"), ("user", "User name"),
                                           ("port", "Port (leave empty unless you know it)"), ("folder", "Folder on the server (for example /photos)"))):
             tk.Label(server, text=label, font=f.bold, bg=PALETTE["panel"], anchor="w").grid(row=2 + n * 2, column=0, columnspan=2, sticky="w")
-            entry = ttk.Entry(server)
+            entry = ttk.Entry(server, font=f.base)
             entry.grid(row=3 + n * 2, column=0, columnspan=2, sticky="we", pady=(2, 8))
             self.fields[key] = entry
         server.columnconfigure(0, weight=1)
-        self.safety = tk.Label(server, text="", font=f.small, bg=PALETTE["panel"], fg=PALETTE["muted"], anchor="w", justify="left",
-                               wraplength=520)
+        self.safety = tk.Label(server, text="", font=f.small, bg=PALETTE["panel"], fg=PALETTE["muted"], anchor="w", justify="left")
         self.safety.grid(row=10, column=0, columnspan=2, sticky="we")
+        autowrap(self.safety, margin=4, minimum=240)
         tk.Label(server, text="The password is asked for when the connection is made, and is never saved.", font=f.small,
                  bg=PALETTE["panel"], fg=PALETTE["muted"], anchor="w").grid(row=11, column=0, columnspan=2, sticky="we", pady=(4, 0))
         Btn(server, "Use this server", self._use_server, kind="primary", fonts=f).grid(row=12, column=1, sticky="e", pady=(10, 0))
         self._kind_changed()
 
-        recent = tk.Frame(notebook, bg=PALETTE["panel"], padx=12, pady=12)
-        notebook.add(recent, text="Recent")
-        self.recent_list = tk.Listbox(recent, height=9, activestyle="none", font=f.base, borderwidth=1, relief="solid", exportselection=False)
-        self.recent_list.pack(fill="both", expand=True, pady=(0, 8))
-        for item in ctx.state.recent:
-            self.recent_list.insert("end", item)
-        self.recent_list.bind("<Double-Button-1>", lambda _e: self._use_recent())
-        Btn(recent, "Use the selected one", self._use_recent, kind="primary", fonts=f).pack(anchor="e")
-
-        row = tk.Frame(outer, bg=PALETTE["panel"])
-        row.pack(fill="x", pady=(14, 0))
-        Btn(row, "Cancel", self._cancel, fonts=f).pack(side="right")
         self.bind("<Escape>", lambda _e: self._cancel())
-        center_on(self, ctx.window, 640, 560)
-        _modal(self, ctx.window)
+        center_on(self, ctx.window, 680, 560)
+        _modal(self, ctx.window, self._cancel)
+        self._show_devices([])
+        self._look()
 
-    def _fill_devices(self) -> None:
-        from duplio.devices import discover, platform_tip
+    # ---- phones and drives -----------------------------------------------------
+    def _look(self) -> None:
+        """Start looking for phones and drives on a worker thread (if it is not already looking)."""
+        if self._looking:
+            return
+        self._looking = True
+        self.device_note.configure(text="Looking for phones and drives…  You can close this window at any time.")
 
+        def work() -> None:
+            from duplio.devices import discover
+
+            try:
+                found = list(discover())
+            except Exception:
+                found = []
+            self._found.put(found)
+
+        threading.Thread(target=work, name="duplio-devices", daemon=True).start()
+        self.after(120, self._poll)
+
+    def _poll(self) -> None:
+        if not self.winfo_exists():
+            return
         try:
-            found = discover()
-        except Exception:
-            found = []
+            found = self._found.get_nowait()
+        except queue.Empty:
+            self.after(120, self._poll)
+            return
+        self._looking = False
+        self._show_devices(found)
+
+    def _show_devices(self, found: list[Any]) -> None:
+        from duplio.devices import platform_tip
+
+        self.device_list.delete(0, "end")
+        self._device_targets = []
+        for place in self.ctx.places.snapshot().drives:
+            self.device_list.insert("end", f"drive:  {place.label}")
+            self._device_targets.append((place.target, True))
         for dev in found:
             self.device_list.insert("end", f"{dev.kind}:  {dev.name}" + ("" if dev.ready else "   (not ready)"))
-            self._device_targets.append(dev.location)
-        if not found:
-            self.device_list.insert("end", "(nothing found)")
-        self.device_note.configure(text=platform_tip())
+            self._device_targets.append((dev.location, dev.ready))
+        if self._looking or found:
+            self.device_note.configure(text=platform_tip() if found else "Looking for phones and drives…")
+        else:
+            self.device_note.configure(text="No phone found. " + platform_tip() + " Then press Look again.")
 
+    def _use_device(self) -> None:
+        sel = self.device_list.curselection()
+        if not sel or sel[0] >= len(self._device_targets):
+            self.device_note.configure(text="Click one of the entries above first.", fg=PALETTE["bad"])
+            return
+        target, ready = self._device_targets[sel[0]]
+        if not ready:
+            self.device_note.configure(text="That one is not ready yet. Unlock the phone and choose 'File transfer', then press Look again.",
+                                       fg=PALETTE["bad"])
+            return
+        self._finish(target)
+
+    # ---- a server -------------------------------------------------------------------
     def _kind_changed(self, _e: Any = None) -> None:
         index = self.kind.current()
         _label, _scheme, _port, encrypted = SERVER_KINDS[index]
@@ -504,16 +572,6 @@ class ConnectDialog(tk.Toplevel):
             text="Encrypted: your password and files are protected on the way." if encrypted
             else "NOT ENCRYPTED: the password and every file cross the network in the clear. Use this only on a network you trust.",
             fg=PALETTE["ok"] if encrypted else PALETTE["bad"])
-
-    def _use_device(self) -> None:
-        sel = self.device_list.curselection()
-        if sel and sel[0] < len(self._device_targets):
-            self._finish(self._device_targets[sel[0]])
-
-    def _use_recent(self) -> None:
-        sel = self.recent_list.curselection()
-        if sel:
-            self._finish(self.recent_list.get(sel[0]))
 
     def _use_server(self) -> None:
         _label, scheme, _port, _enc = SERVER_KINDS[self.kind.current()]
@@ -526,12 +584,10 @@ class ConnectDialog(tk.Toplevel):
 
     def _finish(self, address: str) -> None:
         self.result = address
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def _cancel(self) -> None:
-        self.grab_release()
-        self.destroy()
+        _dismiss(self)
 
     def show(self) -> str | None:
         self.wait_window()

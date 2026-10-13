@@ -11,19 +11,21 @@ from __future__ import annotations
 import math
 import os
 import tkinter as tk
+from collections.abc import Sequence
 from functools import partial
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any
 
 from duplio.gui import actions
 from duplio.gui.app import Page
-from duplio.gui.folders import choose_folder, connect_server
-from duplio.gui.jobs import Job
+from duplio.gui.dialogs import ConnectDialog
+from duplio.gui.jobs import Job, explain
 from duplio.gui.listing import FolderListing, items_of, read_folder
 from duplio.gui.memory import describe
 from duplio.gui.paint import BROWSE_SIZES, Painter
-from duplio.gui.sorting import BROWSE_FIELDS, BrowseItem, choose, label_of, sort_browse
-from duplio.gui.style import PALETTE
+from duplio.gui.places import Place
+from duplio.gui.sorting import BROWSE_ORDERS, BrowseItem, order_label, order_of, sort_browse
+from duplio.gui.style import PALETTE, shorten
 from duplio.gui.widgets import Btn, FlowFrame, VirtualList, autowrap, tag_value
 from duplio.preview.service import PreviewItem
 from duplio.util.fmt import human_size, plural
@@ -37,6 +39,7 @@ VIEWS = ("Thumbnails", "Details")
 
 class BrowsePage(Page):
     title = "Browse a folder"
+    hints = (("Enter", "open"), ("Backspace", "up"), ("F5", "reload"))
     subtitle = ("Look inside any folder, on this computer, a phone, a NAS or a cloud drive. Pictures are fetched once, kept in a "
                 "buffer, and shown from it, so moving around a big remote folder stays quick. Looking changes nothing.")
 
@@ -60,56 +63,44 @@ class BrowsePage(Page):
         self._filter_after: str | None = None
         self._tick_after: str | None = None
         self._last_far_move = -1
+        self._hidden_shown = self.show_hidden
 
         body = tk.Frame(self, bg=PALETTE["bg"])
         body.pack(fill="both", expand=True, padx=28, pady=(8, 14))
-        # ---- where we are
+        # ---- where we are: back, up, the places to start from, the address, reload
         bar = tk.Frame(body, bg=PALETTE["bg"])
         bar.pack(fill="x", pady=(4, 6))
-        self.back_button = Btn(bar, "◀", self.go_back, fonts=f, padx=10, pady=5)
+        self.back_button = Btn(bar, "◀ Back", self.go_back, fonts=f, padx=10, pady=5)
         self.back_button.pack(side="left")
         self.up_button = Btn(bar, "▲ Up", self.go_up, fonts=f, padx=10, pady=5)
-        self.up_button.pack(side="left", padx=(6, 8))
-        self.address = ttk.Combobox(bar, values=ctx.state.recent, font=f.base)
+        self.up_button.pack(side="left", padx=(6, 0))
+        self.places_button = Btn(bar, "Places ▾", self._open_places, kind="primary", fonts=f, padx=12, pady=5)
+        self.places_button.pack(side="left", padx=(6, 8))
+        Btn(bar, "Reload", self.refresh, fonts=f, padx=10, pady=5).pack(side="right", padx=(8, 0))
+        self.address = ttk.Entry(bar, font=f.base)
         self.address.pack(side="left", fill="x", expand=True)
         self.address.bind("<Return>", lambda _e: self.open_text(self.address.get()))
-        self.address.bind("<<ComboboxSelected>>", lambda _e: self.after(10, lambda: self.open_text(self.address.get())))
-        Btn(bar, "Go", lambda: self.open_text(self.address.get()), kind="primary", fonts=f, padx=14, pady=5).pack(side="left", padx=(8, 0))
-        # ---- choosing, and how it is shown (these wrap onto more lines when the window is narrow)
+        self.address.bind("<FocusIn>", lambda _e: self.after(10, lambda: self.address.select_range(0, "end")))
+        # ---- how it is shown (these wrap onto more lines when the window is narrow)
         tools = FlowFrame(body, PALETTE["bg"], hgap=8, vgap=6)
         tools.pack(fill="x", pady=(0, 6))
-        tools.add(Btn(tools, "Choose folder…", self.choose, fonts=f, padx=10, pady=4))
-        tools.add(Btn(tools, "Phone or server…", self.connect, fonts=f, padx=10, pady=4))
-        tools.add(Btn(tools, "Refresh", self.refresh, fonts=f, padx=10, pady=4), gap_after=20)
-
         self.view_box = tools.field("Show", lambda box: ttk.Combobox(box, state="readonly", values=VIEWS, width=11, font=f.small), f.small)
         self.view_box.set(st.get("browse_view", VIEWS[0]))
         self.size_box = tools.field("Picture size", lambda box: ttk.Combobox(box, state="readonly", values=list(BROWSE_SIZES), width=7,
                                                                             font=f.small), f.small)
         self.size_box.set(st.get("browse_size", "Medium") if st.get("browse_size", "Medium") in BROWSE_SIZES else "Medium")
-        self.sort_box = tools.field("Sort by", lambda box: ttk.Combobox(box, state="readonly", values=[v for _k, v in BROWSE_FIELDS], width=14,
-                                                                       font=f.small), f.small, gap_after=4)
-        self.sort_box.set(label_of(BROWSE_FIELDS, st.get("browse_sort", "name")))
-        self.descending = bool(st.get("browse_desc", False))
-        self.direction = Btn(tools, "", self._flip, fonts=f, padx=8, pady=3)
-        tools.add(self.direction, gap_after=16)
-        self.folders_first = tk.BooleanVar(value=bool(st.get("browse_folders_first", True)))
-        self.hidden = tk.BooleanVar(value=bool(st.get("browse_hidden", False)))
-        self.only_pictures = tk.BooleanVar(value=False)
-        self.cloud = tk.BooleanVar(value=ctx.settings.previews.online_only)
+        self.sort_box = tools.field("Order", lambda box: ttk.Combobox(box, state="readonly", values=[o[2] for o in BROWSE_ORDERS], width=16,
+                                                                     font=f.small), f.small)
+        self.sort_box.set(order_label(st.get("browse_sort", "name"), bool(st.get("browse_desc", False))))
         self.filter_var = tk.StringVar()
         self.filter_var.trace_add("write", lambda *_a: self._filter_soon())
-        tools.field("Filter", lambda box: ttk.Entry(box, textvariable=self.filter_var, width=16, font=f.small), f.small)
-        for text, var, command in (("Folders first", self.folders_first, self._view_changed),
-                                   ("Hidden files", self.hidden, self.refresh), ("Only pictures", self.only_pictures, self._view_changed),
-                                   ("Cloud-only files too (downloads them)", self.cloud, self._cloud_changed)):
-            tools.add(ttk.Checkbutton(tools, text=text, variable=var, command=command), gap_after=14)
-        self._paint_direction()
+        tools.field("Filter", lambda box: ttk.Entry(box, textvariable=self.filter_var, width=18, font=f.small), f.small)
         for box in (self.view_box, self.size_box, self.sort_box):
             box.bind("<<ComboboxSelected>>", lambda _e: self._view_changed())
         # ---- what is going on
-        self.summary = tk.Label(body, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w")
+        self.summary = tk.Label(body, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w", justify="left")
         self.summary.pack(fill="x")
+        autowrap(self.summary, margin=4, minimum=300)
         status = tk.Frame(body, bg=PALETTE["bg"])
         status.pack(fill="x", pady=(2, 2))
         self.fetch_label = tk.Label(status, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
@@ -129,7 +120,7 @@ class BrowsePage(Page):
         self.view.pack(fill="both", expand=True)
         self.painter = Painter(self.view, ctx.thumbs, f, self.box)
         self.painter.selectable = False
-        self.painter.fetch_online_only = self.cloud.get()
+        self.painter.fetch_online_only = self.fetch_cloud_only
         self.view.relayout = self._heights
         self.view.on_scroll = self._scrolled
         canvas = self.view.canvas
@@ -150,15 +141,21 @@ class BrowsePage(Page):
 
     @property
     def sort_field(self) -> str:
-        return choose(BROWSE_FIELDS, self.sort_box.get())
+        return order_of(self.sort_box.get())[0]
 
-    def _paint_direction(self) -> None:
-        self.direction.configure(text="▼ Descending" if self.descending else "▲ Ascending")
+    @property
+    def descending(self) -> bool:
+        return order_of(self.sort_box.get())[1]
 
-    def _flip(self) -> None:
-        self.descending = not self.descending
-        self._paint_direction()
-        self._view_changed()
+    @property
+    def show_hidden(self) -> bool:
+        """Hidden files follow the one Settings choice ("Skip hidden files and folders"), so there is nothing to tick here."""
+        return not self.ctx.settings.skip_hidden
+
+    @property
+    def fetch_cloud_only(self) -> bool:
+        """Whether pictures of cloud-only files are fetched (and so downloaded); also a Settings choice."""
+        return bool(self.ctx.settings.previews.online_only)
 
     def _remember_view(self) -> None:
         st = self.ctx.state
@@ -166,8 +163,6 @@ class BrowsePage(Page):
         st.set("browse_size", self.size_box.get())
         st.set("browse_sort", self.sort_field)
         st.set("browse_desc", self.descending)
-        st.set("browse_folders_first", bool(self.folders_first.get()))
-        st.set("browse_hidden", bool(self.hidden.get()))
         st.save()
 
     def _view_changed(self) -> None:
@@ -182,15 +177,12 @@ class BrowsePage(Page):
             self.after_cancel(self._filter_after)
         self._filter_after = self.after(200, lambda: self._apply_view(reset=True))
 
-    def _cloud_changed(self) -> None:
-        self.painter.fetch_online_only = bool(self.cloud.get())
-        if self.listing is not None:
-            self.view.redraw_all()
-            self._start_prefetch()
-
     # ---- going places ------------------------------------------------------------------------------
     def on_show(self) -> None:
         self._visible = True
+        self.ctx.places.refresh(devices=False)  # the drives are read in the background; phones only when asked for
+        if self.painter.fetch_online_only != self.fetch_cloud_only or (self.here is not None and self.show_hidden != self._hidden_shown):
+            self._settings_changed()
         if self.here is None:
             start = self.ctx.state.get("browse_last") or os.path.expanduser("~")
             try:
@@ -201,6 +193,12 @@ class BrowsePage(Page):
             self.ctx.prefetcher.resume()
         self._resume_after_hide = False
         self._tick()
+
+    def _settings_changed(self) -> None:
+        """Settings (hidden files, cloud-only pictures) were changed while this page was away: apply them to the folder on show."""
+        self.painter.fetch_online_only = self.fetch_cloud_only
+        if self.here is not None:
+            self.navigate(self.here, push=False)
 
     def on_hide(self) -> None:
         self._visible = False
@@ -218,19 +216,54 @@ class BrowsePage(Page):
         try:
             location = self.ctx.registry.open(text)
         except Exception as exc:
-            self.ctx.show_error(exc)
+            self.summary.configure(text=f"Cannot open that: {explain(exc)}", fg=PALETTE["bad"])
             return
         self.navigate(location)
 
-    def choose(self) -> None:
-        picked = choose_folder(self.ctx, self.address.get())
+    def connect(self) -> None:
+        """Pick a phone, a drive or a server; its top folder opens here, in the page itself."""
+        picked = ConnectDialog(self.ctx).show()
         if picked:
             self.open_text(picked)
 
-    def connect(self) -> None:
-        picked = connect_server(self.ctx)
-        if picked:
-            self.open_text(picked)
+    def _places_menu(self) -> tk.Menu:
+        """The menu of everywhere to start from: folders, every drive (down to the very top), phones, and what was open recently."""
+        ctx, f = self.ctx, self.ctx.fonts
+        found = ctx.places.snapshot()
+        menu = tk.Menu(self, tearoff=0, font=f.base, disabledforeground=PALETTE["heading"])
+
+        def section(title: str, places: Sequence[Place], none: str = "") -> None:
+            if menu.index("end") is not None:
+                menu.add_separator()
+            menu.add_command(label=title, state="disabled")
+            for place in places:
+                menu.add_command(label="  " + shorten(place.label, 520, f.base, middle=True), command=partial(self.open_text, place.target))
+            if not places and none:
+                menu.add_command(label="  " + none, state="disabled")
+
+        section("Folders", found.folders)
+        section("Drives", found.drives)
+        section("Phones and devices", found.devices,
+                "looking…" if not found.scanned else "none found")
+        recent = [Place(r, r) for r in ctx.state.recent[:8]]
+        if recent:
+            section("Recent", recent)
+        menu.add_separator()
+        menu.add_command(label="Phone, drive or server…", command=self.connect)
+        return menu
+
+    def _open_places(self, waited: int = 0) -> None:
+        places = self.ctx.places
+        if waited == 0:
+            places.refresh()  # look for phones again in the background; the next time the menu opens it shows what turned up
+        if not places.snapshot().scanned and places.busy and waited < 8:
+            self.after(50, lambda: self._open_places(waited + 1))  # the first time, give the search a moment (at most 0.4 s)
+            return
+        menu = self._places_menu()
+        try:
+            menu.tk_popup(self.places_button.winfo_rootx(), self.places_button.winfo_rooty() + self.places_button.winfo_height())
+        finally:
+            menu.grab_release()
 
     def navigate(self, location: Location, *, push: bool = True, refresh: bool = False) -> None:
         if push and self.here is not None and (self.here.uri != location.uri):
@@ -238,11 +271,11 @@ class BrowsePage(Page):
             del self.history[:-100]
         self.here = location
         self.selected = None
-        self.address.set(location.display)
+        self.address.delete(0, "end")
+        self.address.insert(0, location.display)
         self.ctx.state.remember(location.display)
         self.ctx.state.set("browse_last", location.display)
         self.ctx.state.save()
-        self.address.configure(values=self.ctx.state.recent)
         self._load(refresh)
 
     def go_back(self) -> None:
@@ -273,7 +306,8 @@ class BrowsePage(Page):
     # ---- reading the folder ----------------------------------------------------------------------------
     def _load(self, refresh: bool) -> None:
         assert self.here is not None
-        location, hidden = self.here, bool(self.hidden.get())
+        location, hidden = self.here, self.show_hidden
+        self._hidden_shown = hidden
         self._generation += 1
         generation = self._generation
         self.ctx.prefetcher.stop("moved to another folder")
@@ -330,16 +364,14 @@ class BrowsePage(Page):
         items = self.items
         if text:
             items = [i for i in items if text in i.name.casefold()]
-        if self.only_pictures.get():
-            items = [i for i in items if i.is_dir or (i.tile is not None and i.tile.picture_key)]
-        self.shown = sort_browse(items, self.sort_field, self.descending, bool(self.folders_first.get()))
+        self.shown = sort_browse(items, self.sort_field, self.descending, True)
         self.item_keys = [i.tile.key if i.tile is not None else f"d:{i.name}" for i in self.shown]
         self.by_key = dict(zip(self.item_keys, self.shown, strict=True))
         self._ordinal, seen = [], 0
         for item in self.shown:
             self._ordinal.append(seen)
             seen += 1 if item.tile is not None and item.tile.picture_key else 0
-        empty = ("Nothing matches." if (text or self.only_pictures.get()) and self.items else
+        empty = ("Nothing matches." if text and self.items else
                  "This folder is empty." if self.listing is not None and not self.listing.errors else
                  "The folder could not be read: " + "; ".join(f"{why}" for _p, why in (self.listing.errors if self.listing else [])[:2]))
         self.painter.box = self.box
@@ -363,6 +395,10 @@ class BrowsePage(Page):
         self.painter.browse_grid_row(cells, y, width, index, self.box, self.selected)
 
     def _summarise(self) -> None:
+        if self.listing is not None and self.listing.errors and not self.items:
+            why = "; ".join(str(reason) for _path, reason in self.listing.errors[:2])
+            self.summary.configure(text=f"This folder could not be read: {why}", fg=PALETTE["bad"])
+            return
         folders = sum(1 for i in self.items if i.is_dir)
         files = [i for i in self.items if not i.is_dir]
         pictures = sum(1 for i in files if i.tile is not None and i.tile.picture_key)
@@ -388,7 +424,7 @@ class BrowsePage(Page):
             self._tick()
             return
         first = self._first_shown()
-        self.ctx.prefetcher.start(self._preview_items(), first=first, allow_online_only=bool(self.cloud.get()))
+        self.ctx.prefetcher.start(self._preview_items(), first=first, allow_online_only=self.fetch_cloud_only)
         self._tick()
 
     def _first_shown(self) -> int:
@@ -451,14 +487,14 @@ class BrowsePage(Page):
         elif st.state == "paused":
             text, button = f"Paused: {st.ready:,} of {st.total:,} pictures ready", "Resume"
         elif st.state == "finished":
-            text, colour, button = f"All {st.total:,} pictures are at hand", PALETTE["ok"], "Check again"
+            text, colour = f"All {st.total:,} pictures are at hand", PALETTE["ok"]
             if st.skipped:
                 text += f" ({st.skipped:,} left alone: cloud-only or too large)"
             if st.failed:
                 text += f" · {st.failed:,} could not be read"
                 colour = PALETTE["warn"]
         elif st.state == "stopped":
-            text, colour, button = f"Stopped: {st.reason}", PALETTE["warn"], "Fetch again"
+            text, colour, button = f"Stopped: {st.reason}", PALETTE["warn"], "Try again"
         elif self.listing is not None and any(i.tile is not None and i.tile.picture_key for i in self.items):
             text, button = "Pictures are fetched as you scroll", "Fetch all pictures"
         self.fetch_label.configure(text=text, fg=colour)
@@ -554,7 +590,7 @@ class BrowsePage(Page):
                 self.ctx.thumbs.forget_reason(tile)
                 self.painter.fetch_online_only = True
                 self.view.redraw_all()
-                self.painter.fetch_online_only = bool(self.cloud.get())
+                self.painter.fetch_online_only = self.fetch_cloud_only
 
         actions.context_menu(self.ctx, tile, event.x_root, event.y_root, None, fetch)
 

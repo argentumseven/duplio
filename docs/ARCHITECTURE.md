@@ -235,6 +235,11 @@ must ask a question (a password) goes through `Context.call_in_ui`.
   and always leaves room for its border, because wrapping at the full width makes the label ask for more than it has and the
   window keeps growing. `tests/test_gui_flows.py: test_no_button_label_or_box_is_ever_cut_off` walks every screen at three window
   widths and fails if any label or button needs more room than it was given.
+- `places.py` knows where a person can start from (folders, the top of every drive, phones) with no window code. Looking for
+  phones can take seconds (the Android bridge starting, a stale phone mount stalling a listing), so `PlacesService` scans on a
+  worker thread and `snapshot()` answers at once from the last scan. `dialogs.py` follows the same rule: no dialog searches or
+  reads a drive on the window's thread, and every dialog's close button, Esc and Cancel all work (`_modal` takes the close
+  action; an earlier version switched the close button off, which left a stuck dialog impossible to dismiss).
 - `palette.py` holds the colours in two themes, chosen once at start (`DUPLIO_THEME`, or the choice saved by Settings); the
   pixel mark is `assets/logo_data.py` with its own transparency, blended onto whatever it is shown on.
 - A Python without Tk is detected before anything is imported (`gui/__init__.py: tk_problem`), and `duplio` falls back to the text screen.

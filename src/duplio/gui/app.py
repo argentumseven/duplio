@@ -18,6 +18,7 @@ from duplio.gui import style
 from duplio.gui.dialogs import ConfirmDialog, MessageDialog, PasswordDialog, ProgressDialog
 from duplio.gui.jobs import Job, explain
 from duplio.gui.listing import BrowseCache
+from duplio.gui.places import PlacesService
 from duplio.gui.prefetch import FolderPrefetcher
 from duplio.gui.state import GuiState
 from duplio.gui.style import PALETTE, Fonts
@@ -48,6 +49,7 @@ class Context:
     tooltip: Tooltip
     prefetcher: FolderPrefetcher
     browse_cache: BrowseCache
+    places: PlacesService
 
     @property
     def cache(self) -> HashCache | NullCache:
@@ -166,7 +168,8 @@ class DuplioWindow(tk.Tk):
         previews = PreviewService(dirs, settings.previews)
         thumbs = Thumbnailer(self, previews, image_budget=settings.previews.memory_bytes or None)
         self.ctx = Context(self, self.fonts, dirs, settings, registry, previews, thumbs, ListingCache(),
-                           GuiState(dirs.state / "window.json"), Tooltip(self, self.fonts), FolderPrefetcher(previews), BrowseCache())
+                           GuiState(dirs.state / "window.json"), Tooltip(self, self.fonts), FolderPrefetcher(previews), BrowseCache(),
+                           PlacesService())
         registry.credential_provider = self.ctx.password_provider
         self.hash_cache: HashCache | NullCache | None = None
         self.pages: dict[str, Page] = {}
