@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import sqlite3
 import threading
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -90,6 +91,7 @@ class PreviewStats:
     unavailable: int = 0
     bytes_read: int = 0
     skipped_online_only: int = 0
+    not_kept: int = 0  # pictures fetched but not stored (the disk was full or the cache broke); still shown
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def add(self, **counts: int) -> None:
@@ -115,6 +117,7 @@ class PreviewService:
         self._lock = threading.Lock()
         self.stats = PreviewStats()
         self._device_slots: dict[str, threading.BoundedSemaphore] = {}
+        self._inflight: dict[str, threading.Event] = {}  # pictures being fetched right now, by key
         self._queue: deque[PreviewItem] = deque()
         self._generation = 0
         self._wake = threading.Condition()
@@ -140,10 +143,20 @@ class PreviewService:
                 if kind == "persistent":
                     assert self._dirs is not None
                     store = ThumbStore(self._dirs.cache / "previews", max_bytes=self.settings.max_bytes, persistent=True)
-                else:
+                elif kind == "memory":
                     store = ThumbStore(None, max_bytes=min(self.settings.max_bytes, 512 * 1024 * 1024), persistent=False)
+                else:  # session: as large as the setting allows, so a whole big folder stays at hand while it is browsed
+                    store = ThumbStore(None, max_bytes=self.settings.max_bytes, persistent=False)
                 self._stores[kind] = store
             return store
+
+    def apply_settings(self) -> None:
+        """Settings changed (the size limit of the buffer): existing buffers follow it, trimming if they are now over."""
+        with self._lock:
+            stores = dict(self._stores)
+        for kind, store in stores.items():
+            store.max_bytes = min(self.settings.max_bytes, 512 * 1024 * 1024) if kind == "memory" else self.settings.max_bytes
+            store.trim()
 
     def storage_summary(self) -> list[tuple[str, int, int, str]]:
         with self._lock:
@@ -189,18 +202,62 @@ class PreviewService:
             raise Unavailable(
                 "this file is only stored in the cloud; showing it would download it", "online-only"
             )
-        with self._slot(item):
-            cancel.check()
-            try:
-                thumb, read = self._produce(item, ext, cancel, allow_download)
-            except Unavailable:
-                self.stats.add(unavailable=1)
-                raise
+        # One fetch per picture at a time: when the window and the background fetcher want the same picture, the second one
+        # waits for the first and uses what it stored, instead of reading the drive twice.
+        while True:
+            with self._lock:
+                pending = self._inflight.get(item.key)
+                if pending is None:
+                    mine = threading.Event()
+                    self._inflight[item.key] = mine
+                    break
+            while not pending.wait(0.1):
+                cancel.check()
+            cached = self.peek(item)
+            if cached is not None:
+                self.stats.add(hits=1)
+                return cached
+            # the other fetch ended without storing it (it failed, or pictures are not kept): try for ourselves
+        try:
+            with self._slot(item):
+                cancel.check()
+                try:
+                    thumb, read = self._produce(item, ext, cancel, allow_download)
+                except Unavailable:
+                    self.stats.add(unavailable=1)
+                    raise
+            store = self._store(item.caps)
+            if store is not None:
+                try:
+                    store.put(item.key, drive_tag(item.backend.id), thumb)
+                except (OSError, sqlite3.Error):
+                    self.stats.add(not_kept=1)  # a full disk or a broken cache must not lose a picture that was just fetched
+            self.stats.add(fetched=1, bytes_read=read)
+            return Preview(thumb, False, read)
+        finally:
+            with self._lock:
+                self._inflight.pop(item.key, None)
+            mine.set()
+
+    # ------------------------------------------------------------------ the buffer (for a folder that is being browsed)
+    def cached(self, item: PreviewItem) -> bool:
+        """Whether the picture is already in the buffer (a cheap check: no picture is read)."""
         store = self._store(item.caps)
-        if store is not None:
-            store.put(item.key, drive_tag(item.backend.id), thumb)
-        self.stats.add(fetched=1, bytes_read=read)
-        return Preview(thumb, False, read)
+        return store is not None and store.has(item.key)
+
+    def buffer_for(self, item: PreviewItem) -> ThumbStore | None:
+        """The buffer that would hold this picture, if pictures from this drive are kept at all."""
+        return self._store(item.caps)
+
+    def pin(self, items: Sequence[PreviewItem]) -> None:
+        """Keep these pictures when the buffer has to make room: they are the folder that is on screen."""
+        by_store: dict[int, tuple[ThumbStore, set[str]]] = {}
+        for item in items:
+            store = self._store(item.caps)
+            if store is not None:
+                by_store.setdefault(id(store), (store, set()))[1].add(item.key)
+        for store in list(self._stores.values()):
+            store.pin(by_store.get(id(store), (store, set()))[1])
 
     def _slot(self, item: PreviewItem):  # type: ignore[no-untyped-def]
         device = item.backend.device_key(item.path)

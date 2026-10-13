@@ -263,6 +263,8 @@ def save_settings(settings: Settings, dirs: AppDirs | None = None) -> Path:
         "small_download": previews.small_download,
         "max_download": previews.max_download,
         "online_only": previews.online_only,
+        "memory": previews.memory_bytes,
+        "prefetch_folder": previews.prefetch_folder,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, "# Duplio configuration — see 'duplio config --help'\n\n" + dump_toml(data))
