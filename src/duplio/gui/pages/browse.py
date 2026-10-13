@@ -11,7 +11,6 @@ from __future__ import annotations
 import math
 import os
 import tkinter as tk
-from collections.abc import Sequence
 from functools import partial
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any
@@ -19,13 +18,13 @@ from typing import TYPE_CHECKING, Any
 from duplio.gui import actions
 from duplio.gui.app import Page
 from duplio.gui.dialogs import ConnectDialog
+from duplio.gui.foldertree import FolderTree
 from duplio.gui.jobs import Job, explain
 from duplio.gui.listing import FolderListing, items_of, read_folder
 from duplio.gui.memory import describe
 from duplio.gui.paint import BROWSE_SIZES, Painter
-from duplio.gui.places import Place
 from duplio.gui.sorting import BROWSE_ORDERS, BrowseItem, order_label, order_of, sort_browse
-from duplio.gui.style import PALETTE, shorten
+from duplio.gui.style import PALETTE
 from duplio.gui.widgets import Btn, FlowFrame, VirtualList, autowrap, tag_value
 from duplio.preview.service import PreviewItem
 from duplio.util.fmt import human_size, plural
@@ -67,22 +66,30 @@ class BrowsePage(Page):
 
         body = tk.Frame(self, bg=PALETTE["bg"])
         body.pack(fill="both", expand=True, padx=28, pady=(8, 14))
-        # ---- where we are: back, up, the places to start from, the address, reload
+        # ---- where we are: back, up, the address (typing is optional: the tree on the left is the way around), reload
         bar = tk.Frame(body, bg=PALETTE["bg"])
         bar.pack(fill="x", pady=(4, 6))
         self.back_button = Btn(bar, "◀ Back", self.go_back, fonts=f, padx=10, pady=5)
         self.back_button.pack(side="left")
         self.up_button = Btn(bar, "▲ Up", self.go_up, fonts=f, padx=10, pady=5)
         self.up_button.pack(side="left", padx=(6, 0))
-        self.places_button = Btn(bar, "Places ▾", self._open_places, kind="primary", fonts=f, padx=12, pady=5)
-        self.places_button.pack(side="left", padx=(6, 8))
+        tk.Frame(bar, width=8, bg=PALETTE["bg"]).pack(side="left")
         Btn(bar, "Reload", self.refresh, fonts=f, padx=10, pady=5).pack(side="right", padx=(8, 0))
         self.address = ttk.Entry(bar, font=f.base)
         self.address.pack(side="left", fill="x", expand=True)
         self.address.bind("<Return>", lambda _e: self.open_text(self.address.get()))
         self.address.bind("<FocusIn>", lambda _e: self.after(10, lambda: self.address.select_range(0, "end")))
+        # ---- the folder tree on the left, the folder on the right; the divider can be dragged
+        self.split = tk.PanedWindow(body, orient="horizontal", sashwidth=8, sashrelief="flat", bg=PALETTE["bg"], bd=0, opaqueresize=True,
+                                    sashcursor="sb_h_double_arrow")
+        self.split.pack(fill="both", expand=True)
+        self.folder_tree = FolderTree(self.split, ctx, on_pick=self.open_text, on_connect=self.connect, show_hidden=lambda: self.show_hidden)
+        main = tk.Frame(self.split, bg=PALETTE["bg"])
+        self.split.add(self.folder_tree, minsize=200, width=int(st.get("browse_tree_width", 260)), stretch="never")
+        self.split.add(main, minsize=380, stretch="always")
+        self.split.bind("<ButtonRelease-1>", lambda _e: self._remember_sash())
         # ---- how it is shown (these wrap onto more lines when the window is narrow)
-        tools = FlowFrame(body, PALETTE["bg"], hgap=8, vgap=6)
+        tools = FlowFrame(main, PALETTE["bg"], hgap=8, vgap=6)
         tools.pack(fill="x", pady=(0, 6))
         self.view_box = tools.field("Show", lambda box: ttk.Combobox(box, state="readonly", values=VIEWS, width=11, font=f.small), f.small)
         self.view_box.set(st.get("browse_view", VIEWS[0]))
@@ -98,22 +105,22 @@ class BrowsePage(Page):
         for box in (self.view_box, self.size_box, self.sort_box):
             box.bind("<<ComboboxSelected>>", lambda _e: self._view_changed())
         # ---- what is going on
-        self.summary = tk.Label(body, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w", justify="left")
+        self.summary = tk.Label(main, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w", justify="left")
         self.summary.pack(fill="x")
         autowrap(self.summary, margin=4, minimum=300)
-        status = tk.Frame(body, bg=PALETTE["bg"])
+        status = tk.Frame(main, bg=PALETTE["bg"])
         status.pack(fill="x", pady=(2, 2))
         self.fetch_label = tk.Label(status, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
         self.fetch_label.pack(fill="x")
         autowrap(self.fetch_label, margin=4, minimum=300)
         self.fetch_button = Btn(status, "", self._fetch_clicked, fonts=f, padx=10, pady=3)
-        self.buffer_label = tk.Label(body, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
+        self.buffer_label = tk.Label(main, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
         self.buffer_label.pack(fill="x", pady=(0, 6))
         autowrap(self.buffer_label, margin=4, minimum=300)
         # ---- the folder
-        self.selected_label = tk.Label(body, text="", font=f.mono, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w")
+        self.selected_label = tk.Label(main, text="", font=f.mono, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w")
         self.selected_label.pack(side="bottom", fill="x", pady=(4, 0))
-        holder = tk.Frame(body, bg=PALETTE["line"], padx=1, pady=1)
+        holder = tk.Frame(main, bg=PALETTE["line"], padx=1, pady=1)
         holder.pack(fill="both", expand=True)
         self.view = VirtualList(holder, f, self._draw, on_click=self._click, on_double=self._double, on_context=self._context,
                                 on_hover=self._hover)
@@ -157,6 +164,13 @@ class BrowsePage(Page):
         """Whether pictures of cloud-only files are fetched (and so downloaded); also a Settings choice."""
         return bool(self.ctx.settings.previews.online_only)
 
+    def _remember_sash(self) -> None:
+        try:
+            self.ctx.state.set("browse_tree_width", int(self.split.sash_coord(0)[0]))
+            self.ctx.state.save()
+        except (tk.TclError, ValueError):
+            pass
+
     def _remember_view(self) -> None:
         st = self.ctx.state
         st.set("browse_view", self.view_box.get())
@@ -180,7 +194,7 @@ class BrowsePage(Page):
     # ---- going places ------------------------------------------------------------------------------
     def on_show(self) -> None:
         self._visible = True
-        self.ctx.places.refresh(devices=False)  # the drives are read in the background; phones only when asked for
+        self.ctx.places.refresh()  # drives and phones are looked for in the background; the tree shows them as they turn up
         if self.painter.fetch_online_only != self.fetch_cloud_only or (self.here is not None and self.show_hidden != self._hidden_shown):
             self._settings_changed()
         if self.here is None:
@@ -197,6 +211,7 @@ class BrowsePage(Page):
     def _settings_changed(self) -> None:
         """Settings (hidden files, cloud-only pictures) were changed while this page was away: apply them to the folder on show."""
         self.painter.fetch_online_only = self.fetch_cloud_only
+        self.folder_tree.clear_known()
         if self.here is not None:
             self.navigate(self.here, push=False)
 
@@ -226,51 +241,13 @@ class BrowsePage(Page):
         if picked:
             self.open_text(picked)
 
-    def _places_menu(self) -> tk.Menu:
-        """The menu of everywhere to start from: folders, every drive (down to the very top), phones, and what was open recently."""
-        ctx, f = self.ctx, self.ctx.fonts
-        found = ctx.places.snapshot()
-        menu = tk.Menu(self, tearoff=0, font=f.base, disabledforeground=PALETTE["heading"])
-
-        def section(title: str, places: Sequence[Place], none: str = "") -> None:
-            if menu.index("end") is not None:
-                menu.add_separator()
-            menu.add_command(label=title, state="disabled")
-            for place in places:
-                menu.add_command(label="  " + shorten(place.label, 520, f.base, middle=True), command=partial(self.open_text, place.target))
-            if not places and none:
-                menu.add_command(label="  " + none, state="disabled")
-
-        section("Folders", found.folders)
-        section("Drives", found.drives)
-        section("Phones and devices", found.devices,
-                "looking…" if not found.scanned else "none found")
-        recent = [Place(r, r) for r in ctx.state.recent[:8]]
-        if recent:
-            section("Recent", recent)
-        menu.add_separator()
-        menu.add_command(label="Phone, drive or server…", command=self.connect)
-        return menu
-
-    def _open_places(self, waited: int = 0) -> None:
-        places = self.ctx.places
-        if waited == 0:
-            places.refresh()  # look for phones again in the background; the next time the menu opens it shows what turned up
-        if not places.snapshot().scanned and places.busy and waited < 8:
-            self.after(50, lambda: self._open_places(waited + 1))  # the first time, give the search a moment (at most 0.4 s)
-            return
-        menu = self._places_menu()
-        try:
-            menu.tk_popup(self.places_button.winfo_rootx(), self.places_button.winfo_rooty() + self.places_button.winfo_height())
-        finally:
-            menu.grab_release()
-
     def navigate(self, location: Location, *, push: bool = True, refresh: bool = False) -> None:
         if push and self.here is not None and (self.here.uri != location.uri):
             self.history.append(self.here)
             del self.history[:-100]
         self.here = location
         self.selected = None
+        self.folder_tree.reveal(location)
         self.address.delete(0, "end")
         self.address.insert(0, location.display)
         self.ctx.state.remember(location.display)
@@ -293,6 +270,7 @@ class BrowsePage(Page):
     def refresh(self) -> None:
         if self.here is not None:
             self.ctx.browse_cache.forget(self.here.backend, self.here.path)
+            self.folder_tree.reload(self.here)
             self.navigate(self.here, push=False, refresh=True)
 
     def _set_buttons(self) -> None:
@@ -351,6 +329,7 @@ class BrowsePage(Page):
         if generation != self._generation:
             return
         self.listing = listing
+        self.folder_tree.learn(location, listing.dirs)  # the tree needs no second trip to the drive for these
         self.items = items_of(listing, location)
         pictures = [i.tile.preview_item for i in self.items if i.tile is not None and i.tile.preview_item is not None]
         self.ctx.previews.pin([p for p in pictures if p is not None])  # the buffer keeps this folder's pictures when it must make room
@@ -473,6 +452,7 @@ class BrowsePage(Page):
         if self._tick_after is not None:
             self.after_cancel(self._tick_after)
             self._tick_after = None
+        self.folder_tree.sync_places()
         self._show_progress()
         if self._visible:
             self._tick_after = self.after(300, self._tick)

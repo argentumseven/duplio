@@ -235,6 +235,11 @@ must ask a question (a password) goes through `Context.call_in_ui`.
   and always leaves room for its border, because wrapping at the full width makes the label ask for more than it has and the
   window keeps growing. `tests/test_gui_flows.py: test_no_button_label_or_box_is_ever_cut_off` walks every screen at three window
   widths and fails if any label or button needs more room than it was given.
+- `foldertree.py` is the folder tree of the Browse page. Nodes open lazily: opening one reads its sub-folders on a worker thread
+  (`_load`), results come back through a queue polled with `after`, and the tree never touches a drive on the window's thread.
+  The page tells it where it is (`reveal` opens the path down to that folder from the best matching root and highlights it; a
+  highlight the tree made itself is not mistaken for a click) and what it has already read (`learn`), so a folder is not read
+  twice. Nodes are matched by `(drive id, normalised path)`, so the same folder shown under Home and under a drive is one key.
 - `places.py` knows where a person can start from (folders, the top of every drive, phones) with no window code. Looking for
   phones can take seconds (the Android bridge starting, a stale phone mount stalling a listing), so `PlacesService` scans on a
   worker thread and `snapshot()` answers at once from the last scan. `dialogs.py` follows the same rule: no dialog searches or

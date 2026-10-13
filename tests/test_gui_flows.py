@@ -695,41 +695,6 @@ def test_the_folder_picker_has_the_drives_and_the_top_of_a_drive_can_be_reached(
     picker._cancel()
 
 
-def menu_labels(menu: Any) -> list[str]:
-    return [menu.entrycget(i, "label").strip() for i in range(menu.index("end") + 1) if menu.type(i) == "command"]
-
-
-def press(menu: Any, label: str) -> None:
-    menu.invoke(next(i for i in range(menu.index("end") + 1) if menu.type(i) == "command" and menu.entrycget(i, "label").strip() == label))
-
-
-def test_the_places_menu_offers_every_drive_the_phones_and_what_was_open_recently(tmp_path: Path, window: Any) -> None:
-    from duplio.gui.places import Place, Places
-
-    ctx = window.ctx
-    ctx.state.remember(str(tmp_path))
-    ctx.places.snapshot = lambda: Places((Place("Home", str(tmp_path)),), (Place("Whole computer  (/)", "/"), Place("/mnt/usb", str(tmp_path))),
-                                         (Place("phone: Pixel", str(tmp_path)),), True)  # type: ignore[method-assign]
-    window.show("browse")
-    page = window.pages["browse"]
-    pump(window, timeout=0.3)
-    menu = page._places_menu()
-    labels = menu_labels(menu)
-    assert labels[:2] == ["Folders", "Home"] and "Drives" in labels and "Whole computer  (/)" in labels and "/mnt/usb" in labels
-    assert "Phones and devices" in labels and "phone: Pixel" in labels and "Recent" in labels and str(tmp_path) in labels
-    assert labels[-1] == "Phone, drive or server…"
-    press(menu, "/mnt/usb")
-    wait(window, lambda: page.listing is not None and page.listing.path == str(tmp_path))  # picking a place opens it
-
-
-def test_the_places_menu_says_when_no_phone_was_found(window: Any) -> None:
-    from duplio.gui.places import Place, Places
-
-    window.ctx.places.snapshot = lambda: Places((Place("Home", "/"),), (Place("Whole computer  (/)", "/"),), (), True)  # type: ignore[method-assign]
-    window.show("browse")
-    assert any(label.startswith("none found") for label in menu_labels(window.pages["browse"]._places_menu()))
-
-
 def test_a_wrong_address_is_explained_in_the_page_and_the_way_out_still_works(tmp_path: Path, window: Any) -> None:
     make_pictures(tmp_path / "ok", 2)
     page = open_folder(window, tmp_path / "ok")
@@ -757,6 +722,236 @@ def test_browse_has_only_the_controls_that_matter(window: Any) -> None:
         return found
 
     shown = sorted(b for b in buttons(page) if b)
-    assert shown == sorted(["◀ Back", "▲ Up", "Places ▾", "Reload"])  # the rest lives in the Places menu or in Settings
+    assert shown == sorted(["◀ Back", "▲ Up", "Reload", "+ Phone or server…"])  # the rest lives in the folder tree or in Settings
     for gone in ("folders_first", "only_pictures", "hidden", "cloud", "direction"):
         assert not hasattr(page, gone), gone
+
+
+# --------------------------------------------------------------------------- the folder tree on the Browse page
+def fake_places(window: Any, folders: Any = (), drives: Any = (), devices: Any = (), scanned: bool = True) -> Any:
+    """Make the places service answer with these places (and not go looking), and show them in the folder tree."""
+    from duplio.gui.places import Places
+
+    ctx = window.ctx
+    ctx.places.snapshot = lambda: Places(tuple(folders), tuple(drives), tuple(devices), scanned)  # type: ignore[method-assign]
+    ctx.places.refresh = lambda *_a, **_k: False  # type: ignore[method-assign]
+    window.show("browse")
+    page = window.pages["browse"]
+    pump(window, timeout=0.2)
+    page.folder_tree.sync_places(force=True)
+    return page
+
+
+def roots_of(page: Any, kind: str) -> list[str]:
+    tree = page.folder_tree
+    return [tree.tree.item(i, "text").strip() for i in tree.tree.get_children(tree._sections[kind])]
+
+
+def node_for(page: Any, folder: Path, section: str | None = None) -> str:
+    """The tree node that shows ``folder`` (under one section, if given)."""
+    from duplio.gui.foldertree import key_of
+
+    tree = page.folder_tree
+    key = key_of(window_location(page, folder))
+    for iid in tree._by_key.get(key, []):
+        top = iid
+        while tree.tree.parent(top) and tree.tree.parent(top) not in tree._sections.values():
+            top = tree.tree.parent(top)
+        if section is None or tree.tree.parent(top) == tree._sections[section]:
+            return str(iid)
+    raise AssertionError(f"{folder} is not in the tree")
+
+
+def window_location(page: Any, folder: Path) -> Any:
+    return page.ctx.registry.open(str(folder))
+
+
+def child_names(page: Any, iid: str) -> list[str]:
+    tree = page.folder_tree
+    return [tree.tree.item(c, "text") for c in tree.tree.get_children(iid) if c in tree._loc]
+
+
+def test_the_folder_tree_is_there_from_the_start_with_folders_drives_and_phones(tmp_path: Path, window: Any) -> None:
+    from duplio.gui.places import Place
+
+    page = fake_places(window, folders=[Place("Home", str(tmp_path))], drives=[Place("Whole computer  (/)", "/"), Place("/mnt/usb", str(tmp_path))],
+                       devices=[Place("phone: Pixel", str(tmp_path))])
+    assert page.folder_tree.winfo_ismapped()  # no button to press first
+    assert roots_of(page, "folders") == ["Home"] and roots_of(page, "drives") == ["Whole computer  (/)", "/mnt/usb"]
+    assert roots_of(page, "devices") == ["phone: Pixel", "↻ look again"]
+
+
+def test_the_folder_tree_says_when_it_is_still_looking_and_when_no_phone_was_found(tmp_path: Path, window: Any) -> None:
+    page = fake_places(window, scanned=False)
+    assert "looking…" in roots_of(page, "devices")
+    fake_places(window, scanned=True)
+    assert "none found" in roots_of(page, "devices")
+
+
+def test_opening_a_folder_in_the_tree_lists_its_sub_folders_and_only_those(tmp_path: Path, window: Any) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.places import Place
+
+    for name in ("b folder", "A folder", "c10", "c2"):
+        (tmp_path / name / "inner").mkdir(parents=True)
+    (tmp_path / "a file.txt").write_text("x")
+    (tmp_path / ".hidden").mkdir()
+    window.ctx.settings.skip_hidden = True
+    page = fake_places(window, folders=[Place("Home", str(tmp_path))])
+    home = node_for(page, tmp_path, "folders")
+    page.folder_tree._load(home)
+    wait(window, lambda: page.folder_tree._state[home] == "loaded")
+    assert child_names(page, home) == ["A folder", "b folder", "c2", "c10"]  # no files, no hidden ones, in natural order
+    window.ctx.settings.skip_hidden = False
+    page.folder_tree._load(home, refresh=True)
+    wait(window, lambda: ".hidden" in child_names(page, home))
+
+
+def test_clicking_a_folder_in_the_tree_opens_it_in_the_page(tmp_path: Path, window: Any) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.places import Place
+
+    make_pictures(tmp_path / "Trip" / "Day 1", 3)
+    page = fake_places(window, folders=[Place("Home", str(tmp_path))])
+    home = node_for(page, tmp_path, "folders")
+    page.folder_tree._load(home)
+    wait(window, lambda: page.folder_tree._state[home] == "loaded")
+    trip = next(c for c in page.folder_tree.tree.get_children(home) if page.folder_tree.tree.item(c, "text") == "Trip")
+    page.folder_tree.tree.selection_set(trip)
+    wait(window, lambda: page.listing is not None and page.listing.path == str(tmp_path / "Trip"))
+    assert page.address.get().endswith("Trip")  # nothing was typed
+
+
+def test_the_tree_follows_the_page_down_to_the_folder_and_highlights_it(tmp_path: Path, window: Any) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.foldertree import key_of
+    from duplio.gui.places import Place
+
+    deep = tmp_path / "Photos" / "2024" / "Trip"
+    make_pictures(deep, 2)
+    (tmp_path / "Photos" / "2023").mkdir()
+    page = fake_places(window, folders=[Place("Home", str(tmp_path))])
+    page.open_text(str(deep))
+    tree = page.folder_tree
+    wait(window, lambda: tree.tree.selection() and key_of(tree._loc[tree.tree.selection()[0]]) == key_of(window_location(page, deep)))
+    shown = node_for(page, deep, "folders")
+    assert tree.tree.selection() == (shown,)
+    parent = tree.tree.parent(shown)
+    while parent in tree._loc:  # every folder on the way is open, so the highlighted one is in view
+        assert tree.tree.item(parent, "open")
+        parent = tree.tree.parent(parent)
+    assert "2023" in child_names(page, node_for(page, tmp_path / "Photos", "folders"))  # and its neighbours are listed
+
+
+def test_the_tree_reaches_the_top_of_a_drive_for_a_folder_that_is_under_no_other_place(tmp_path: Path, window: Any) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.foldertree import key_of
+    from duplio.gui.places import Place
+
+    elsewhere = tmp_path / "away" / "deeper"
+    make_pictures(elsewhere, 1)
+    top = Path(elsewhere.anchor)
+    page = fake_places(window, folders=[Place("Home", str(tmp_path / "away" / "other"))], drives=[Place("Whole computer", str(top))])
+    (tmp_path / "away" / "other").mkdir()
+    page.open_text(str(elsewhere))
+    tree = page.folder_tree
+    wait(window, lambda: tree.tree.selection() and key_of(tree._loc[tree.tree.selection()[0]]) == key_of(window_location(page, elsewhere)),
+         timeout=20)
+    assert tree.tree.parent(tree.tree.parent(tree.tree.selection()[0])) != tree._sections["folders"]
+    node_for(page, elsewhere, "drives")  # it is under Drives: the way down from the very top
+
+
+def test_a_folder_that_is_not_in_any_place_is_added_to_recent(tmp_path: Path, window: Any) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.foldertree import key_of
+
+    other = tmp_path / "elsewhere"
+    make_pictures(other, 1)
+    page = fake_places(window)
+    page.open_text(str(other))
+    wait(window, lambda: page.folder_tree.tree.selection() and key_of(page.folder_tree._loc[page.folder_tree.tree.selection()[0]]) == key_of(window_location(page, other)))
+    assert roots_of(page, "recent")[0].endswith("elsewhere")
+
+
+def test_opening_a_slow_folder_in_the_tree_never_freezes_the_window(tmp_path: Path, window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    import threading
+    import time
+
+    from duplio.gui.places import Place
+
+    (tmp_path / "kid").mkdir()
+    page = fake_places(window, folders=[Place("Home", str(tmp_path))])
+    release = threading.Event()
+    real = window.ctx.listings.list
+
+    def slow(backend: Any, path: str, **kw: Any) -> Any:
+        release.wait(10)  # a stalled network drive, or a stale phone mount
+        return real(backend, path, **kw)
+
+    monkeypatch.setattr(window.ctx.listings, "list", slow)
+    home = node_for(page, tmp_path, "folders")
+    began = time.monotonic()
+    page.folder_tree._load(home)
+    pump(window, timeout=0.4)
+    assert time.monotonic() - began < 3 and page.folder_tree._state[home] == "loading"
+    assert "looking" in page.folder_tree.tree.item(home + "~", "text")
+    release.set()
+    wait(window, lambda: page.folder_tree._state[home] == "loaded")
+    assert child_names(page, home) == ["kid"]
+
+
+def test_a_folder_that_cannot_be_read_says_so_in_the_tree_and_can_be_tried_again(tmp_path: Path, window: Any) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.places import Place
+
+    page = fake_places(window, folders=[Place("Gone", str(tmp_path / "gone"))])
+    gone = node_for(page, tmp_path / "gone", "folders")
+    page.folder_tree._load(gone)
+    wait(window, lambda: page.folder_tree._state[gone] == "unloaded" and "cannot read" in page.folder_tree.tree.item(gone + "~", "text"))
+    (tmp_path / "gone" / "now here").mkdir(parents=True)
+    page.folder_tree._load(gone)  # opening it again tries again
+    wait(window, lambda: child_names(page, gone) == ["now here"])
+
+
+def test_the_page_hands_the_tree_what_it_read_so_the_drive_is_not_asked_twice(tmp_path: Path, window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from duplio.gui.foldertree import key_of
+
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.places import Place
+
+    target = tmp_path / "Photos" / "Trip"
+    make_pictures(target / "Day 1", 2)
+    page = fake_places(window, folders=[Place("Home", str(tmp_path))])
+    asked: list[str] = []
+    real = window.ctx.listings.list
+    monkeypatch.setattr(window.ctx.listings, "list", lambda backend, path, **kw: (asked.append(path), real(backend, path, **kw))[1])
+    open_folder(window, target)
+    wait(window, lambda: any(page.folder_tree._by_key.get(key_of(window_location(page, target)), [])))
+    node = node_for(page, target, "folders")
+    wait(window, lambda: page.folder_tree._state[node] == "loaded")
+    assert child_names(page, node) == ["Day 1"] and str(target) not in asked
+
+
+def test_reload_reads_the_sub_folders_again(tmp_path: Path, window: Any) -> None:
+    tmp_path = tmp_path / "base"
+    tmp_path.mkdir()
+    from duplio.gui.places import Place
+
+    make_pictures(tmp_path / "pics", 2)
+    (tmp_path / "pics" / "one").mkdir()
+    page = fake_places(window, folders=[Place("Home", str(tmp_path))])
+    open_folder(window, tmp_path / "pics")
+    node = node_for(page, tmp_path / "pics", "folders")
+    wait(window, lambda: page.folder_tree._state[node] == "loaded" and child_names(page, node) == ["one"])
+    (tmp_path / "pics" / "two").mkdir()
+    page.refresh()
+    wait(window, lambda: child_names(page, node) == ["one", "two"])

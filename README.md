@@ -278,10 +278,14 @@ file that changes gets a new key, so an edited photo is never shown as its old s
 **Browse a folder** in the window is a plain folder viewer for any drive, with the picture handling above behind it: a wall
 of thumbnails (or a list), folders to go into, and one short row of controls:
 
-- **Back**, **Up**, the address (type or paste one and press Enter), **Reload**, and **Places**. *Places* is a menu of
-  everywhere to start from: your folders, **every drive down to its very top** (`/` and what is mounted on it, or each drive
-  letter), plugged-in phones and cards, the places you opened recently, and *Phone, drive or server…* for a NAS, an SFTP,
-  WebDAV, FTP or SMB server. Picking a phone or a server opens it right here.
+- **The folder tree on the left is always there**, so moving through a folder structure is clicking, not typing. It lists
+  your folders, **every drive down to its very top** (`/` and what is mounted on it, or each drive letter), plugged-in phones
+  and cards, and the places you opened recently. Click the arrow to open a folder into its sub-folders, click a name to look
+  inside it. Whatever you open in the picture area (by double-clicking a folder, Up or Back) is opened in the tree and
+  highlighted by itself. Sub-folders are read only when you open a folder, in the background, so a slow drive or a phone that
+  has stopped answering never freezes the window. *+ Phone or server…* (under the tree) connects a phone, a drive or a NAS,
+  SFTP, WebDAV, FTP or SMB server; it then opens right here. Drag the divider to make the tree wider or narrower.
+- **Back**, **Up**, the address (typing one is optional: paste an address and press Enter) and **Reload** are above.
 - *Show* (thumbnails or a list), *Picture size*, *Order* (one choice: "Newest first", "Largest first", "Name, A to Z"…) and a
   *Filter* box. Folders always come first. Whether hidden files are shown and whether cloud-only pictures are fetched are
   Settings choices, not buttons on this page.
