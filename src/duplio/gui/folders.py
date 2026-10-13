@@ -41,6 +41,22 @@ def describe_folder(ctx: Context, text: str) -> tuple[str, str]:
     return f"{caps.label} · reading is {speed}{note}", color
 
 
+def choose_folder(ctx: Context, current: str = "") -> str | None:
+    """Let the person pick a folder (the system's own chooser for a local one, Duplio's browser for a remote one)."""
+    if current and location_kind(current) != "local":
+        return FolderPicker(ctx, current, "Choose a folder").show()
+    start = os.path.expanduser(current) if current and os.path.isdir(os.path.expanduser(current)) else os.path.expanduser("~")
+    return filedialog.askdirectory(parent=ctx.window, initialdir=start, title="Choose a folder", mustexist=True) or None
+
+
+def connect_server(ctx: Context) -> str | None:
+    """A phone, drive or server picked or filled in, then a folder on it; returns the address."""
+    address = ConnectDialog(ctx).show()
+    if not address:
+        return None
+    return FolderPicker(ctx, address, "Choose a folder").show() or address
+
+
 class FolderBox(tk.Frame):
     """One folder: a coloured letter, a path box with recent folders, and the buttons that fill it in."""
 
@@ -50,7 +66,7 @@ class FolderBox(tk.Frame):
         f = ctx.fonts
         head = tk.Frame(self, bg=PALETTE["bg"])
         head.pack(fill="x")
-        badge = tk.Label(head, text="AB"[side], bg=SIDE_COLOR[side], fg="#ffffff", font=f.big, width=2)
+        badge = tk.Label(head, text="AB"[side], bg=SIDE_COLOR[side], fg=PALETTE["ink"], font=f.big, width=2)
         badge.pack(side="left")
         text = tk.Frame(head, bg=PALETTE["bg"])
         text.pack(side="left", padx=10)
@@ -94,21 +110,14 @@ class FolderBox(tk.Frame):
 
     # ---- filling it in ------------------------------------------------------
     def choose(self) -> None:
-        current = self.get()
-        if current and location_kind(current) != "local":
-            picked = FolderPicker(self.ctx, current, "Choose a folder").show()
-        else:
-            start = os.path.expanduser(current) if current and os.path.isdir(os.path.expanduser(current)) else os.path.expanduser("~")
-            picked = filedialog.askdirectory(parent=self.ctx.window, initialdir=start, title="Choose a folder", mustexist=True) or None
+        picked = choose_folder(self.ctx, self.get())
         if picked:
             self.set(picked)
 
     def connect(self) -> None:
-        address = ConnectDialog(self.ctx).show()
-        if not address:
-            return
-        picked = FolderPicker(self.ctx, address, "Choose a folder").show()
-        self.set(picked or address)
+        picked = connect_server(self.ctx)
+        if picked:
+            self.set(picked)
 
 
 class FolderPair(tk.Frame):

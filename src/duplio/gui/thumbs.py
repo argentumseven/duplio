@@ -11,12 +11,14 @@ from __future__ import annotations
 
 import io
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from duplio.events import CancelToken
+from duplio.gui.memory import LOWEST_BUDGET, MIB, available_memory, default_image_budget
 from duplio.gui.model import PICTURE, Tile
 from duplio.preview import render
 from duplio.preview.service import PreviewService, Unavailable
@@ -67,39 +69,102 @@ class _Request:
 
 
 class Thumbnailer:
-    """Asks the preview service for pictures on worker threads and delivers Tk images on the window's thread."""
+    """Asks the preview service for pictures on worker threads and delivers Tk images on the window's thread.
 
-    def __init__(self, master: Any, previews: PreviewService, *, workers: int = 3, keep_images: int = 700) -> None:
+    Memory is bounded three ways. The finished images are kept up to a *byte* budget (the least recently shown go first;
+    an image that goes is made again from the buffer on disk, never fetched from the drive again). If the computer runs
+    short of memory the budget shrinks by itself and comes back when memory does. And the queues are bounded, so scrolling
+    through a huge folder cannot pile up work faster than it can be done."""
+
+    STACK_LIMIT = 6000  # requests waiting for a worker; the oldest (scrolled past long ago) are dropped beyond this
+    FINISHED_LIMIT = 256  # pictures made but not yet turned into images; workers wait beyond this
+    LOW_MEMORY = 400 * MIB  # shrink the image budget when the computer has less than this free ...
+    MEMORY_OK = 800 * MIB  # ... and restore it when it has more than this
+
+    def __init__(self, master: Any, previews: PreviewService, *, workers: int = 3, image_budget: int | None = None,
+                 memory: Callable[[], int | None] = available_memory) -> None:
         self._master = master
         self._previews = previews
         self._cond = threading.Condition()
-        self._stack: list[_Request] = []
+        self._stack: list[_Request] = []  # served newest first
+        self._background: list[_Request] = []  # read-ahead: served when nothing is waiting on the stack, last first
         self._finished: list[tuple[_Request, tuple[bytes, int, int] | None, str, bool]] = []
         self._outstanding = 0  # requests made and not yet delivered or dropped (window thread only)
         self._finished_lock = threading.Lock()
-        self._images: OrderedDict[tuple[str, int], Any] = OrderedDict()
+        self._room = threading.Condition(self._finished_lock)
+        self._images: OrderedDict[tuple[str, int], tuple[Any, int]] = OrderedDict()  # key -> (image, bytes it takes)
+        self._image_bytes = 0
         self._reasons: dict[str, str] = {}
-        self._keep = keep_images
+        self.base_budget = image_budget or default_image_budget()
+        self._budget = self.base_budget
+        self._memory = memory
+        self._last_memory_check = 0.0
+        self.low_memory = False
+        self.dropped = 0  # requests thrown away because too many were waiting
         self._closing = False
         self._pump_scheduled = False
         self._workers = [threading.Thread(target=self._work, name=f"duplio-thumb-{n}", daemon=True) for n in range(workers)]
         for w in self._workers:
             w.start()
 
+    # ---- the budget -----------------------------------------------------
+    @property
+    def budget(self) -> int:
+        return self._budget
+
+    def set_budget(self, nbytes: int | None) -> None:
+        """Choose how much memory finished images may use (``None``: automatic)."""
+        self.base_budget = nbytes or default_image_budget()
+        self._budget = max(LOWEST_BUDGET, self.base_budget // 4) if self.low_memory else self.base_budget
+        self._evict()
+
+    def stats(self) -> dict[str, Any]:
+        return {"images": len(self._images), "bytes": self._image_bytes, "budget": self._budget, "base_budget": self.base_budget,
+                "low_memory": self.low_memory, "dropped": self.dropped}
+
+    def check_memory(self, *, force: bool = False) -> bool:
+        """Shrink the budget when the computer is short of memory, restore it when it is not. Returns ``low_memory``."""
+        now = time.monotonic()
+        if not force and now - self._last_memory_check < 3.0:
+            return self.low_memory
+        self._last_memory_check = now
+        free = self._memory()
+        if free is None:
+            return self.low_memory
+        if not self.low_memory and free < self.LOW_MEMORY:
+            self.low_memory = True
+            self._budget = max(LOWEST_BUDGET, self.base_budget // 4)
+            self._evict()
+        elif self.low_memory and free > self.MEMORY_OK:
+            self.low_memory = False
+            self._budget = self.base_budget
+        return self.low_memory
+
+    def _evict(self) -> None:
+        while self._image_bytes > self._budget and self._images:
+            _key, (_image, cost) = self._images.popitem(last=False)
+            self._image_bytes -= cost
+
+    def clear_images(self) -> None:
+        self._images.clear()
+        self._image_bytes = 0
+
     # ---- asking ---------------------------------------------------------
     def peek(self, tile: Tile, box: int) -> Any | None:
         """The finished image, if there is one (window thread only)."""
-        image = self._images.get((tile.picture_key, box))
-        if image is not None:
-            self._images.move_to_end((tile.picture_key, box))
-        return image
+        found = self._images.get((tile.picture_key, box))
+        if found is None:
+            return None
+        self._images.move_to_end((tile.picture_key, box))
+        return found[0]
 
     def reason(self, tile: Tile) -> str:
         return self._reasons.get(tile.picture_key, "")
 
     def request(self, tile: Tile, box: int, ready: Ready, wanted: Callable[[], bool] | None = None, *,
-                allow_download: bool = False, allow_online_only: bool = False) -> None:
-        """Deliver a picture of ``tile`` through ``ready`` (at once when it is already at hand)."""
+                allow_download: bool = False, allow_online_only: bool = False, background: bool = False) -> None:
+        """Deliver a picture of ``tile`` through ``ready`` (at once when it is already at hand). ``background`` marks
+        read-ahead: it is served only when nothing that is on screen is waiting."""
         if tile.kind != PICTURE:
             ready(tile.picture_key, None, "")
             return
@@ -107,13 +172,19 @@ class Thumbnailer:
         if image is not None:
             ready(tile.picture_key, image, "")
             return
-        if tile.picture_key in self._reasons and not (allow_download or allow_online_only):
-            ready(tile.picture_key, None, self._reasons[tile.picture_key])
+        known = self._reasons.get(tile.picture_key)
+        if known is not None and not (allow_download or (allow_online_only and known == "online-only")):
+            ready(tile.picture_key, None, known)  # asked before and could not be shown: do not ask the drive again
             return
         req = _Request(tile, box, ready, wanted, allow_download, allow_online_only)
         self._outstanding += 1
         with self._cond:
-            self._stack.append(req)
+            queue = self._background if background else self._stack
+            queue.append(req)
+            while len(queue) > self.STACK_LIMIT:
+                queue.pop(0)  # long out of sight by now
+                self._outstanding -= 1
+                self.dropped += 1
             self._cond.notify()
         self._ensure_pump()
 
@@ -124,14 +195,13 @@ class Thumbnailer:
     def _work(self) -> None:
         while True:
             with self._cond:
-                while not self._stack and not self._closing:
+                while not self._stack and not self._background and not self._closing:
                     self._cond.wait()
                 if self._closing:
                     return
-                req = self._stack.pop()  # newest first
+                req = self._stack.pop() if self._stack else self._background.pop()  # newest first; read-ahead only when idle
             if req.wanted is not None and not req.wanted():
-                with self._finished_lock:
-                    self._finished.append((req, None, "", True))  # scrolled out of sight while waiting
+                self._deliver(req, None, "", True)  # scrolled out of sight while waiting
                 continue
             item = req.tile.preview_item
             ppm: tuple[bytes, int, int] | None = None
@@ -149,8 +219,15 @@ class Thumbnailer:
                     reason = f"the picture could not be read ({exc})"
                 except Exception as exc:  # a broken file must never take a worker down
                     reason = f"the picture could not be shown ({type(exc).__name__})"
-            with self._finished_lock:
-                self._finished.append((req, ppm, reason, False))
+            self._deliver(req, ppm, reason, False)
+
+    def _deliver(self, req: _Request, ppm: tuple[bytes, int, int] | None, reason: str, dropped: bool) -> None:
+        """Hand a finished picture to the window's thread. A worker waits here while that thread is far behind, so the pile of
+        finished pictures (each one is pixels) stays bounded."""
+        with self._room:
+            while len(self._finished) >= self.FINISHED_LIMIT and not self._closing:
+                self._room.wait(0.05)
+            self._finished.append((req, ppm, reason, dropped))
 
     # ---- on the window's thread (workers never touch Tk) ---------------------
     def _ensure_pump(self) -> None:
@@ -160,8 +237,10 @@ class Thumbnailer:
 
     def pump(self) -> None:
         self._pump_scheduled = False
-        with self._finished_lock:
+        self.check_memory()
+        with self._room:
             batch, self._finished = self._finished[:24], self._finished[24:]
+            self._room.notify_all()
         for req, ppm, reason, dropped in batch:
             self._outstanding -= 1
             if dropped:
@@ -170,9 +249,13 @@ class Thumbnailer:
             if ppm is not None:
                 image = self._make_image(ppm[0])
                 if image is not None:
-                    self._images[req.cache_key] = image
-                    while len(self._images) > self._keep:
-                        self._images.popitem(last=False)
+                    cost = ppm[1] * ppm[2] * 4 + 512  # Tk keeps four bytes per pixel
+                    old = self._images.pop(req.cache_key, None)
+                    if old is not None:
+                        self._image_bytes -= old[1]
+                    self._images[req.cache_key] = (image, cost)
+                    self._image_bytes += cost
+                    self._evict()
                     self._reasons.pop(req.tile.picture_key, None)
             if image is None:
                 self._reasons[req.tile.picture_key] = reason or "no picture"
@@ -195,4 +278,6 @@ class Thumbnailer:
         with self._cond:
             self._closing = True
             self._cond.notify_all()
-        self._images.clear()  # on the window's thread, while Tk is still there to free them
+        with self._room:
+            self._room.notify_all()
+        self.clear_images()  # on the window's thread, while Tk is still there to free them

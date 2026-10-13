@@ -1,8 +1,4 @@
-"""Colours, fonts and the look of the ttk widgets.
-
-Folder A is blue and folder B is red throughout, the colours of the two figures in Duplio's icon, so a glance at the border
-of a thumbnail says which folder it is in.
-"""
+"""Fonts and the look of the ttk widgets. The colours themselves are in ``palette`` (dark by default, light as an option)."""
 
 from __future__ import annotations
 
@@ -11,11 +7,9 @@ import tkinter
 from tkinter import font as tkfont
 from tkinter import ttk
 
-from duplio.gui.palette import (  # noqa: F401  (re-exported: the colours live in a module that needs no Tk)
-    PALETTE,
-    SIDE_COLOR,
-    SIDE_SOFT,
-)
+from duplio.gui.palette import PALETTE, SIDE_COLOR, SIDE_SOFT
+
+__all__ = ["PALETTE", "SIDE_COLOR", "SIDE_SOFT", "Fonts", "apply_style", "enable_hidpi", "shorten"]  # the colours are re-exported from palette
 
 
 class Fonts:
@@ -65,31 +59,57 @@ def apply_style(root: tkinter.Tk) -> Fonts:
         style.theme_use("clam")  # the one theme that can be coloured on Windows and Linux
     p = PALETTE
     root.configure(background=p["bg"])
-    style.configure(".", background=p["bg"], foreground=p["text"], font=fonts.base)
+    border = {"bordercolor": p["line"], "lightcolor": p["line"], "darkcolor": p["line"]}
+    lit = [("focus", p["primary"])]  # a box that has the keyboard focus gets an amber edge
+    style.configure(".", background=p["bg"], foreground=p["text"], font=fonts.base, troughcolor=p["trough"], focuscolor=p["bg"],
+                    selectbackground=p["primary"], selectforeground=p["on_primary"], insertcolor=p["text"], **border)
     style.configure("TFrame", background=p["bg"])
     style.configure("Panel.TFrame", background=p["panel"])
     style.configure("TLabel", background=p["bg"], foreground=p["text"])
     style.configure("Panel.TLabel", background=p["panel"])
     style.configure("Muted.TLabel", foreground=p["muted"])
-    style.configure("TEntry", fieldbackground="#ffffff", bordercolor=p["line"], lightcolor=p["line"], darkcolor=p["line"], padding=6)
-    style.configure("TCombobox", fieldbackground="#ffffff", bordercolor=p["line"], lightcolor=p["line"], darkcolor=p["line"], padding=6)
-    style.configure("TCheckbutton", background=p["bg"])
-    style.configure("TRadiobutton", background=p["bg"])
+    style.configure("TEntry", fieldbackground=p["field"], foreground=p["text"], padding=6, **border)
+    style.map("TEntry", bordercolor=lit, lightcolor=lit, darkcolor=lit)
+    style.configure("TCombobox", fieldbackground=p["field"], background=p["raised"], foreground=p["text"], arrowcolor=p["text"],
+                    padding=6, **border)
+    style.map("TCombobox", fieldbackground=[("readonly", p["field"])], background=[("active", p["hover_raised"]), ("readonly", p["raised"])],
+              foreground=[("readonly", p["text"]), ("disabled", p["muted"])], selectbackground=[("readonly", p["field"])],
+              selectforeground=[("readonly", p["text"])], arrowcolor=[("disabled", p["muted"])], bordercolor=lit, lightcolor=lit,
+              darkcolor=lit)
     for kind in ("TCheckbutton", "TRadiobutton"):
-        style.map(kind, background=[("active", p["bg"])], indicatorcolor=[("selected", p["a"]), ("!selected", "#ffffff")])
-    style.map("TCombobox", fieldbackground=[("readonly", "#ffffff")], background=[("active", "#e4e8f1"), ("readonly", "#eef0f6")],
-              selectbackground=[("readonly", "#ffffff")], selectforeground=[("readonly", p["text"])])
+        style.configure(kind, background=p["bg"], foreground=p["text"], indicatorbackground=p["field"], indicatorforeground=p["primary"],
+                        upperbordercolor=p["muted"], lowerbordercolor=p["muted"])
+        style.map(kind, background=[("active", p["bg"])], indicatorbackground=[("selected", p["field"]), ("!selected", p["field"])],
+                  foreground=[("disabled", p["muted"])])
     style.configure("Panel.TCheckbutton", background=p["panel"])
     style.configure("Panel.TRadiobutton", background=p["panel"])
-    style.configure("Horizontal.TProgressbar", troughcolor="#dfe3ec", background=p["a"], bordercolor=p["line"],
-                    lightcolor=p["a"], darkcolor=p["a"])
-    style.configure("Treeview", background="#ffffff", fieldbackground="#ffffff", rowheight=int(fonts.base.metrics("linespace") * 1.9),
-                    bordercolor=p["line"])
-    style.configure("Treeview.Heading", font=fonts.bold, background="#eef0f5", relief="flat")
-    style.map("Treeview", background=[("selected", p["a_soft"])], foreground=[("selected", p["text"])])
-    style.configure("TScrollbar", troughcolor=p["bg"], bordercolor=p["bg"], arrowcolor=p["muted"])
-    style.configure("TNotebook", background=p["bg"], bordercolor=p["line"])
-    style.configure("TNotebook.Tab", padding=(14, 6), font=fonts.base)
+    style.configure("Horizontal.TProgressbar", troughcolor=p["trough"], background=p["primary"], bordercolor=p["line"],
+                    lightcolor=p["primary"], darkcolor=p["primary"])
+    style.configure("Treeview", background=p["panel"], fieldbackground=p["panel"], foreground=p["text"],
+                    rowheight=int(fonts.base.metrics("linespace") * 1.9), bordercolor=p["line"])
+    style.configure("Treeview.Heading", font=fonts.bold, background=p["header"], foreground=p["text"], relief="flat")
+    style.map("Treeview", background=[("selected", p["sidebar_active"])], foreground=[("selected", p["text"])])
+    style.map("Treeview.Heading", background=[("active", p["hover_raised"])])
+    style.configure("TScrollbar", troughcolor=p["bg"], background=p["raised"], bordercolor=p["bg"], lightcolor=p["raised"],
+                    darkcolor=p["raised"], arrowcolor=p["muted"])
+    style.map("TScrollbar", background=[("active", p["hover_raised"]), ("pressed", p["line"])])
+    style.configure("TNotebook", background=p["panel"], bordercolor=p["line"])
+    style.configure("TNotebook.Tab", padding=(14, 6), font=fonts.base, background=p["raised"], foreground=p["muted"])
+    style.map("TNotebook.Tab", background=[("selected", p["panel"])], foreground=[("selected", p["text"])])
+    style.configure("TSeparator", background=p["line"])
+    # the pop-up list of a drop-down, menus and the classic widgets in dialogs follow the palette too
+    # classic widgets that do not name their colours get the palette's (a label with no colour would be black on near-black)
+    for pattern, value in (("*Label.foreground", p["text"]), ("*Label.background", p["bg"]), ("*Frame.background", p["bg"]),
+                           ("*Toplevel.background", p["panel"]), ("*Canvas.background", p["panel"]),
+                           ("*TCombobox*Listbox.background", p["field"]), ("*TCombobox*Listbox.foreground", p["text"]),
+                           ("*TCombobox*Listbox.selectBackground", p["primary"]), ("*TCombobox*Listbox.selectForeground", p["on_primary"]),
+                           ("*TCombobox*Listbox.borderWidth", 0), ("*Menu.background", p["panel"]), ("*Menu.foreground", p["text"]),
+                           ("*Menu.activeBackground", p["sidebar_active"]), ("*Menu.activeForeground", p["text"]),
+                           ("*Menu.borderWidth", 1), ("*Menu.relief", "flat"), ("*Menu.activeBorderWidth", 0),
+                           ("*Listbox.background", p["field"]), ("*Listbox.foreground", p["text"]),
+                           ("*Listbox.selectBackground", p["primary"]), ("*Listbox.selectForeground", p["on_primary"]),
+                           ("*Listbox.highlightColor", p["line"]), ("*Listbox.highlightBackground", p["line"])):
+        root.option_add(pattern, value)
     return fonts
 
 

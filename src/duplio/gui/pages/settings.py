@@ -9,8 +9,10 @@ from typing import TYPE_CHECKING
 from duplio.config import save_settings
 from duplio.errors import ConfigError
 from duplio.gui.app import Page
+from duplio.gui.memory import GIB, MIB, default_image_budget, describe
+from duplio.gui.palette import THEME, THEME_NAMES
 from duplio.gui.style import PALETTE
-from duplio.gui.widgets import Btn
+from duplio.gui.widgets import Btn, ScrollFrame
 from duplio.util.fmt import human_size, parse_size
 
 if TYPE_CHECKING:
@@ -25,14 +27,24 @@ class SettingsPage(Page):
         super().__init__(master, ctx)
         f = ctx.fonts
         s = ctx.settings
-        body = tk.Frame(self, bg=PALETTE["bg"])
-        body.pack(fill="both", expand=True, padx=28, pady=(10, 20))
+        scroll = ScrollFrame(self, PALETTE["bg"])
+        scroll.pack(fill="both", expand=True, padx=(28, 12), pady=(10, 14))
+        body = scroll.inner
 
         def heading(text: str) -> None:
             tk.Label(body, text=text, font=f.heading, bg=PALETTE["bg"], anchor="w").pack(fill="x", pady=(14, 4))
 
         def note(text: str) -> None:
-            tk.Label(body, text=text, font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left", wraplength=900).pack(fill="x")
+            tk.Label(body, text=text, font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left", wraplength=760).pack(fill="x")
+
+        heading("Appearance")
+        row = tk.Frame(body, bg=PALETTE["bg"])
+        row.pack(fill="x", pady=6)
+        tk.Label(row, text="Colours", font=f.base, bg=PALETTE["bg"]).pack(side="left")
+        self.theme = ttk.Combobox(row, state="readonly", width=24, font=f.base, values=list(THEME_NAMES.values()))
+        self.theme.set(THEME_NAMES[THEME])
+        self.theme.pack(side="left", padx=10)
+        tk.Label(row, text="takes effect the next time Duplio starts", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
 
         heading("Pictures from slow drives")
         note("Duplio takes the small preview that is already inside a photo and remembers it, so looking at pictures on a phone, "
@@ -51,6 +63,30 @@ class SettingsPage(Page):
                                  values=["slow, remote and cloud drives (recommended)", "every drive", "nothing (always read the drive)"])
         self.mode.current({"auto": 0, "always": 1, "off": 2}[s.previews.mode])
         self.mode.pack(side="left", padx=10)
+        row = tk.Frame(body, bg=PALETTE["bg"])
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text="Picture buffer on disk, up to", font=f.base, bg=PALETTE["bg"]).pack(side="left")
+        self.buffer_sizes = [(512 * MIB, "512 MB"), (GIB, "1 GB"), (2 * GIB, "2 GB"), (4 * GIB, "4 GB"), (8 * GIB, "8 GB"), (16 * GIB, "16 GB")]
+        self.buffer = ttk.Combobox(row, state="readonly", width=10, font=f.base, values=[label for _n, label in self.buffer_sizes])
+        self.buffer.set(next((label for n, label in self.buffer_sizes if n == s.previews.max_bytes), describe(s.previews.max_bytes)))
+        if s.previews.max_bytes not in [n for n, _l in self.buffer_sizes]:
+            self.buffer.configure(values=[describe(s.previews.max_bytes), *[label for _n, label in self.buffer_sizes]])
+        self.buffer.pack(side="left", padx=10)
+        tk.Label(row, text="roughly 1 to 4 MB per hundred pictures", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
+        note("When the buffer is full Duplio says so and stops fetching, instead of throwing away pictures of the folder you are looking at.")
+        row = tk.Frame(body, bg=PALETTE["bg"])
+        row.pack(fill="x", pady=2)
+        tk.Label(row, text="Memory for pictures on screen, up to", font=f.base, bg=PALETTE["bg"]).pack(side="left")
+        self.memory_sizes = [(0, f"Automatic ({describe(default_image_budget())})"), (256 * MIB, "256 MB"), (512 * MIB, "512 MB"), (GIB, "1 GB"),
+                             (2 * GIB, "2 GB"), (4 * GIB, "4 GB")]
+        self.memory = ttk.Combobox(row, state="readonly", width=20, font=f.base, values=[label for _n, label in self.memory_sizes])
+        self.memory.set(next((label for n, label in self.memory_sizes if n == s.previews.memory_bytes), self.memory_sizes[0][1]))
+        self.memory.pack(side="left", padx=10)
+        tk.Label(row, text="shrinks by itself if the computer runs short of memory", font=f.small, bg=PALETTE["bg"],
+                 fg=PALETTE["muted"]).pack(side="left")
+        self.whole_folder = tk.BooleanVar(value=s.previews.prefetch_folder)
+        ttk.Checkbutton(body, text="When I open a folder in Browse, fetch all of its pictures in the background (nearest the part I am looking at first)",
+                        variable=self.whole_folder).pack(anchor="w", pady=2)
         self.cloud = tk.BooleanVar(value=s.previews.online_only)
         ttk.Checkbutton(body, text="Also show pictures of files that are only stored in the cloud (this downloads them)",
                         variable=self.cloud).pack(anchor="w", pady=2)
@@ -103,6 +139,9 @@ class SettingsPage(Page):
             p.keep = "session" if self.keep.current() == 0 else "persistent"
             p.mode = ("auto", "always", "off")[self.mode.current()]
             p.online_only = bool(self.cloud.get())
+            p.max_bytes = next((n for n, label in self.buffer_sizes if label == self.buffer.get()), p.max_bytes)
+            p.memory_bytes = next((n for n, label in self.memory_sizes if label == self.memory.get()), p.memory_bytes)
+            p.prefetch_folder = bool(self.whole_folder.get())
             p.validate()
             s.skip_hidden = bool(self.hidden.get())
             s.cache = bool(self.remember.get())
@@ -115,5 +154,10 @@ class SettingsPage(Page):
             self.ctx.show_error(f"These settings cannot be saved: {exc}")
             return
         self.ctx.previews.settings = p
-        self.saved.configure(text="Saved.")
+        self.ctx.previews.apply_settings()
+        self.ctx.thumbs.set_budget(p.memory_bytes or None)
+        chosen = next((name for name, label in THEME_NAMES.items() if label == self.theme.get()), THEME)
+        self.ctx.state.set("theme", chosen)
+        self.ctx.state.save()
+        self.saved.configure(text="Saved." if chosen == THEME else "Saved. The new colours appear the next time Duplio starts.")
         self.after(3000, lambda: self.saved.configure(text=""))

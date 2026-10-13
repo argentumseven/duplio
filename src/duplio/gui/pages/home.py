@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from duplio.gui.app import Context
 
 CARDS = (
+    ("browse", "Browse a folder", "Look inside any folder, on this computer, a phone, a NAS or a cloud drive, as a wall of pictures. "
+                                  "Pictures are fetched once and kept, so moving around is quick.", PALETTE["primary"]),
     ("compare", "Compare two folders", "Put folder A next to folder B and see what is in one and not the other, with pictures. "
                                        "Renamed files are recognised.", SIDE_COLOR[0]),
     ("backup", "Is it backed up?", "Check that everything on your phone or in a folder has a safe copy in your backup, "
@@ -50,4 +52,4 @@ class HomePage(Page):
                 bind_to(widget, "<Button-1>", partial(ctx.window.show, key))
         for c in range(3):
             grid.columnconfigure(c, weight=1, uniform="cards")
-        grid.rowconfigure(2, weight=1)  # the cards keep their natural height; the spare room goes below them
+        grid.rowconfigure(3, weight=1)  # the cards keep their natural height; the spare room goes below them

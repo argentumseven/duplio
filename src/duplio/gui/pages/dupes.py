@@ -21,6 +21,7 @@ from duplio.gui.model import (
     keep_overrides,
 )
 from duplio.gui.paint import THUMB_SIZES, Painter
+from duplio.gui.sorting import GROUP_FIELDS, choose, label_of, sort_group_rows
 from duplio.gui.style import PALETTE
 from duplio.gui.widgets import Btn, ChipBar, VirtualList, autowrap, tag_value
 from duplio.plan.executor import ApplyOptions, apply_plan
@@ -97,6 +98,15 @@ class DuplicatesPage(Page):
         self.size_box.set(ctx.state.get("thumb_size", "Medium"))
         self.size_box.pack(side="left", padx=(6, 0))
         self.size_box.bind("<<ComboboxSelected>>", lambda _e: self._resize())
+        tk.Label(self.tools, text="   Sort by", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
+        self.sort_box = ttk.Combobox(self.tools, state="readonly", values=[v for _k, v in GROUP_FIELDS], width=17, font=f.small)
+        self.sort_box.set(label_of(GROUP_FIELDS, ctx.state.get("dupes_sort", "default")))
+        self.sort_box.pack(side="left", padx=(6, 4))
+        self.sort_box.bind("<<ComboboxSelected>>", lambda _e: self._resort())
+        self.descending = bool(ctx.state.get("dupes_desc", False))
+        self.direction = Btn(self.tools, "", self._flip, fonts=f, padx=8, pady=3)
+        self.direction.pack(side="left")
+        self._paint_direction()
         self.actions_bar = tk.Frame(self.results, bg=PALETTE["bg"])
         self.actions_bar.pack(side="bottom", fill="x", pady=(10, 0))
         self.remove_button = Btn(self.actions_bar, "", self.remove, kind="danger", fonts=f, padx=18, pady=9)
@@ -202,12 +212,26 @@ class DuplicatesPage(Page):
         self.chip_bar.set_chips(chips, "all")
         self.filter("all")
 
+    def _paint_direction(self) -> None:
+        self.direction.configure(text="▼ Descending" if self.descending else "▲ Ascending")
+
+    def _flip(self) -> None:
+        self.descending = not self.descending
+        self._paint_direction()
+        self._resort()
+
+    def _resort(self) -> None:
+        self.ctx.state.set("dupes_sort", choose(GROUP_FIELDS, self.sort_box.get()))
+        self.ctx.state.set("dupes_desc", self.descending)
+        self.ctx.state.save()
+        self.filter(self.chip_bar.current)
+
     def filter(self, key: str | None) -> None:
         def wanted(row: GroupRow) -> bool:
             roots = row.group.roots()
             return {"all": True, "across": len(roots) > 1, "in-a": roots == {0}, "in-b": roots == {1}}.get(key or "all", True)
 
-        self.shown = [r for r in self.rows if wanted(r)]
+        self.shown = sort_group_rows([r for r in self.rows if wanted(r)], choose(GROUP_FIELDS, self.sort_box.get()), self.descending)
         for n, row in enumerate(self.shown):
             row.index = n
         self.view.set_rows(self._heights(self.view.width), "No duplicates here.")

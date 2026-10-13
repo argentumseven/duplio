@@ -19,6 +19,7 @@ try:
 except ImportError:  # pragma: no cover - depends on the interpreter
     pytest.skip("this Python has no tkinter", allow_module_level=True)
 
+from duplio.gui.sorting import natural_key
 from duplio.util.appdirs import AppDirs
 
 from .guikit import make_demo_folders, pump
@@ -303,3 +304,226 @@ def test_settings_are_saved_and_a_bad_value_is_refused(window: Any, dirs: AppDir
     page.save()
     assert dialogs.errors and "cannot be saved" in dialogs.errors[-1]
     assert load_settings(dirs).min_size == parse_size("2KB")  # the refused value was not written
+
+
+# --------------------------------------------------------------------------- browsing a folder
+def make_pictures(root: Path, count: int) -> None:
+    from .previewkit import photo_with_exif_thumbnail
+
+    for n in range(count):
+        photo_with_exif_thumbnail(root / f"IMG_{n:03d}.jpg", seed=n, padding=1500 + n * 40)
+        os.utime(root / f"IMG_{n:03d}.jpg", (1_600_000_000 + n * 100, 1_600_000_000 + n * 100))
+
+
+def open_folder(window: Any, folder: Path) -> Any:
+    window.show("browse")
+    page = window.pages["browse"]
+    pump(window, timeout=0.3)
+    page.open_text(str(folder))
+    wait(window, lambda: page.listing is not None and page.listing.path == str(folder))
+    return page
+
+
+def prefetch_done(window: Any) -> bool:
+    return window.ctx.prefetcher.status().state in ("finished", "stopped")
+
+
+def test_browse_shows_a_folder_and_fetches_all_its_pictures_into_the_buffer(tmp_path: Path, window: Any) -> None:
+    root = tmp_path / "trip"
+    make_pictures(root / "day 1", 24)
+    (root / "day 1" / "notes.txt").write_text("hi")
+    (root / "maps").mkdir()
+    page = open_folder(window, root / "day 1")
+    wait(window, lambda: prefetch_done(window))
+    status = window.ctx.prefetcher.status()
+    assert status.state == "finished" and status.ready == 24 and status.total == 24
+    assert [i.name for i in page.shown][:3] == ["IMG_000.jpg", "IMG_001.jpg", "IMG_002.jpg"] and len(page.shown) == 25
+    wait(window, lambda: "All 24 pictures are at hand" in page.fetch_label.cget("text"))
+    assert "pictures" in page.buffer_label.cget("text") and "in memory" in page.buffer_label.cget("text")
+    # every picture is at hand without asking the folder again
+    reads = window.ctx.previews.stats.fetched
+    page.view.canvas.yview_moveto(1.0)
+    pump(window, timeout=0.5)
+    page.view.canvas.yview_moveto(0.0)
+    pump(window, timeout=0.5)
+    assert window.ctx.previews.stats.fetched == reads
+    assert any(page.view.canvas.find_withtag("tile:" + page.item_keys[0]))  # the first cell is on the canvas
+
+
+def test_browse_goes_into_folders_up_and_back(tmp_path: Path, window: Any) -> None:
+    make_pictures(tmp_path / "top" / "inner", 3)
+    page = open_folder(window, tmp_path / "top")
+    assert [i.name for i in page.shown] == ["inner"] and page.shown[0].is_dir
+    page._open(page.shown[0])
+    wait(window, lambda: page.listing is not None and page.listing.path.endswith("inner"))
+    assert len(page.shown) == 3 and page.here.display.endswith("inner")
+    page.go_up()
+    wait(window, lambda: page.listing is not None and page.listing.path == str(tmp_path / "top"))
+    page.go_back()  # back to where we were before Up: inside "inner"
+    wait(window, lambda: page.listing is not None and page.listing.path.endswith("inner"))
+    assert page.up_button._enabled and page.back_button._enabled
+
+
+def test_browse_sorts_and_filters_what_is_shown(tmp_path: Path, window: Any) -> None:
+    root = tmp_path / "pics"
+    make_pictures(root, 12)
+    (root / "zzz folder").mkdir()
+    page = open_folder(window, root)
+    assert page.shown[0].name == "zzz folder"  # folders first by default
+    page.sort_box.set("Date modified")
+    page.descending = True
+    page._paint_direction()
+    page._view_changed()
+    assert [i.name for i in page.shown if not i.is_dir][:2] == ["IMG_011.jpg", "IMG_010.jpg"]  # newest first
+    page.sort_box.set("Size")
+    page._view_changed()
+    sizes = [i.size for i in page.shown if not i.is_dir]
+    assert sizes == sorted(sizes, reverse=True)
+    page.folders_first.set(False)
+    page.sort_box.set("Name")
+    page.descending = False
+    page._view_changed()
+    assert page.shown[0].name == "IMG_000.jpg" and page.shown[-1].name == "zzz folder"
+    page.filter_var.set("img_00")
+    pump(window, timeout=0.6)
+    assert [i.name for i in page.shown] == [f"IMG_00{n}.jpg" for n in range(10)]  # a part of a name, any case
+    page.view_box.set("Details")
+    page._view_changed()
+    assert page.details and page.view.count == 10
+    page.only_pictures.set(True)
+    page.filter_var.set("")
+    pump(window, timeout=0.6)
+    assert [i.name for i in page.shown if not i.is_dir] == [f"IMG_{n:03d}.jpg" for n in range(12)]
+    assert sum(1 for i in page.shown if i.is_dir) == 1  # folders stay: they are how you move on
+
+
+def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_away(tmp_path: Path, window: Any) -> None:
+    root = tmp_path / "many"
+    make_pictures(root, 40)
+    window.ctx.settings.previews.max_bytes = 30_000
+    window.ctx.previews.apply_settings()
+    page = open_folder(window, root)
+    wait(window, lambda: prefetch_done(window))
+    status = window.ctx.prefetcher.status()
+    assert status.state == "stopped" and "buffer is full" in status.reason
+    wait(window, lambda: "Stopped" in page.fetch_label.cget("text"))
+    assert "Settings" in page.fetch_label.cget("text") and page.fetch_button.cget("text") == "Fetch again"
+    store = window.ctx.previews.buffer_for(page._preview_items()[0])
+    assert store is not None and store.total_bytes <= 30_000  # and the limit held
+
+
+def test_leaving_the_browser_pauses_the_background_fetch_and_coming_back_resumes_it(tmp_path: Path, window: Any) -> None:
+    root = tmp_path / "pics"
+    make_pictures(root, 60)
+    pre = window.ctx.prefetcher
+    page = open_folder(window, root)
+    pre.pause()  # (make the state certain: a run this small can finish before the page is left)
+    page._resume_after_hide = False
+    pre.resume()
+    window.show("home")
+    state = pre.status().state
+    assert state in ("paused", "finished")
+    if state == "paused":
+        window.show("browse")
+        wait(window, lambda: pre.status().state in ("running", "finished"))
+    wait(window, lambda: prefetch_done(window))
+    assert pre.status().ready == 60
+
+
+def test_the_two_folder_pages_sort_what_they_show(tmp_path: Path, window: Any) -> None:
+    a, b = make_demo_folders(tmp_path)
+    Dialogs(window.ctx)
+    page = page_for(window, "compare", a, b)
+    page.run()
+    wait(window, lambda: page.diff is not None)
+    page.chip_bar.select("only-a")
+    default = [r.left.rel for r in page.pairs.rows]
+    page.pairs.sort_box.set("Name")
+    page.pairs._resort()
+    by_name = [r.left.rel for r in page.pairs.rows]
+    assert by_name == sorted(by_name, key=natural_key) and sorted(by_name) == sorted(default)  # the same files, in name order
+    page.pairs.sort_box.set("Size")
+    page.pairs.descending = True
+    page.pairs._resort()
+    sizes = [r.left.size for r in page.pairs.rows]
+    assert sizes == sorted(sizes, reverse=True)
+    assert page.pairs.selected_tiles() == []  # sorting does not select anything
+    # the choice is remembered
+    assert window.ctx.state.get("pair_sort") == "size" and window.ctx.state.get("pair_desc") is True
+
+
+def test_duplicates_can_be_sorted(tmp_path: Path, window: Any) -> None:
+    a, b = make_demo_folders(tmp_path)
+    page = page_for(window, "dupes", a, b)
+    page.run()
+    wait(window, lambda: page.result is not None)
+    page.sort_box.set("Number of copies")
+    page.descending = True
+    page._resort()
+    counts = [len(r.tiles) for r in page.shown]
+    assert counts == sorted(counts, reverse=True) and len(counts) >= 2
+    page.sort_box.set("Name")
+    page.descending = False
+    page._resort()
+    names = [r.tiles[0].name for r in page.shown]
+    assert names == sorted(names, key=str.casefold)
+
+
+def test_the_colour_theme_is_chosen_in_settings_and_used_from_the_next_start(window: Any, dirs: AppDirs) -> None:
+    import subprocess
+    import sys
+
+    window.show("settings")
+    page = window.pages["settings"]
+    pump(window, timeout=0.2)
+    Dialogs(window.ctx)
+    page.theme.set("Light")
+    page.save()
+    assert "next time" in page.saved.cget("text")
+
+    def theme_in_new_process() -> str:
+        env = {**os.environ, "DUPLIO_HOME": os.environ["DUPLIO_HOME"]}
+        env.pop("DUPLIO_THEME", None)
+        out = subprocess.run([sys.executable, "-c", "from duplio.gui.palette import THEME; print(THEME)"], capture_output=True, text=True,
+                             env=env, check=True)
+        return out.stdout.strip()
+
+    assert theme_in_new_process() == "light"
+    page.theme.set("Dark (the default)")
+    page.save()
+    assert theme_in_new_process() == "dark"
+
+
+def test_browsing_a_remote_folder_reads_each_picture_once_and_only_a_little_of_it(tmp_path: Path, window: Any) -> None:
+    pytest.importorskip("wsgidav")
+    pytest.importorskip("cheroot")
+    from .previewkit import photo_with_exif_thumbnail
+    from .remotekit import DavServer
+
+    with DavServer(tmp_path / "server") as dav:
+        folder = tmp_path / "server" / "holiday"
+        total = 0
+        for n in range(20):
+            photo_with_exif_thumbnail(folder / f"IMG_{n:03d}.jpg", seed=n, padding=300_000)  # big photos with a small preview inside
+            total += (folder / f"IMG_{n:03d}.jpg").stat().st_size
+        window.show("browse")
+        page = window.pages["browse"]
+        pump(window, timeout=0.3)
+        page.open_text(dav.url("holiday"))
+        wait(window, lambda: page.listing is not None and page.listing.path.endswith("holiday") and page.listing.total == 20)
+        wait(window, lambda: prefetch_done(window))
+        assert window.ctx.prefetcher.status().ready == 20
+        pump(window, timeout=0.5)
+        assert dav.app.sent < total * 0.25, f"read {dav.app.sent} of {total} bytes: whole photos were fetched"
+        gets = sum(1 for method, _path in dav.app.requests if method == "GET")
+        assert gets >= 20  # the previews came from the server ...
+        # ... and walking away and coming back does not ask for any picture again
+        page.go_up()
+        wait(window, lambda: page.listing is not None and not page.listing.path.endswith("holiday"))
+        page.go_back()
+        wait(window, lambda: page.listing is not None and page.listing.path.endswith("holiday"))
+        pump(window, timeout=0.8)
+        page.view.canvas.yview_moveto(1.0)
+        pump(window, timeout=0.5)
+        assert sum(1 for method, _path in dav.app.requests if method == "GET") == gets
+        assert page.listing.total == 20

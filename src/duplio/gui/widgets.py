@@ -12,12 +12,12 @@ from typing import Any
 
 from duplio.gui.style import PALETTE, Fonts
 
-BUTTON_COLORS = {
-    "primary": (PALETTE["a"], "#ffffff", "#2459c7"),
-    "danger": (PALETTE["bad"], "#ffffff", "#a8282c"),
-    "success": (PALETTE["ok"], "#ffffff", "#17803f"),
-    "secondary": ("#ffffff", PALETTE["text"], "#eef0f5"),
-    "quiet": (PALETTE["bg"], PALETTE["text"], "#e4e7ef"),
+BUTTON_COLORS = {  # kind: (fill, text, fill when the pointer is over it)
+    "primary": (PALETTE["primary"], PALETTE["on_primary"], PALETTE["primary_hover"]),
+    "danger": (PALETTE["danger_fill"], PALETTE["white"], PALETTE["danger_hover"]),
+    "success": (PALETTE["ok"], PALETTE["ink"], PALETTE["success_hover"]),
+    "secondary": (PALETTE["raised"], PALETTE["text"], PALETTE["hover_raised"]),
+    "quiet": (PALETTE["bg"], PALETTE["text"], PALETTE["hover_quiet"]),
 }
 
 
@@ -78,7 +78,7 @@ class Tooltip:
         win = tk.Toplevel(self._master)
         win.wm_overrideredirect(True)
         win.wm_geometry(f"+{x + 14}+{y + 18}")
-        tk.Label(win, text=text, justify="left", bg="#222839", fg="#ffffff", padx=8, pady=5, font=self._fonts.small,
+        tk.Label(win, text=text, justify="left", bg=PALETTE["tip_bg"], fg=PALETTE["tip_fg"], highlightthickness=1, highlightbackground=PALETTE["line"], padx=8, pady=5, font=self._fonts.small,
                  wraplength=560).pack()
         self._win = win
 
@@ -137,9 +137,9 @@ class ChipBar(tk.Frame):
         for key, chip in self._chips.items():
             color, _title = self._labels[key]
             if key == self.current:
-                chip.configure(bg=color, fg="#ffffff")
+                chip.configure(bg=color, fg=PALETTE["ink"])
             else:
-                chip.configure(bg="#ffffff", fg=color if color != PALETTE["muted"] else PALETTE["text"])
+                chip.configure(bg=PALETTE["panel"], fg=color if color != PALETTE["muted"] else PALETTE["text"])
             chip.configure(highlightbackground=PALETTE["line"])
 
 
@@ -175,6 +175,7 @@ class VirtualList(tk.Frame):
         self._empty: str = ""
         self._width = 1
         self.relayout: Callable[[int], Sequence[int]] | None = None  # new row heights when the width changes
+        self.on_scroll: Callable[[], None] | None = None  # called after the list scrolled or was resized
         self.canvas.bind("<Configure>", self._configure)
         self.canvas.bind("<Button-1>", self._click)
         self.canvas.bind("<Double-Button-1>", self._double)
@@ -287,6 +288,8 @@ class VirtualList(tk.Frame):
     def _on_yscroll(self, first: float, last: float) -> None:
         self.vbar.set(first, last)
         self.refresh()
+        if self.on_scroll is not None:
+            self.on_scroll()
 
     def _configure(self, event: tk.Event) -> None:
         if event.width != self._width:
@@ -344,6 +347,48 @@ class VirtualList(tk.Frame):
     def destroy(self) -> None:
         self._drawn.clear()
         super().destroy()
+
+
+class ScrollFrame(tk.Frame):
+    """A column of widgets that scrolls when it is taller than the window. Put the widgets in ``inner``."""
+
+    def __init__(self, master: tk.Misc, bg: str) -> None:
+        super().__init__(master, bg=bg)
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, borderwidth=0)
+        self.bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.bar.set)
+        self.bar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=bg)
+        self._window = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._window, width=e.width))
+        self.bind("<Enter>", lambda _e: self._grab_wheel(True))
+        self.bind("<Leave>", lambda _e: self._grab_wheel(False))
+
+    def _grab_wheel(self, inside: bool) -> None:
+        for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            if inside:
+                self.bind_all(seq, self._wheel)
+            else:
+                self.unbind_all(seq)
+
+    def _wheel(self, event: tk.Event) -> None:
+        if self.bbox_height() <= self.canvas.winfo_height():
+            return  # it all fits: nothing to scroll
+        if event.num == 4:
+            steps = -3
+        elif event.num == 5:
+            steps = 3
+        elif sys.platform == "darwin":
+            steps = -int(event.delta)
+        else:
+            steps = -int(event.delta / 120) * 3
+        self.canvas.yview_scroll(steps, "units")
+
+    def bbox_height(self) -> int:
+        box = self.canvas.bbox("all")
+        return (box[3] - box[1]) if box else 0
 
 
 def autowrap(label: tk.Label, margin: int = 36, minimum: int = 200) -> None:

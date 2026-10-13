@@ -115,13 +115,15 @@ class PairPage(Page):
 
     def build_actions(self, bar: tk.Frame) -> None:
         f = self.ctx.fonts
-        self.copy_ab = Btn(bar, "", lambda: self.copy(0), kind="success", fonts=f, padx=18, pady=9)
+        buttons = tk.Frame(bar, bg=PALETTE["bg"])
+        buttons.pack(fill="x")
+        self.copy_ab = Btn(buttons, "", lambda: self.copy(0), kind="success", fonts=f, padx=18, pady=9)
         self.copy_ab.pack(side="left")
-        self.copy_ba = Btn(bar, "", lambda: self.copy(1), kind="primary", fonts=f, padx=18, pady=9)
+        self.copy_ba = Btn(buttons, "", lambda: self.copy(1), kind="primary", fonts=f, padx=18, pady=9)
         if self.allow_reverse:
             self.copy_ba.pack(side="left", padx=(10, 0))
-        self.copy_note = tk.Label(bar, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"])
-        self.copy_note.pack(side="left", padx=14)
+        self.copy_note = tk.Label(bar, text="", font=f.mono, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w")
+        self.copy_note.pack(fill="x", pady=(6, 0))
 
     # ---- wording a subclass may change ---------------------------------------------------------------
     def placeholder_text(self) -> str:

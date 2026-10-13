@@ -369,3 +369,49 @@ def test_a_picture_from_an_earlier_scan_never_appears_on_a_file_of_the_next(tmp_
         assert thumbs.peek(t1, 60) == image1 and thumbs.peek(t2, 60) == image2
     finally:
         thumbs.close()
+
+
+# --------------------------------------------------------------------------- the order of what an analysis shows
+def test_the_two_folder_rows_can_be_ordered_by_name_size_date_type_and_folder(folders: tuple[Path, Path]) -> None:
+    from duplio.gui.sorting import sort_pair_rows
+
+    rows = build_pair_rows(diff_of(*folders))
+
+    def shown(field: str, descending: bool = False) -> list[str]:
+        return [(r.left or r.right).rel for r in sort_pair_rows(rows, field, descending)]  # type: ignore[union-attr]
+
+    assert shown("default") == [(r.left or r.right).rel for r in rows]  # type: ignore[union-attr]
+    assert shown("default", True) == shown("default")[::-1]
+    names = shown("name")
+    assert names == sorted(names, key=str.casefold) and shown("name", True) == names[::-1]
+    sizes = [(r.left or r.right).size for r in sort_pair_rows(rows, "size")]  # type: ignore[union-attr]
+    assert sizes == sorted(sizes)
+    stamps = [(r.left or r.right).entry.mtime_ns for r in sort_pair_rows(rows, "modified", True)]  # type: ignore[union-attr]
+    assert stamps == sorted(stamps, reverse=True)
+    kinds = [(r.left or r.right).name.rsplit(".", 1)[-1] for r in sort_pair_rows(rows, "type")]  # type: ignore[union-attr]
+    assert kinds == sorted(kinds)
+    assert sorted(shown("folder")) == sorted(names)  # every row is still there
+    assert sort_pair_rows(rows, "name") == sort_pair_rows(rows, "name")  # the same order every time
+    with pytest.raises(ValueError):
+        sort_pair_rows(rows, "colour")
+
+
+def test_duplicate_groups_can_be_ordered_by_copies_size_name_and_date(folders: tuple[Path, Path]) -> None:
+    from duplio.gui.sorting import sort_group_rows
+
+    a, _b = folders
+    write(a / "big1.bin", rand_bytes(9000, 11), mtime=OLD + 50)
+    write(a / "big2.bin", rand_bytes(9000, 11), mtime=OLD + 90)
+    write(a / "big3.bin", rand_bytes(9000, 11), mtime=OLD + 60)
+    result, roots = duplicates(folders)
+    rows = build_group_rows(result.groups, roots, [])
+    assert len(rows) >= 2
+    copies = [len(r.tiles) for r in sort_group_rows(rows, "copies", True)]
+    assert copies == sorted(copies, reverse=True) and copies[0] == 3
+    sizes = [r.tiles[0].size for r in sort_group_rows(rows, "size")]
+    assert sizes == sorted(sizes)
+    newest = [max(t.entry.mtime_ns for t in r.tiles) for r in sort_group_rows(rows, "modified", True)]
+    assert newest == sorted(newest, reverse=True)
+    names = [r.tiles[0].name for r in sort_group_rows(rows, "name")]
+    assert names == sorted(names, key=str.casefold)
+    assert [r.group.id for r in sort_group_rows(rows, "default")] == [r.group.id for r in rows]

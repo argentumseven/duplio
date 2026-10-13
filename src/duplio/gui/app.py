@@ -12,10 +12,13 @@ from functools import partial
 from typing import Any
 
 from duplio import __version__
+from duplio.assets.logo import TAGLINE, WORDMARK
 from duplio.config import Settings, load_settings
 from duplio.gui import style
 from duplio.gui.dialogs import ConfirmDialog, MessageDialog, PasswordDialog, ProgressDialog
 from duplio.gui.jobs import Job, explain
+from duplio.gui.listing import BrowseCache
+from duplio.gui.prefetch import FolderPrefetcher
 from duplio.gui.state import GuiState
 from duplio.gui.style import PALETTE, Fonts
 from duplio.gui.thumbs import Thumbnailer
@@ -43,6 +46,8 @@ class Context:
     listings: ListingCache
     state: GuiState
     tooltip: Tooltip
+    prefetcher: FolderPrefetcher
+    browse_cache: BrowseCache
 
     @property
     def cache(self) -> HashCache | NullCache:
@@ -105,6 +110,7 @@ class Page(tk.Frame):
         head = tk.Frame(self, bg=PALETTE["bg"])
         head.pack(fill="x", padx=28, pady=(16, 4))
         tk.Label(head, text=self.title, font=ctx.fonts.title, bg=PALETTE["bg"], fg=PALETTE["text"], anchor="w").pack(fill="x")
+        tk.Frame(head, bg=PALETTE["primary"], height=2, width=44).pack(anchor="w", pady=(2, 4))
         if self.subtitle:
             sub = tk.Label(head, text=self.subtitle, font=ctx.fonts.base, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w",
                            justify="left", wraplength=900)
@@ -114,9 +120,13 @@ class Page(tk.Frame):
     def on_show(self) -> None:
         """Called each time the page is brought to the front."""
 
+    def on_hide(self) -> None:
+        """Called when another page is brought to the front."""
+
 
 NAV = (
     ("home", "⌂", "Home"),
+    ("browse", "▦", "Browse a folder"),
     ("compare", "⇆", "Compare two folders"),
     ("backup", "☑", "Is it backed up?"),
     ("dupes", "❐", "Find duplicates"),
@@ -129,6 +139,7 @@ NAV = (
 
 def _page_classes() -> dict[str, type[Page]]:
     from duplio.gui.pages.backedup import BackedUpPage
+    from duplio.gui.pages.browse import BrowsePage
     from duplio.gui.pages.compare import ComparePage
     from duplio.gui.pages.dupes import DuplicatesPage
     from duplio.gui.pages.history import HistoryPage
@@ -137,7 +148,7 @@ def _page_classes() -> dict[str, type[Page]]:
     from duplio.gui.pages.settings import SettingsPage
     from duplio.gui.pages.sync import SyncPage
 
-    return {"home": HomePage, "compare": ComparePage, "backup": BackedUpPage, "dupes": DuplicatesPage, "sync": SyncPage,
+    return {"home": HomePage, "browse": BrowsePage, "compare": ComparePage, "backup": BackedUpPage, "dupes": DuplicatesPage, "sync": SyncPage,
             "import": ImportPage, "history": HistoryPage, "settings": SettingsPage}
 
 
@@ -153,8 +164,9 @@ class DuplioWindow(tk.Tk):
         settings = load_settings(dirs)
         registry = BackendRegistry()
         previews = PreviewService(dirs, settings.previews)
-        self.ctx = Context(self, self.fonts, dirs, settings, registry, previews, Thumbnailer(self, previews), ListingCache(),
-                           GuiState(dirs.state / "window.json"), Tooltip(self, self.fonts))
+        thumbs = Thumbnailer(self, previews, image_budget=settings.previews.memory_bytes or None)
+        self.ctx = Context(self, self.fonts, dirs, settings, registry, previews, thumbs, ListingCache(),
+                           GuiState(dirs.state / "window.json"), Tooltip(self, self.fonts), FolderPrefetcher(previews), BrowseCache())
         registry.credential_provider = self.ctx.password_provider
         self.hash_cache: HashCache | NullCache | None = None
         self.pages: dict[str, Page] = {}
@@ -184,18 +196,24 @@ class DuplioWindow(tk.Tk):
                 self.iconphoto(True, self._logo)
             except tk.TclError:
                 pass
-        tk.Label(side, text="Duplio", font=f.title, bg=PALETTE["sidebar"], fg="#ffffff").pack()
-        tk.Label(side, text="Duplicates in. One survivor out.", font=f.small, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_muted"]).pack(pady=(0, 16))
-        self._nav: dict[str, tk.Label] = {}
+        tk.Label(side, text=WORDMARK, font=f.heading, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack()
+        tk.Label(side, text=TAGLINE.replace(". ", ".\n"), font=f.mono, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_muted"],
+                 justify="center").pack(pady=(2, 18))
+        self._nav: dict[str, tuple[tk.Frame, tk.Frame, tk.Label]] = {}
         for key, glyph, label in NAV:
-            item = tk.Label(side, text=f"  {glyph}   {label}", font=f.base, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"], anchor="w",
-                            padx=14, pady=11, cursor="hand2")
-            item.pack(fill="x")
-            bind_to(item, "<Button-1>", partial(self.show, key))
-            bind_to(item, "<Enter>", partial(self._hover, key, True))
-            bind_to(item, "<Leave>", partial(self._hover, key, False))
-            self._nav[key] = item
-        tk.Label(side, text="Nothing is removed without\nyour OK, and everything\nis undoable.", font=f.small, bg=PALETTE["sidebar"],
+            row = tk.Frame(side, bg=PALETTE["sidebar"], cursor="hand2")
+            row.pack(fill="x")
+            bar = tk.Frame(row, bg=PALETTE["sidebar"], width=3)  # lights up on the page that is open
+            bar.pack(side="left", fill="y")
+            item = tk.Label(row, text=f"  {glyph}   {label}", font=f.base, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"], anchor="w",
+                            padx=12, pady=11, cursor="hand2")
+            item.pack(side="left", fill="x", expand=True)
+            for widget in (row, bar, item):
+                bind_to(widget, "<Button-1>", partial(self.show, key))
+                bind_to(widget, "<Enter>", partial(self._hover, key, True))
+                bind_to(widget, "<Leave>", partial(self._hover, key, False))
+            self._nav[key] = (row, bar, item)
+        tk.Label(side, text="Nothing is removed without\nyour OK, and everything\nis undoable.", font=f.mono, bg=PALETTE["sidebar"],
                  fg=PALETTE["sidebar_muted"], justify="left").pack(side="bottom", anchor="w", padx=20, pady=18)
         self.content = tk.Frame(self, bg=PALETTE["bg"])
         self.content.grid(row=0, column=1, sticky="nsew")
@@ -204,40 +222,44 @@ class DuplioWindow(tk.Tk):
 
     def _make_logo(self) -> tk.PhotoImage | None:
         try:
-            from duplio.assets.logo import GRID
-            from duplio.assets.logo import PALETTE as LOGO
+            from duplio.assets.logo import composite, rgb_of
 
             scale = 3
-            bg = tuple(int(PALETTE["sidebar"][i : i + 2], 16) for i in (1, 3, 5))
+            bg = rgb_of(PALETTE["sidebar"])
             pixels = bytearray()
-            for row in GRID:
+            grid = composite(PALETTE["sidebar"])  # the glow fades into the sidebar's own colour
+            for row in grid:
                 line = bytearray()
-                for ch in row:
-                    if ch == " ":
-                        rgb = bg
-                    else:
-                        color = LOGO[_logo_index(ch)]
-                        rgb = tuple(int(color[i : i + 2], 16) for i in (1, 3, 5))
-                    line += bytes(rgb) * scale
+                for rgb in row:
+                    line += bytes(rgb or bg) * scale
                 pixels += bytes(line) * scale
-            width, height = len(GRID[0]) * scale, len(GRID) * scale
+            width, height = len(grid[0]) * scale, len(grid) * scale
             return tk.PhotoImage(master=self, data=b"P6\n%d %d\n255\n" % (width, height) + bytes(pixels), format="ppm")
         except Exception:
             return None
 
     def _hover(self, key: str, inside: bool) -> None:
         if key != self.current:
-            self._nav[key].configure(bg=PALETTE["sidebar_hover"] if inside else PALETTE["sidebar"])
+            row, bar, item = self._nav[key]
+            color = PALETTE["sidebar_hover"] if inside else PALETTE["sidebar"]
+            for widget in (row, bar, item):
+                widget.configure(bg=color)
 
     # ---- pages ----------------------------------------------------------------
     def show(self, key: str) -> None:
+        previous = self.pages.get(self.current)
+        if previous is not None and self.current != key:
+            previous.on_hide()
         if key not in self.pages:
             self.pages[key] = self._classes[key](self.content, self.ctx)
             self.pages[key].grid(row=0, column=0, sticky="nsew")
         self.pages[key].tkraise()
         self.current = key
-        for name, item in self._nav.items():
-            item.configure(bg=PALETTE["sidebar_active"] if name == key else PALETTE["sidebar"])
+        for name, (row, bar, item) in self._nav.items():
+            active = name == key
+            for widget in (row, item):
+                widget.configure(bg=PALETTE["sidebar_active"] if active else PALETTE["sidebar"])
+            bar.configure(bg=PALETTE["primary"] if active else PALETTE["sidebar"])
         self.pages[key].on_show()
 
     def _drain_ui_calls(self) -> None:
@@ -258,6 +280,7 @@ class DuplioWindow(tk.Tk):
         try:
             self.ctx.state.set("geometry", self.geometry())
             self.ctx.state.save()
+            self.ctx.prefetcher.close()
             self.ctx.thumbs.close()
             self.ctx.previews.close()
             if self.hash_cache is not None:
@@ -275,10 +298,6 @@ class DuplioWindow(tk.Tk):
         except tk.TclError:
             pass
 
-
-def _logo_index(ch: str) -> int:
-    """The logo grid names its palette entries with 0-9 then a-z."""
-    return int(ch, 36)
 
 
 def run(dirs: AppDirs | None = None) -> str | None:

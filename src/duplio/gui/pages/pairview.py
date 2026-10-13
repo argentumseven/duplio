@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 from duplio.gui import actions
 from duplio.gui.model import PairRow, RowKind, Tile
 from duplio.gui.paint import THUMB_SIZES, Painter
+from duplio.gui.sorting import PAIR_FIELDS, choose, label_of, sort_pair_rows
 from duplio.gui.style import PALETTE
 from duplio.gui.widgets import Btn, VirtualList, tag_value
 from duplio.util.fmt import human_size
@@ -29,6 +30,7 @@ class PairView(tk.Frame):
         self.names = names
         self._on_selection = on_selection
         self.rows: list[PairRow] = []
+        self._given: list[PairRow] = []  # the rows as they were handed over, before sorting
         self.selected: set[str] = set()
         self.tiles: dict[str, Tile] = {}
         f = ctx.fonts
@@ -39,11 +41,20 @@ class PairView(tk.Frame):
         self.size_box.set(ctx.state.get("thumb_size", "Medium"))
         self.size_box.pack(side="left", padx=(6, 18))
         self.size_box.bind("<<ComboboxSelected>>", lambda _e: self._resize())
+        tk.Label(bar, text="Sort by", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"]).pack(side="left")
+        self.sort_box = ttk.Combobox(bar, state="readonly", values=[v for _k, v in PAIR_FIELDS], width=16, font=f.small)
+        self.sort_box.set(label_of(PAIR_FIELDS, ctx.state.get("pair_sort", "default")))
+        self.sort_box.pack(side="left", padx=(6, 4))
+        self.sort_box.bind("<<ComboboxSelected>>", lambda _e: self._resort())
+        self.descending = bool(ctx.state.get("pair_desc", False))
+        self.direction = Btn(bar, "", self._flip, fonts=f, padx=8, pady=3)
+        self.direction.pack(side="left", padx=(0, 18))
+        self._paint_direction()
         self.picked = tk.Label(bar, text="", font=f.base, bg=PALETTE["bg"], fg=PALETTE["text"])
         self.picked.pack(side="left")
-        self.select_all_button = Btn(bar, "Select all shown", self.select_shown, fonts=f, padx=10, pady=4)
+        self.select_all_button = Btn(bar, "Select all", self.select_shown, fonts=f, padx=10, pady=4)
         self.select_all_button.pack(side="right")
-        self.clear_button = Btn(bar, "Clear selection", self.clear_selection, fonts=f, padx=10, pady=4)
+        self.clear_button = Btn(bar, "Clear", self.clear_selection, fonts=f, padx=10, pady=4)
         self.clear_button.pack(side="right", padx=(0, 8))
         holder = tk.Frame(self, bg=PALETTE["line"], padx=1, pady=1)
         holder.pack(fill="both", expand=True)
@@ -61,13 +72,35 @@ class PairView(tk.Frame):
         self._last_hover = ""
 
     # ---- content ---------------------------------------------------------------
-    def show_rows(self, rows: Sequence[PairRow], empty_text: str = "Nothing to show here.") -> None:
-        self.rows = list(rows)
+    @property
+    def sort_field(self) -> str:
+        return choose(PAIR_FIELDS, self.sort_box.get())
+
+    def _paint_direction(self) -> None:
+        self.direction.configure(text="▼ Descending" if self.descending else "▲ Ascending")
+
+    def _flip(self) -> None:
+        self.descending = not self.descending
+        self._paint_direction()
+        self._resort()
+
+    def _resort(self) -> None:
+        self.ctx.state.set("pair_sort", self.sort_field)
+        self.ctx.state.set("pair_desc", self.descending)
+        self.ctx.state.save()
+        self.show_rows(self._given, self._empty_text, keep_position=False)
+
+    _empty_text = "Nothing to show here."
+
+    def show_rows(self, rows: Sequence[PairRow], empty_text: str = "Nothing to show here.", *, keep_position: bool = False) -> None:
+        self._given = list(rows)
+        self._empty_text = empty_text
+        self.rows = sort_pair_rows(self._given, self.sort_field, self.descending)
         for n, row in enumerate(self.rows):
             row.index = n
             for tile in row.tiles:
                 self.tiles[tile.key] = tile
-        self.view.set_rows([self.painter.pair_row_height] * len(self.rows), empty_text)
+        self.view.set_rows([self.painter.pair_row_height] * len(self.rows), empty_text, keep_position=keep_position)
         self._update_selection_label()
 
     def reset(self) -> None:
@@ -75,6 +108,7 @@ class PairView(tk.Frame):
         self.selected.clear()
         self.tiles.clear()
         self.rows = []
+        self._given = []
 
     def _draw_row(self, view: VirtualList, index: int, y: int, width: int) -> None:
         self.painter.pair_row(self.rows[index], y, width, self.selected, self.names)
@@ -121,7 +155,7 @@ class PairView(tk.Frame):
             size = sum(t.size for t in tiles)
             self.picked.configure(text=f"{len(tiles):,} selected  ({human_size(size)})")
         else:
-            self.picked.configure(text="Click files to select them" if self.painter.selectable else "")
+            self.picked.configure(text="Click to select" if self.painter.selectable else "")
         if self._on_selection:
             self._on_selection()
 
