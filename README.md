@@ -255,7 +255,7 @@ slow part: a 6 MB photo has to cross the link just to draw a thumbnail. Duplio a
 Which drives count as slow? `duplio drives` shows how every drive was recognised. In the default `auto` mode this is
 network and SMB/SFTP/WebDAV/FTP drives, phones and cameras, USB sticks and spinning disks, and cloud or virtual drives
 (Windows placeholder files, macOS "dataless" files, OneDrive/iCloud/Dropbox/Google Drive/Tresorit-style drives). An
-internal SSD is read directly.
+internal SSD is read directly; a picture that took real work to make there (decoded from the whole file, or a frame of a movie) is kept like any other, while one that costs a glance at the photo's own preview is not.
 
 **Cloud-only files are never fetched unasked.** A file that exists only in the cloud (the drive lists it but has not
 downloaded it) is detected from its file attributes, and previewing it would download it. Duplio waits: `f` in the review

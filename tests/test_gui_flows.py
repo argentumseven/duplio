@@ -580,9 +580,14 @@ def test_no_button_label_or_box_is_ever_cut_off(tmp_path: Path, window: Any, wid
     wait(window, lambda: browse.listing is not None and browse.listing.path == str(tmp_path / "pics"))
     wait(window, lambda: prefetch_done(window))
     check("browse (a folder)")
+    for name in ("IMG_001.jpg", "IMG_004.jpg", "IMG_007.jpg"):  # stars on the pictures, and then the Favorites page with something in it
+        browse._click((f"star:{tile_key_of(browse, name)}",), None)  # type: ignore[arg-type]
+    check("browse (with stars)")
     browse.view_box.set("Details")
     browse._view_changed()
     check("browse (details)")
+    window.show("favorites")
+    check("favorites (three favorites)")
     window.show("history")
     check("history")
     window.show("settings")

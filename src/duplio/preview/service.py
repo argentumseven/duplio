@@ -154,17 +154,21 @@ class PreviewService:
         self._ffmpeg_for: str | None = None  # the setting the path was looked up for
 
     # ------------------------------------------------------------------ stores
-    def _store(self, caps: Capabilities) -> ThumbStore | None:
+    def _stores_for(self, caps: Capabilities) -> list[ThumbStore]:
+        """The buffers that may hold a picture from this drive, in the order to look in them.
+
+        A slow, remote or cloud drive has one: the kept buffer (or, if pictures are not kept between runs, a temporary one).
+        A fast local disk has a temporary one for what is quick to make again (a photo's own small preview), and, if pictures are
+        kept between runs, the kept one for what took real work (a picture decoded from the whole file, a frame of a movie)."""
         mode = self.settings.mode
         if mode == "off":
-            return None
-        slow = caps.read_cost > 0
-        if mode == "auto" and not slow:
-            kind = "memory"  # fast local disk: keep only for this session
-        elif self.settings.keep == "persistent" and self._dirs is not None:
-            kind = "persistent"
-        else:
-            kind = "session"
+            return []
+        keep = self.settings.keep == "persistent" and self._dirs is not None
+        if mode == "auto" and caps.read_cost == 0:
+            return [self._buffer("memory"), *([self._buffer("persistent")] if keep else [])]
+        return [self._buffer("persistent" if keep else "session")]
+
+    def _buffer(self, kind: str) -> ThumbStore:
         with self._lock:
             store = self._stores.get(kind)
             if store is None:
@@ -179,6 +183,13 @@ class PreviewService:
                     store = ThumbStore(None, max_bytes=self.settings.max_bytes, persistent=False)
                 self._stores[kind] = store
             return store
+
+    def _store(self, caps: Capabilities, *, expensive: bool = True) -> ThumbStore | None:
+        """The buffer a new picture goes into (``expensive``: it took real work to make)."""
+        stores = self._stores_for(caps)
+        if not stores:
+            return None
+        return stores[-1] if expensive else stores[0]
 
     def apply_settings(self) -> None:
         """Settings changed (the size limit of the buffer): existing buffers follow it, trimming if they are now over."""
@@ -195,11 +206,11 @@ class PreviewService:
     # ------------------------------------------------------------------ lookup
     def peek(self, item: PreviewItem) -> Preview | None:
         """The cached picture, if any. Never touches the drive."""
-        store = self._store(item.caps)
-        if store is None:
-            return None
-        found = store.get(item.key)
-        return Preview(found, True) if found else None
+        for store in self._stores_for(item.caps):
+            found = store.get(item.key)
+            if found:
+                return Preview(found, True)
+        return None
 
     def pick_source(self, items: Sequence[PreviewItem]) -> PreviewItem:
         """The member of a group of identical files that is cheapest to show a picture of."""
@@ -261,7 +272,7 @@ class PreviewService:
                 except Unavailable:
                     self.stats.add(unavailable=1)
                     raise
-            store = self._store(item.caps)
+            store = self._store(item.caps, expensive=thumb.source != "embedded")
             if store is not None:
                 try:
                     store.put(item.key, drive_tag(item.backend.id), thumb)
@@ -277,22 +288,20 @@ class PreviewService:
     # ------------------------------------------------------------------ the buffer (for a folder that is being browsed)
     def cached(self, item: PreviewItem) -> bool:
         """Whether the picture is already in the buffer (a cheap check: no picture is read)."""
-        store = self._store(item.caps)
-        return store is not None and store.has(item.key)
+        return any(store.has(item.key) for store in self._stores_for(item.caps))
 
     def buffer_for(self, item: PreviewItem) -> ThumbStore | None:
         """The buffer that would hold this picture, if pictures from this drive are kept at all."""
         return self._store(item.caps)
 
     def pin(self, items: Sequence[PreviewItem]) -> None:
-        """Keep these pictures when the buffer has to make room: they are the folder that is on screen."""
-        by_store: dict[int, tuple[ThumbStore, set[str]]] = {}
+        """Keep these pictures when a buffer has to make room: they are the folder that is on screen."""
+        wanted: dict[int, tuple[ThumbStore, set[str]]] = {}
         for item in items:
-            store = self._store(item.caps)
-            if store is not None:
-                by_store.setdefault(id(store), (store, set()))[1].add(item.key)
+            for store in self._stores_for(item.caps):
+                wanted.setdefault(id(store), (store, set()))[1].add(item.key)
         for store in list(self._stores.values()):
-            store.pin(by_store.get(id(store), (store, set()))[1])
+            store.pin(wanted.get(id(store), (store, set()))[1])
 
     @contextlib.contextmanager
     def _slot(self, item: PreviewItem, background: bool = False):  # type: ignore[no-untyped-def]

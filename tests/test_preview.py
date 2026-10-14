@@ -548,3 +548,23 @@ def test_a_photo_with_no_small_preview_is_not_compared_on_a_slow_drive_and_the_u
     assert result.similar == []
     assert backend.bytes_read < 400_000  # the 3 MB files were not pulled down
     assert any("--similar-full-read" in text and "2" in text for text in progress.warnings())
+
+
+def test_on_a_fast_disk_only_pictures_that_took_work_are_kept_between_runs(tmp_path: Path, dirs: AppDirs) -> None:
+    """A photo's own thumbnail costs a glance, so it is kept for this session only; a picture decoded from the whole file, or a frame
+    of a movie, took real work and is kept like the ones from slow drives."""
+    plain = tmp_path / "d" / "plain.jpg"
+    plain.parent.mkdir(parents=True)
+    plain.write_bytes(jpeg_bytes(picture(400, 300, seed=3)))  # no thumbnail inside: it has to be decoded
+    photo_with_exif_thumbnail(tmp_path / "d" / "camera.jpg")
+    backend = CountingBackend(MediaKind.LOCAL)
+    service = PreviewService(dirs)
+    assert service.get(item_for(backend, plain)).thumb.source == "decoded"
+    assert service.get(item_for(backend, tmp_path / "d" / "camera.jpg")).thumb.source == "embedded"
+    kinds = {kind: count for kind, count, _bytes, _path in service.storage_summary()}
+    assert kinds == {"memory": 1, "persistent": 1}
+    service.close()
+    tomorrow = PreviewService(dirs)
+    assert tomorrow.peek(item_for(backend, plain)) is not None  # the picture that took work is still at hand
+    assert tomorrow.peek(item_for(backend, tmp_path / "d" / "camera.jpg")) is None  # the cheap one is simply made again
+    tomorrow.close()
