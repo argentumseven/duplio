@@ -174,8 +174,8 @@ file (a clash is kept under a new name), every copy is read back and compared, r
 the void, and *History & undo* reverses a whole action.
 
 **Pictures.** The thumbnail is the small preview already inside each photo (or Duplio's own decoder of it), so a phone or a
-NAS is not made to send whole photos. Pictures from slow drives are remembered while the window is open (or longer, in
-*Settings*); a file that exists only in the cloud shows a cloud symbol and is not downloaded unless you right-click it and
+NAS is not made to send whole photos. Pictures from USB, network, phone and cloud drives are remembered (between runs by default; the computer's own disk keeps none, and
+Ctrl+Shift+Delete purges them); a file that exists only in the cloud shows a cloud symbol and is not downloaded unless you right-click it and
 ask. Double-click a picture to open the file; right-click for *Show in its folder*, *Copy its address* and more. Pillow
 makes the thumbnails faster when it is installed, but is not required.
 
@@ -252,20 +252,23 @@ slow part: a 6 MB photo has to cross the link just to draw a thumbnail. Duplio a
 5. **Identical copies are one picture.** For a group of identical files, the picture comes from the cheapest copy: one
    already cached, then one that is not cloud-only, then the faster drive, then the smaller file.
 
-Which drives count as slow? `duplio drives` shows how every drive was recognised. In the default `auto` mode this is
-network and SMB/SFTP/WebDAV/FTP drives, phones and cameras, USB sticks and spinning disks, and cloud or virtual drives
-(Windows placeholder files, macOS "dataless" files, OneDrive/iCloud/Dropbox/Google Drive/Tresorit-style drives). An
-internal SSD is read directly; a picture that took real work to make there (decoded from the whole file, or a frame of a movie) is kept like any other, while one that costs a glance at the photo's own preview is not.
+Which drives are kept on disk? `duplio drives` shows how every drive was recognised. In the default `auto` mode pictures
+are kept on disk only for storage that is **not the computer's own disk**: network and SMB/SFTP/WebDAV/FTP drives, phones
+and cameras, USB sticks, USB hard disks and cards (Windows reports a USB hard disk as a fixed disk, so Duplio asks which
+bus it hangs on), optical media, and cloud or virtual drives (Windows placeholder files, macOS "dataless" files,
+OneDrive/iCloud/Dropbox/Google Drive/Tresorit-style drives). The internal SSD or hard disk is read directly each time and
+nothing is written for it: the window still holds the finished pictures of the folder on screen in memory. *Keep pictures
+on disk for → every drive* (`--mode always`) widens that to the internal disk too.
 
 **Cloud-only files are never fetched unasked.** A file that exists only in the cloud (the drive lists it but has not
 downloaded it) is detected from its file attributes, and previewing it would download it. Duplio waits: `f` in the review
 screen, `--online-only`, or `duplio previews settings --online-only` allow it.
 
-**What is kept, and for how long.** In the window, pictures from slow, remote and cloud drives are kept **between runs**, in
-Duplio's cache folder, so coming back to a folder tomorrow (or after closing the program) costs nothing. A picture nobody has
-looked at for 60 days is let go (Settings, or `--keep-days`). The buffer may grow to 16 GB, which is only a ceiling: nothing is
-reserved, and when it is reached the pictures nobody has looked at for the longest go first, never the folder you are
-looking at. The pictures are stored **unencrypted**: a zero-knowledge drive such as Tresorit keeps your files encrypted so
+**What is kept, and for how long.** In the window, pictures from USB, network, phone and cloud drives are kept **between
+runs**, in Duplio's cache folder, so coming back to a folder tomorrow (or after closing the program) costs nothing. A picture
+nobody has looked at for 60 days is let go (Settings, or `--keep-days`). The buffer on disk may grow to 4 GB by default (the
+sizes in Settings run from 1 GB to 128 GB), which is only a ceiling: nothing is reserved, and when it is reached the pictures
+nobody has looked at for the longest go first, never the folder you are looking at. The pictures are stored **unencrypted**: a zero-knowledge drive such as Tresorit keeps your files encrypted so
 that only your devices see them, and a thumbnail cache on disk is a plain copy of a small part of them. If that matters to
 you, choose *until Duplio closes* in Settings (or `--keep session`), and the pictures live in a private temporary folder
 that is deleted on exit.
@@ -273,12 +276,17 @@ that is deleted on exit.
 ```bash
 duplio previews settings --keep persistent --max-size 32GB --keep-days 90   # stored UNENCRYPTED in Duplio's cache folder
 duplio previews stats                                       # how big is it?
-duplio previews clear                                       # delete every saved picture
+duplio previews clear                                       # delete every saved picture (the window: see "Purging" below)
 duplio previews warm sftp://me@nas/photos/trip              # fetch a folder's pictures in advance (or overnight)
 ```
 
 The saved index holds no file names (entries are looked up by a hash of the drive, path, size and modification time), and a
 file that changes gets a new key, so an edited photo is never shown as its old self.
+
+**Purging.** In the window, deleting every kept picture is a key combination, not a button, so it cannot be done by a stray
+click: **Ctrl+Shift+Delete** (**Cmd+Shift+Delete** on a Mac), shown in the key bar along the bottom of every page as
+*Purge pictures*. It asks first, saying how many pictures and how much room they take, then deletes only those small copies
+(never your files). The background fetch does not start again by itself. Settings shows how many pictures are kept.
 
 ### Browsing a folder, and the picture buffer
 
@@ -302,7 +310,9 @@ Open it on a Tresorit, NAS, phone or SFTP folder and move around freely:
 
 - The folder is read in one trip (a WebDAV PROPFIND, an FTP MLSD, an SFTP readdir carry every size and time), and listings
   of slow drives are remembered for five minutes, so Back and Up are instant. *Reload* asks the drive again.
-- Its pictures are fetched in the background into a buffer on disk, **in order, starting at the part you are looking at**:
+- Its pictures (for a folder on a USB, network, phone or cloud drive; a folder on the computer's own disk is quick to read
+  and has no buffer on disk, so nothing is fetched ahead) are fetched in the background into a buffer on disk, **in order,
+  starting at the part you are looking at**:
   on to the end of the folder, and then back to the pictures before it. Scroll or jump to another part and the fetching
   carries on from there instead, doubling back to what it left behind when it is done. A folder of three thousand photos fills
   in a few seconds from a local disk; from a remote one it takes as long as the drive needs, and each picture costs the few
@@ -310,8 +320,10 @@ Open it on a Tresorit, NAS, phone or SFTP folder and move around freely:
   behind this: the background fetch always leaves one read of the drive free.
 - What is on screen is shown from the buffer. If memory runs short the pictures held in memory shrink (never below 48 MB),
   and any that were let go are made again from the buffer, **never fetched from the drive again**.
-- **Failsafes.** The buffer has a size limit (Settings, 16 GB by default, roughly 1 to 4 MB per hundred pictures) and the picture
-  memory has its own (Automatic: an eighth of the computer's memory, between 192 MB and 1 GB). When the buffer is full, the
+- **Failsafes.** The buffer on disk has a size limit (Settings, 4 GB by default, roughly 1 to 4 MB per hundred pictures) and the
+  picture memory has its own (Automatic: an eighth of the computer's memory, between 192 MB and 1 GB; Settings offers up to 4 GB).
+  Both choices take effect the moment they are made, and the *Buffer* line under the pictures shows the memory limit in use; if
+  the computer runs short of memory the limit is cut to a quarter and the line says what you chose and why it is less. When the buffer is full, the
   pictures of other folders that nobody has looked at for the longest are let go to make room; the pictures of the open folder
   are the last it lets go, and when **this folder alone** fills the buffer, fetching **stops and says so** instead of evicting
   its own pictures only to fetch them again. Fetching also stops, saying why, when the disk the buffer
@@ -320,8 +332,8 @@ Open it on a Tresorit, NAS, phone or SFTP folder and move around freely:
   just fetched or stops the window: the index is simply started again.
 - Cloud-only files are still not downloaded unless you switch on *Fetch pictures of cloud-only files too* in Settings. Some cloud drives
   download the whole file even for a small read; Duplio reads each file once and keeps the picture, so it happens once.
-- The pictures are kept **between runs** by default (Settings → *Remember pictures*), unencrypted, and forgotten after 60
-  days unused; see "What is kept, and for how long" above.
+- The pictures from USB, network, phone and cloud drives are kept **between runs** by default (Settings → *Remember
+  pictures*), unencrypted, and forgotten after 60 days unused; see "What is kept, and for how long" above.
 
 **A picture is only a picture.** Previews are for your eyes. They are never used to decide that files are identical, which
 files to remove, or whether a copy is safe: those decisions always come from re-reading the real files (see
@@ -900,11 +912,11 @@ exclude = ["*.tmp"]
 protect = ["**/Lightroom/**"]
 skip_hidden = false
 
-[previews]               # pictures from slow, remote and cloud drives (see "Pictures on slow drives")
-mode = "auto"            # auto: slow/remote/cloud drives · always · off
+[previews]               # pictures from drives that are not the computer's own disk (see "Pictures on slow drives")
+mode = "auto"            # auto: USB, network, phone and cloud drives · always: every drive · off
 keep = "persistent"      # persistent: kept (UNENCRYPTED) between runs · session: gone when Duplio closes
 keep_days = 60           # a kept picture nobody looked at for this long is let go (0: never)
-max_size = "16GB"        # ceiling of the picture buffer on disk (nothing is reserved)
+max_size = "4GB"         # ceiling of the picture buffer on disk (nothing is reserved)
 size_px = 256            # longest side of a stored picture
 prefetch = 12            # pictures fetched ahead of the one on screen
 small_download = "1MB"   # a picture this small may be read whole on a slow drive without asking

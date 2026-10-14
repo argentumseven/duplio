@@ -29,7 +29,17 @@ def photos(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_one_picture_serves_a_group_and_the_next_groups_are_fetched_ahead(photos: Path) -> None:
+@pytest.fixture
+def usb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The folders of the test count as being on a USB drive: pictures from the computer's own disk are not kept."""
+    from duplio.vfs.base import Capabilities, MediaKind
+    from duplio.vfs.local import LocalBackend
+
+    monkeypatch.setattr(LocalBackend, "capabilities", lambda self, path: Capabilities(kind=MediaKind.REMOVABLE, label="USB drive",
+                                                                                      max_parallel_reads=2))
+
+
+def test_one_picture_serves_a_group_and_the_next_groups_are_fetched_ahead(photos: Path, usb: None) -> None:
     async def flow(app, pilot):  # type: ignore[no-untyped-def]
         await pilot.press("1")
         await pilot.pause()

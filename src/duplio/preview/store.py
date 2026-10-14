@@ -283,6 +283,11 @@ class ThumbStore:
         for key, fmt in rows:
             with contextlib.suppress(OSError):
                 self._file(key, fmt).unlink()
+        if drive is None:  # everything: also sweep up files no entry knows about (left by a stop in the middle of an earlier clear)
+            with contextlib.suppress(OSError):
+                for child in self.root.iterdir():
+                    if child.is_dir() and len(child.name) == 2:
+                        shutil.rmtree(child, ignore_errors=True)
         return len(rows)
 
     def stats(self) -> StoreStats:

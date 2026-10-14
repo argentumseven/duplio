@@ -114,8 +114,11 @@ The review screens and `duplio preview` show pictures without paying for them tw
   byte-budgeted reader, so a hostile file cannot make it read without limit.
 - `jpeg.py` and `png.py` decode and encode thumbnails in pure Python (baseline JPEG matches Pillow within rounding), so the
   picture pane needs nothing installed. `render.py` turns a picture into half-block characters, applying EXIF orientation.
-- `store.py` keeps pictures: a session store in a temporary folder (default) or a persistent one in the cache folder, indexed in
-  SQLite by a hash of drive, path, size and modification time, with no file names, trimmed least-recently-used to a size cap.
+- `store.py` keeps pictures: a session store in a temporary folder or a persistent one in the cache folder, indexed in
+  SQLite by a hash of drive, path, size and modification time, with no file names, trimmed least-recently-used to a size cap
+  (4 GiB by default). `PreviewService` has at most one store and uses it only for drives that are not the computer's own disk
+  (`Capabilities.internal` is false: USB, network, phone, cloud, optical); on an internal disk nothing is written (mode
+  `always` overrides that). The window's key chord Ctrl+Shift+Delete (`DuplioWindow.purge_pictures`) clears the store, asking first.
 - `service.py` is the cheapest-first ladder: cache, then a ranged read of the photo's own thumbnail, then a bounded whole read
   only when the file is small or the caller asked, otherwise `Unavailable` with a reason. It also chooses the cheapest member of
   a group of identical files (`pick_source`) and prefetches the next groups in the background (two workers, a per-drive

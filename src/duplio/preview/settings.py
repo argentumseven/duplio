@@ -14,10 +14,10 @@ KEEP = ("session", "persistent")
 
 @dataclass
 class PreviewSettings:
-    mode: str = "auto"  # auto: cache pictures from slow, remote and cloud drives · always: everywhere · off: never
+    mode: str = "auto"  # auto: keep pictures from drives that are not the computer's own disk · always: every drive · off: never
     keep: str = "persistent"  # session: deleted when Duplio closes · persistent: kept in the cache folder between runs
     keep_days: int = 60  # a kept picture nobody has looked at for this long is let go (0: never)
-    max_bytes: int = 16 * 1024 * 1024 * 1024  # size limit of the buffer; it is a ceiling, nothing is reserved
+    max_bytes: int = 4 * 1024 * 1024 * 1024  # size limit of the buffer on disk; it is a ceiling, nothing is reserved
     size_px: int = 256  # longest side of a stored thumbnail, in pixels
     prefetch: int = 12  # how many pictures ahead of the one on screen are fetched in the background
     small_download: int = 1024 * 1024  # a picture up to this size may be read whole on a slow drive without asking

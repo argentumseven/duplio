@@ -259,8 +259,10 @@ class CountingBackend(LocalBackend):
         self.reads = 0
         self._guard = threading.Lock()
 
+    virtual = False
+
     def capabilities(self, path: str) -> Capabilities:
-        return Capabilities(kind=self.kind, label="Test drive", max_parallel_reads=2)
+        return Capabilities(kind=self.kind, label="Test drive", max_parallel_reads=2, virtual=self.virtual)
 
     def read_range(self, path: str, offset: int, length: int) -> bytes:
         data = super().read_range(path, offset, length)
@@ -550,21 +552,82 @@ def test_a_photo_with_no_small_preview_is_not_compared_on_a_slow_drive_and_the_u
     assert any("--similar-full-read" in text and "2" in text for text in progress.warnings())
 
 
-def test_on_a_fast_disk_only_pictures_that_took_work_are_kept_between_runs(tmp_path: Path, dirs: AppDirs) -> None:
-    """A photo's own thumbnail costs a glance, so it is kept for this session only; a picture decoded from the whole file, or a frame
-    of a movie, took real work and is kept like the ones from slow drives."""
+def test_nothing_is_kept_on_disk_for_the_computers_own_disk(tmp_path: Path, dirs: AppDirs) -> None:
+    """A picture on the internal disk (SSD or hard disk) is quick to make again: no buffer is created or written for it."""
     plain = tmp_path / "d" / "plain.jpg"
     plain.parent.mkdir(parents=True)
     plain.write_bytes(jpeg_bytes(picture(400, 300, seed=3)))  # no thumbnail inside: it has to be decoded
     photo_with_exif_thumbnail(tmp_path / "d" / "camera.jpg")
-    backend = CountingBackend(MediaKind.LOCAL)
+    for kind in (MediaKind.LOCAL, MediaKind.ROTATIONAL):
+        backend = CountingBackend(kind)
+        service = PreviewService(dirs)
+        for name in ("plain.jpg", "camera.jpg"):
+            item = item_for(backend, tmp_path / "d" / name)
+            assert service.get(item).from_cache is False
+            assert service.get(item).from_cache is False  # made again, not read from a buffer
+            assert service.buffer_for(item) is None and not service.cached(item)
+        assert service.stats.hits == 0 and service.stats.fetched == 4
+        assert service.storage_summary() == [] and service.stored() == (0, 0)
+        service.close()
+    assert not (dirs.cache / "previews").exists()
+
+
+@pytest.mark.parametrize("kind", [MediaKind.REMOVABLE, MediaKind.NETWORK, MediaKind.DEVICE, MediaKind.READONLY])
+def test_pictures_from_usb_network_phone_and_optical_drives_are_kept_between_runs(tmp_path: Path, dirs: AppDirs, kind: MediaKind) -> None:
+    photo_with_exif_thumbnail(tmp_path / "d" / "a.jpg")
+    backend = CountingBackend(kind)
+    item = item_for(backend, tmp_path / "d" / "a.jpg")
     service = PreviewService(dirs)
-    assert service.get(item_for(backend, plain)).thumb.source == "decoded"
-    assert service.get(item_for(backend, tmp_path / "d" / "camera.jpg")).thumb.source == "embedded"
-    kinds = {kind: count for kind, count, _bytes, _path in service.storage_summary()}
-    assert kinds == {"memory": 1, "persistent": 1}
+    service.get(item)
+    assert service.buffer_for(item) is not None and service.stored()[0] == 1
     service.close()
+    reads = backend.bytes_read
     tomorrow = PreviewService(dirs)
-    assert tomorrow.peek(item_for(backend, plain)) is not None  # the picture that took work is still at hand
-    assert tomorrow.peek(item_for(backend, tmp_path / "d" / "camera.jpg")) is None  # the cheap one is simply made again
+    assert tomorrow.stored()[0] == 1  # counted even before anything is looked at this run
+    assert tomorrow.get(item).from_cache and backend.bytes_read == reads
     tomorrow.close()
+
+
+def test_pictures_from_a_cloud_drive_are_kept_even_though_it_looks_like_a_local_disk(tmp_path: Path, dirs: AppDirs) -> None:
+    photo_with_exif_thumbnail(tmp_path / "d" / "a.jpg")
+    backend = CountingBackend(MediaKind.LOCAL)
+    backend.virtual = True  # a Tresorit, Dropbox or OneDrive drive letter
+    item = item_for(backend, tmp_path / "d" / "a.jpg")
+    service = PreviewService(dirs)
+    service.get(item)
+    assert service.buffer_for(item) is not None and service.stored()[0] == 1
+    service.close()
+
+
+def test_the_setting_every_drive_keeps_the_internal_disk_too_and_off_keeps_nothing(tmp_path: Path, dirs: AppDirs) -> None:
+    photo_with_exif_thumbnail(tmp_path / "d" / "a.jpg")
+    backend = CountingBackend(MediaKind.LOCAL)
+    item = item_for(backend, tmp_path / "d" / "a.jpg")
+    everything = PreviewService(dirs, PreviewSettings(mode="always"))
+    assert everything.get(item).from_cache is False and everything.get(item).from_cache is True
+    everything.close()
+    nothing = PreviewService(dirs, PreviewSettings(mode="off"))
+    assert nothing.buffer_for(item_for(CountingBackend(MediaKind.NETWORK), tmp_path / "d" / "a.jpg")) is None
+    nothing.close()
+
+
+def test_the_buffer_on_disk_is_four_gigabytes_unless_chosen_otherwise() -> None:
+    assert PreviewSettings().max_bytes == 4 * 1024**3
+
+
+def test_purging_removes_every_kept_picture_even_a_leftover_no_entry_knows(tmp_path: Path, dirs: AppDirs) -> None:
+    photo_with_exif_thumbnail(tmp_path / "d" / "a.jpg")
+    backend = CountingBackend(MediaKind.NETWORK)
+    item = item_for(backend, tmp_path / "d" / "a.jpg")
+    service = PreviewService(dirs)
+    service.get(item)
+    store = service.buffer_for(item)
+    assert store is not None
+    stray = store.root / "ab" / "left-behind.jpg"
+    stray.parent.mkdir(exist_ok=True)
+    stray.write_bytes(b"x" * 100)
+    assert service.clear() == 1
+    assert service.stored() == (0, 0) and not stray.exists()
+    assert not any(p.is_file() and p.suffix in (".jpg", ".png") for p in store.root.rglob("*"))
+    assert service.get(item).from_cache is False  # asking again fetches again, and keeps again
+    service.close()

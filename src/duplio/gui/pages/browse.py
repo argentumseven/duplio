@@ -39,8 +39,9 @@ VIEWS = ("Thumbnails", "Details")
 class BrowsePage(Page):
     title = "Browse a folder"
     hints = (("Enter", "open"), ("F", "star"), ("Backspace", "up"), ("F5", "reload"))
-    subtitle = ("Look inside any folder, on this computer, a phone, a NAS or a cloud drive. Pictures are fetched once, kept in a "
-                "buffer, and shown from it, so moving around a big remote folder stays quick. Looking changes nothing.")
+    subtitle = ("Look inside any folder, on this computer, a phone, a NAS, a USB drive or a cloud drive. Pictures from the drives that are "
+                "not this computer's own disk are fetched once, kept in a buffer on disk, and shown from it, so moving around a big "
+                "remote folder stays quick. Looking changes nothing.")
 
     def __init__(self, master: tk.Misc, ctx: Context) -> None:
         super().__init__(master, ctx)
@@ -480,7 +481,10 @@ class BrowsePage(Page):
         elif st.state == "stopped":
             text, colour, button = f"Stopped: {st.reason}", PALETTE["warn"], "Try again"
         elif self.listing is not None and any(i.tile is not None and i.tile.picture_key for i in self.items):
-            text, button = "Pictures are fetched as you scroll", "Fetch all pictures"
+            if self._buffer_store() is not None:
+                text, button = "Pictures are fetched as you scroll", "Fetch all pictures"
+            else:
+                text = "Pictures are made as you scroll"
         self.fetch_label.configure(text=text, fg=colour)
         self.fetch_button.configure(text=button)
         if button and not self.fetch_button.winfo_ismapped():
@@ -489,20 +493,27 @@ class BrowsePage(Page):
             self.fetch_button.pack_forget()
         self.buffer_label.configure(text=self._buffer_text(), fg=PALETTE["warn"] if thumbs.low_memory else PALETTE["muted"])
 
-    def _buffer_text(self) -> str:
-        thumbs = self.ctx.thumbs
-        stats = thumbs.stats()
-        disk = ""
+    def _buffer_store(self) -> Any:
+        """The on-disk buffer for this folder's pictures, or ``None`` when they are not kept (a folder on the computer's own disk)."""
         items = self._preview_items()
-        store = self.ctx.previews.buffer_for(items[0]) if items else None
+        return self.ctx.previews.buffer_for(items[0]) if items else None
+
+    def _buffer_text(self) -> str:
+        stats = self.ctx.thumbs.stats()
+        store = self._buffer_store()
         if store is not None:
             disk = f"on disk {store.count:,} pictures, {describe(store.total_bytes)} of {describe(store.max_bytes)}"
             if not store.persistent:
                 disk += " (until Duplio closes; Settings can keep them between runs)"
+        elif self._preview_items():
+            disk = "not kept on disk (this drive is quick to read again)"
+        else:
+            disk = ""
         memory = f"in memory {describe(stats['bytes'])} of {describe(stats['budget'])}"
         text = "Buffer: " + (disk + " · " if disk else "") + memory
         if stats["low_memory"]:
-            text += " · the computer is short of memory, so fewer pictures are held at once"
+            text += (f" (you chose {describe(stats['base_budget'])}; the computer is short of memory, so fewer pictures are held "
+                     "at once)")
         return text
 
     def _fetch_clicked(self) -> None:

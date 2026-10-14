@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import struct
 import subprocess
 import sys
 import threading
@@ -228,8 +229,9 @@ def _classify(entry: MountEntry | None, path: str) -> Capabilities:
     if sys.platform.startswith("linux") and entry.source.startswith("/dev/"):
         rotational, removable = _rotational_for_source(entry.source)
         if removable or entry.mount_point.startswith(("/media/", "/run/media/")):
-            caps = caps.with_(kind=MediaKind.REMOVABLE, label=f"Removable drive ({fstype})", max_parallel_reads=2)
-        if rotational:
+            # A drive that is plugged in stays "removable" even when it spins: one read at a time, but it is not the internal disk
+            caps = caps.with_(kind=MediaKind.REMOVABLE, label=f"Removable drive ({fstype})", max_parallel_reads=1 if rotational else 2)
+        elif rotational:
             caps = caps.with_(
                 kind=MediaKind.ROTATIONAL, label=f"Hard disk ({fstype})", max_parallel_reads=1
             )
@@ -352,6 +354,9 @@ def _windows_caps(path: str) -> Capabilities:  # pragma: no cover - exercised on
         )
     if drive_type == 2:  # DRIVE_REMOVABLE
         return caps.with_(kind=MediaKind.REMOVABLE, label=f"Removable drive ({fstype})", max_parallel_reads=2)
+    if drive_type == 3 and not virtual and _windows_plugged_in(drive[:2]):
+        # Windows calls a USB hard disk "fixed"; the bus it hangs on says it is not the computer's own disk
+        return caps.with_(kind=MediaKind.REMOVABLE, label=f"External drive ({fstype})", max_parallel_reads=1)
     if drive_type == 4:  # DRIVE_REMOTE
         return caps.with_(
             kind=MediaKind.NETWORK,
@@ -424,8 +429,10 @@ def describe_location(path: str, table: MountTable | None = None) -> DriveInfo:
         notes.append("This is a macOS cloud-storage location (File Provider); files marked 'dataless' download when read.")
     if caps.read_cost == 2 and not caps.virtual:
         notes.append("Reading is slow or costs bandwidth here; pictures are cached so they are fetched only once.")
-    if caps.read_cost == 1:
-        notes.append("Reading is slower than an internal disk (USB or spinning disk); pictures are cached.")
+    if caps.read_cost == 1 and caps.internal:
+        notes.append("This computer's own hard disk: reading is slower than an SSD, but no pictures are kept for it.")
+    elif caps.read_cost == 1:
+        notes.append("Reading is slower than an internal disk (USB drive or card); pictures are kept on disk so they are read once.")
     if caps.read_cost == 0:
         notes.append("Fast local storage: nothing special is done.")
     return DriveInfo(path, caps, mount_point, remote, tuple(notes))
@@ -453,6 +460,51 @@ def list_drives(table: MountTable | None = None) -> list[DriveInfo]:
             continue
         out.append(describe_location(entry.mount_point, table))
     return out
+
+
+_PLUGGED_IN_BUSES = frozenset({4, 7, 12, 13})  # STORAGE_BUS_TYPE: IEEE 1394, USB, SD card, MMC
+_BUS_TYPE_OFFSET = 28  # where STORAGE_DEVICE_DESCRIPTOR keeps its BusType
+
+
+def bus_type_of(descriptor: bytes) -> int | None:
+    """The bus a disk hangs on, from the bytes Windows returns for a storage device (``None`` when they are too short)."""
+    if len(descriptor) < _BUS_TYPE_OFFSET + 4:
+        return None
+    return int(struct.unpack_from("<I", descriptor, _BUS_TYPE_OFFSET)[0])
+
+
+def _windows_plugged_in(drive: str) -> bool:  # pragma: no cover - Windows only
+    """Is the disk behind ``drive`` ("D:") attached by USB, FireWire or a card slot? Best effort: any doubt answers no."""
+    import ctypes
+    from ctypes import wintypes
+
+    handle = None
+    kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+    try:
+        kernel32.CreateFileW.restype = ctypes.c_void_p
+        kernel32.CreateFileW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD,
+                                         wintypes.DWORD, ctypes.c_void_p]
+        kernel32.DeviceIoControl.argtypes = [ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p,
+                                             wintypes.DWORD, ctypes.POINTER(wintypes.DWORD), ctypes.c_void_p]
+        kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+        handle = kernel32.CreateFileW(f"\\\\.\\{drive}", 0, 3, None, 3, 0, None)  # no access needed to ask; share read+write; open existing
+        if handle in (None, ctypes.c_void_p(-1).value):
+            return False
+        query = struct.pack("<II4s", 0, 0, b"\0\0\0\0")  # STORAGE_PROPERTY_QUERY: StorageDeviceProperty, PropertyStandardQuery
+        out = ctypes.create_string_buffer(1024)
+        returned = wintypes.DWORD(0)
+        ok = kernel32.DeviceIoControl(handle, 0x2D1400, query, len(query), out, len(out), ctypes.byref(returned), None)
+        if not ok:
+            return False
+        return bus_type_of(out.raw[: returned.value]) in _PLUGGED_IN_BUSES
+    except Exception:
+        return False
+    finally:
+        if handle not in (None, ctypes.c_void_p(-1).value):
+            try:
+                kernel32.CloseHandle(handle)
+            except Exception:
+                pass
 
 
 def _windows_remote_name(drive: str) -> str:  # pragma: no cover - Windows only

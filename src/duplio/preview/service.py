@@ -1,6 +1,7 @@
 """Pictures of files on drives where reading is slow or costs bandwidth.
 
-The cheapest route is tried first, and every picture that has to be fetched is kept so it is fetched once:
+The cheapest route is tried first, and every picture that has to be fetched from such a drive (a USB drive, a network share,
+a phone, a cloud drive; not the computer's own disk) is kept on disk so it is fetched once:
 
 1. **The cache.** Nothing touches the drive.
 2. **The photo's own thumbnail.** A JPEG from a phone or camera carries a small preview in its first kilobytes (a RAW file
@@ -155,17 +156,16 @@ class PreviewService:
 
     # ------------------------------------------------------------------ stores
     def _stores_for(self, caps: Capabilities) -> list[ThumbStore]:
-        """The buffers that may hold a picture from this drive, in the order to look in them.
+        """The buffer that may hold a picture from this drive (none or one).
 
-        A slow, remote or cloud drive has one: the kept buffer (or, if pictures are not kept between runs, a temporary one).
-        A fast local disk has a temporary one for what is quick to make again (a photo's own small preview), and, if pictures are
-        kept between runs, the kept one for what took real work (a picture decoded from the whole file, a frame of a movie)."""
+        Pictures are kept on disk for drives that are not the computer's own disk: a USB drive or card, a network share, a
+        phone, a cloud or virtual drive, optical media. Reading those is slow or costs bandwidth, so a picture is fetched once.
+        The internal disk is quick to read again, so nothing is written for it (the window still holds the finished pictures
+        of the folder on screen in memory). The setting ``mode`` can widen that to every drive, or switch keeping off."""
         mode = self.settings.mode
-        if mode == "off":
+        if mode == "off" or (mode == "auto" and caps.internal):
             return []
         keep = self.settings.keep == "persistent" and self._dirs is not None
-        if mode == "auto" and caps.read_cost == 0:
-            return [self._buffer("memory"), *([self._buffer("persistent")] if keep else [])]
         return [self._buffer("persistent" if keep else "session")]
 
     def _buffer(self, kind: str) -> ThumbStore:
@@ -177,27 +177,32 @@ class PreviewService:
                     store = ThumbStore(self._dirs.cache / "previews", max_bytes=self.settings.max_bytes, persistent=True)
                     with contextlib.suppress(Exception):
                         store.expire(self.settings.keep_days)  # pictures nobody has looked at for a long while are let go
-                elif kind == "memory":
-                    store = ThumbStore(None, max_bytes=min(self.settings.max_bytes, 512 * 1024 * 1024), persistent=False)
                 else:  # session: as large as the setting allows, so a whole big folder stays at hand while it is browsed
                     store = ThumbStore(None, max_bytes=self.settings.max_bytes, persistent=False)
                 self._stores[kind] = store
             return store
 
-    def _store(self, caps: Capabilities, *, expensive: bool = True) -> ThumbStore | None:
-        """The buffer a new picture goes into (``expensive``: it took real work to make)."""
+    def _store(self, caps: Capabilities) -> ThumbStore | None:
+        """The buffer a new picture goes into (``None``: pictures from this drive are not kept)."""
         stores = self._stores_for(caps)
-        if not stores:
-            return None
-        return stores[-1] if expensive else stores[0]
+        return stores[0] if stores else None
 
     def apply_settings(self) -> None:
         """Settings changed (the size limit of the buffer): existing buffers follow it, trimming if they are now over."""
         with self._lock:
-            stores = dict(self._stores)
-        for kind, store in stores.items():
-            store.max_bytes = min(self.settings.max_bytes, 512 * 1024 * 1024) if kind == "memory" else self.settings.max_bytes
+            stores = list(self._stores.values())
+        for store in stores:
+            store.max_bytes = self.settings.max_bytes
             store.trim()
+
+    def stored(self) -> tuple[int, int]:
+        """How many pictures are kept on disk and how much room they take, counting those an earlier run left behind."""
+        if self._dirs is not None and self.settings.keep == "persistent" and (self._dirs.cache / "previews" / "index.sqlite3").exists():
+            with contextlib.suppress(Exception):
+                self._buffer("persistent")
+        with self._lock:
+            stores = list(self._stores.values())
+        return sum(s.count for s in stores), sum(s.total_bytes for s in stores)
 
     def storage_summary(self) -> list[tuple[str, int, int, str]]:
         with self._lock:
@@ -272,7 +277,7 @@ class PreviewService:
                 except Unavailable:
                     self.stats.add(unavailable=1)
                     raise
-            store = self._store(item.caps, expensive=thumb.source != "embedded")
+            store = self._store(item.caps)
             if store is not None:
                 try:
                     store.put(item.key, drive_tag(item.backend.id), thumb)
@@ -291,7 +296,7 @@ class PreviewService:
         return any(store.has(item.key) for store in self._stores_for(item.caps))
 
     def buffer_for(self, item: PreviewItem) -> ThumbStore | None:
-        """The buffer that would hold this picture, if pictures from this drive are kept at all."""
+        """The buffer that would hold this picture, if pictures from this drive are kept on disk at all."""
         return self._store(item.caps)
 
     def pin(self, items: Sequence[PreviewItem]) -> None:

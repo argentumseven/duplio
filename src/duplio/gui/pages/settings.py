@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import tkinter as tk
+from collections.abc import Callable
+from dataclasses import replace
 from tkinter import ttk
 from typing import TYPE_CHECKING
 
-from duplio.config import save_settings
+from duplio.config import Settings, save_settings
 from duplio.errors import ConfigError
 from duplio.gui import extras
-from duplio.gui.app import Page
+from duplio.gui.app import PURGE_KEYS, Page
 from duplio.gui.memory import GIB, MIB, default_image_budget, describe
 from duplio.gui.palette import THEME, THEME_NAMES
 from duplio.gui.style import PALETTE
 from duplio.gui.widgets import Btn, ScrollFrame, autowrap
+from duplio.preview.settings import PreviewSettings
 from duplio.util.fmt import human_size, parse_size
 
 if TYPE_CHECKING:
@@ -44,22 +47,24 @@ class SettingsPage(Page):
         def choice(text: str, values: list[str], current: str) -> ttk.Combobox:
             row = tk.Frame(body, bg=bg)
             row.pack(fill="x", pady=3)
-            tk.Label(row, text=text, font=f.base, bg=bg, fg=PALETTE["text"], width=32, anchor="w").pack(side="left")
+            tk.Label(row, text=text, font=f.base, bg=bg, fg=PALETTE["text"], width=36, anchor="w").pack(side="left")
             box = ttk.Combobox(row, state="readonly", font=f.base, values=values, width=max(len(v) for v in values) + 3)
             box.set(current)
             box.pack(side="left")
             return box
 
-        def check(text: str, variable: tk.BooleanVar) -> None:
-            ttk.Checkbutton(body, text=text, variable=variable).pack(anchor="w", pady=2)
+        def check(text: str, variable: tk.BooleanVar, command: Callable[[], None] | None = None) -> None:
+            ttk.Checkbutton(body, text=text, variable=variable, command=command or (lambda: None)).pack(anchor="w", pady=2)
 
         heading("Appearance")
         self.theme = choice("Colours", list(THEME_NAMES.values()), THEME_NAMES[THEME])
         note("Applies the next time Duplio starts.", (2, 4))
 
-        heading("Pictures from slow drives")
-        note("Duplio takes the small preview that is already inside a photo (or a picture of the first moments of a movie) and keeps it, "
-             "so looking at pictures on a phone, a NAS or a cloud drive does not download the photos again and again.")
+        heading("Pictures from USB, network, phone and cloud drives")
+        note("Duplio takes the small preview that is already inside a photo (or a picture of the first moments of a movie) and keeps it "
+             "on disk, so looking at pictures on a USB drive, a phone, a NAS or a cloud drive does not read the photos again and again. "
+             "Pictures on this computer's own disk are quick to make again, so none are kept for them. These choices take effect "
+             "as soon as you make them.")
         keeps = ["between runs (kept unencrypted; recommended)", "until Duplio closes"]
         self.keep = choice("Remember pictures", keeps, keeps[0 if s.previews.keep == "persistent" else 1])
         self.days_choices = [(7, "a week"), (30, "30 days"), (60, "60 days"), (180, "6 months"), (365, "a year"), (0, "never")]
@@ -67,8 +72,8 @@ class SettingsPage(Page):
         self.keep_days = choice("Forget pictures not looked at for", [label for _n, label in self.days_choices]
                                 if shown_days in [label for _n, label in self.days_choices] else [shown_days, *[label for _n, label in self.days_choices]],
                                 shown_days)
-        modes = ["slow, remote and cloud drives (recommended)", "every drive", "nothing (always read the drive)"]
-        self.mode = choice("Use the picture memory for", modes, modes[{"auto": 0, "always": 1, "off": 2}[s.previews.mode]])
+        modes = ["USB, network, phone, cloud (recommended)", "every drive, even this computer's own", "nothing (always read the drive)"]
+        self.mode = choice("Keep pictures on disk for", modes, modes[{"auto": 0, "always": 1, "off": 2}[s.previews.mode]])
         self.buffer_sizes = [(GIB, "1 GB"), (2 * GIB, "2 GB"), (4 * GIB, "4 GB"), (8 * GIB, "8 GB"), (16 * GIB, "16 GB"),
                              (32 * GIB, "32 GB"), (64 * GIB, "64 GB"), (128 * GIB, "128 GB")]
         sizes = [label for _n, label in self.buffer_sizes]
@@ -84,20 +89,23 @@ class SettingsPage(Page):
                              next((label for n, label in self.memory_sizes if n == s.previews.memory_bytes), labels[0]))
         note("Shrinks by itself if the computer runs short of memory.", (2, 6))
         self.whole_folder = tk.BooleanVar(value=s.previews.prefetch_folder)
-        check("Browse: fetch a folder's pictures in the background", self.whole_folder)
-        note("From the part you are looking at to the end of the folder, then back to the start. Jump ahead and it carries on from there.",
-             (0, 2))
+        check("Browse: fetch a folder's pictures in the background", self.whole_folder, self.apply_pictures)
+        note("From the part you are looking at to the end of the folder, then back to the start. Jump ahead and it carries on from there. "
+             "Only for folders whose pictures are kept on disk.", (0, 2))
         self.download_whole = tk.BooleanVar(value=s.previews.download_whole)
-        check("Read whole pictures and movies that have no small preview", self.download_whole)
+        check("Read whole pictures and movies that have no small preview", self.download_whole, self.apply_pictures)
         note("Needed for most movies and for photos with no thumbnail inside. It downloads those files once (up to 64 MB each) and keeps "
              "the picture, so it uses the network the first time you look at a folder.", (0, 6))
         self.cloud = tk.BooleanVar(value=s.previews.online_only)
-        check("Fetch pictures of cloud-only files too (this downloads them)", self.cloud)
+        check("Fetch pictures of cloud-only files too (this downloads them)", self.cloud, self.apply_pictures)
+        for box in (self.keep, self.keep_days, self.mode, self.buffer, self.memory):
+            box.bind("<<ComboboxSelected>>", lambda _e: self.apply_pictures(), add="+")
         row = tk.Frame(body, bg=bg)
-        row.pack(fill="x", pady=8)
-        Btn(row, "Delete pictures", self.clear_pictures, fonts=f, padx=12, pady=6).pack(side="left")
-        self.cache_info = tk.Label(row, text="", font=f.small, bg=bg, fg=PALETTE["muted"])
-        self.cache_info.pack(side="left", padx=12)
+        row.pack(fill="x", pady=(8, 2))
+        self.cache_info = tk.Label(row, text="", font=f.base, bg=bg, fg=PALETTE["muted"])
+        self.cache_info.pack(side="left")
+        note(f"To delete every kept picture press {PURGE_KEYS} anywhere in the window (it asks first). It is a key combination on purpose, "
+             "so a stray click cannot do it.", (0, 6))
 
         heading("Picture support")
         note("Duplio reads JPEG, PNG, GIF, BMP and a few more formats by itself. These two programs add the rest and make it faster. "
@@ -111,7 +119,7 @@ class SettingsPage(Page):
         autowrap(self.ffmpeg_label, margin=24, minimum=300)
         row = tk.Frame(body, bg=bg)
         row.pack(fill="x", pady=4)
-        tk.Label(row, text="ffmpeg program (empty: look for it)", font=f.base, bg=bg, fg=PALETTE["text"], width=32, anchor="w").pack(side="left")
+        tk.Label(row, text="ffmpeg program (empty: look for it)", font=f.base, bg=bg, fg=PALETTE["text"], width=36, anchor="w").pack(side="left")
         self.ffmpeg_entry = ttk.Entry(row, font=f.base)
         self.ffmpeg_entry.insert(0, s.previews.ffmpeg)
         self.ffmpeg_entry.pack(side="left", fill="x", expand=True)
@@ -126,7 +134,7 @@ class SettingsPage(Page):
         note("Makes repeat searches much faster; removing a file always re-checks it first.", (0, 6))
         row = tk.Frame(body, bg=bg)
         row.pack(fill="x", pady=4)
-        tk.Label(row, text="Ignore files smaller than", font=f.base, bg=bg, fg=PALETTE["text"], width=32, anchor="w").pack(side="left")
+        tk.Label(row, text="Ignore files smaller than", font=f.base, bg=bg, fg=PALETTE["text"], width=36, anchor="w").pack(side="left")
         self.min_size = ttk.Entry(row, width=10, font=f.base)
         self.min_size.insert(0, human_size(s.min_size).replace(" B", "B") if s.min_size > 1 else "1")
         self.min_size.pack(side="left")
@@ -171,44 +179,75 @@ class SettingsPage(Page):
 
     def on_show(self) -> None:
         self.refresh_support()
-        count = sum(c for _k, c, _b, _p in self.ctx.previews.storage_summary())
-        size = sum(b for _k, _c, b, _p in self.ctx.previews.storage_summary())
-        self.cache_info.configure(text=f"{count:,} pictures remembered ({human_size(size)})" if count else "no pictures remembered yet")
+        self.buffers_changed()
 
-    def clear_pictures(self) -> None:
-        removed = self.ctx.previews.clear()
-        self.cache_info.configure(text=f"{removed:,} remembered pictures deleted")
+    def buffers_changed(self) -> None:
+        count, size = self.ctx.previews.stored()
+        self.cache_info.configure(text=f"{count:,} pictures kept on disk ({human_size(size)})" if count else "no pictures kept on disk yet")
+
+    def _read_pictures(self, p: PreviewSettings) -> None:
+        """Read the picture choices into ``p`` (``ConfigError`` if one is not allowed)."""
+        p.keep = "persistent" if self.keep.current() == 0 else "session"
+        shown_days = self.keep_days.get()
+        p.keep_days = next((n for n, label in self.days_choices if label == shown_days), p.keep_days)
+        p.download_whole = bool(self.download_whole.get())
+        p.mode = ("auto", "always", "off")[self.mode.current()]
+        p.online_only = bool(self.cloud.get())
+        p.max_bytes = next((n for n, label in self.buffer_sizes if label == self.buffer.get()), p.max_bytes)
+        p.memory_bytes = next((n for n, label in self.memory_sizes if label == self.memory.get()), p.memory_bytes)
+        p.prefetch_folder = bool(self.whole_folder.get())
+        p.validate()
+
+    def _use_pictures(self, new: PreviewSettings) -> None:
+        """Make the picture choices take effect in the running window, then remember them."""
+        live = self.ctx.settings.previews
+        vars(live).update(vars(new))
+        self.ctx.previews.settings = live
+        self.ctx.previews.apply_settings()
+        self.ctx.thumbs.set_budget(live.memory_bytes or None)
+
+    def apply_pictures(self) -> None:
+        """A picture choice was changed: it applies now and is remembered, without a hunt for the Save button below."""
+        new = replace(self.ctx.settings.previews)
+        try:
+            self._read_pictures(new)
+        except (ConfigError, ValueError) as exc:
+            self.ctx.show_error(f"This choice cannot be used: {exc}")
+            return
+        new.ffmpeg = self.ctx.settings.previews.ffmpeg  # the program box is only read by Save
+        self._use_pictures(new)
+        self._remember(self.ctx.settings)
+
+    def _remember(self, settings: Settings) -> bool:
+        try:
+            save_settings(settings)
+        except (OSError, ConfigError) as exc:
+            self.ctx.show_error(f"The choice is used now, but it could not be saved for the next time: {exc}")
+            return False
+        self.saved.configure(text="Saved.")
+        self.after(3000, lambda: self.saved.configure(text=""))
+        return True
 
     def save(self) -> None:
         s = self.ctx.settings
-        p = s.previews
+        new = replace(s.previews)
         try:
-            p.keep = "persistent" if self.keep.current() == 0 else "session"
-            shown_days = self.keep_days.get()
-            p.keep_days = next((n for n, label in self.days_choices if label == shown_days), p.keep_days)
-            p.download_whole = bool(self.download_whole.get())
-            p.ffmpeg = self.ffmpeg_entry.get().strip()
-            p.mode = ("auto", "always", "off")[self.mode.current()]
-            p.online_only = bool(self.cloud.get())
-            p.max_bytes = next((n for n, label in self.buffer_sizes if label == self.buffer.get()), p.max_bytes)
-            p.memory_bytes = next((n for n, label in self.memory_sizes if label == self.memory.get()), p.memory_bytes)
-            p.prefetch_folder = bool(self.whole_folder.get())
-            p.validate()
-            s.skip_hidden = bool(self.hidden.get())
-            s.cache = bool(self.remember.get())
+            self._read_pictures(new)
+            new.ffmpeg = self.ffmpeg_entry.get().strip()
+            new.validate()
+            hidden = bool(self.hidden.get())
+            remember = bool(self.remember.get())
             text = self.min_size.get().strip() or "1"
-            s.min_size = int(text) if text.isdigit() else parse_size(text)
-            s.exclude = [x.strip() for x in self.exclude_entry.get().split(",") if x.strip()]  # type: ignore[attr-defined]
-            s.protect = [x.strip() for x in self.protect_entry.get().split(",") if x.strip()]  # type: ignore[attr-defined]
-            save_settings(s)
+            min_size = int(text) if text.isdigit() else parse_size(text)
+            exclude = [x.strip() for x in self.exclude_entry.get().split(",") if x.strip()]  # type: ignore[attr-defined]
+            protect = [x.strip() for x in self.protect_entry.get().split(",") if x.strip()]  # type: ignore[attr-defined]
         except (ConfigError, ValueError) as exc:
             self.ctx.show_error(f"These settings cannot be saved: {exc}")
             return
-        self.ctx.previews.settings = p
-        self.ctx.previews.apply_settings()
-        self.ctx.thumbs.set_budget(p.memory_bytes or None)
+        s.skip_hidden, s.cache, s.min_size, s.exclude, s.protect = hidden, remember, min_size, exclude, protect
+        self._use_pictures(new)  # in use first, so a disk that will not take the file still gets the choices applied
         chosen = next((name for name, label in THEME_NAMES.items() if label == self.theme.get()), THEME)
         self.ctx.state.set("theme", chosen)
         self.ctx.state.save()
-        self.saved.configure(text="Saved." if chosen == THEME else "Saved. The new colours appear the next time Duplio starts.")
-        self.after(3000, lambda: self.saved.configure(text=""))
+        if self._remember(s):
+            self.saved.configure(text="Saved." if chosen == THEME else "Saved. The new colours appear the next time Duplio starts.")

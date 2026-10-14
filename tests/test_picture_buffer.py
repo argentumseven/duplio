@@ -273,8 +273,14 @@ class FakeStore:
     def __init__(self, fullness: float = 0.1, free: int | None = 10 * 1024**3) -> None:
         self.fullness, self._free = fullness, free
 
+    count = 10
+
+    @property
+    def total_bytes(self) -> int:
+        return int(self.fullness * self.max_bytes)
+
     def pinned_bytes(self) -> int:
-        return int(self.fullness * self.max_bytes)  # the whole of it is this folder's
+        return self.total_bytes  # the whole of it is this folder's
 
     def free_disk(self) -> int | None:
         return self._free

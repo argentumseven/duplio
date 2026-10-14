@@ -43,7 +43,7 @@ class ImportPage(PairPage):
         opts = tk.Frame(self.body, bg=PALETTE["bg"])
         row = tk.Frame(opts, bg=PALETTE["bg"])
         row.pack(fill="x", pady=2)
-        tk.Label(row, text="Sort the new files into folders", font=f.base, bg=PALETTE["bg"], width=30, anchor="w").pack(side="left")
+        tk.Label(row, text="Sort the new files into folders", font=f.base, bg=PALETTE["bg"], width=34, anchor="w").pack(side="left")
         self.layout_box = ttk.Combobox(row, state="readonly", values=[x[0] for x in LAYOUTS], width=52, font=f.base)
         self.layout_box.current(0)
         self.layout_box.pack(side="left")

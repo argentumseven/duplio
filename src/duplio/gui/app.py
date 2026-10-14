@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import sys
 import threading
 import tkinter as tk
 from collections.abc import Callable
@@ -24,14 +25,18 @@ from duplio.gui.prefetch import FolderPrefetcher
 from duplio.gui.state import GuiState
 from duplio.gui.style import PALETTE, Fonts
 from duplio.gui.thumbs import Thumbnailer
-from duplio.gui.widgets import Tooltip, autowrap, bind_to
+from duplio.gui.widgets import FlowFrame, Tooltip, autowrap, bind_to
 from duplio.hashing.cache import HashCache, NullCache
 from duplio.preview.service import PreviewService
 from duplio.util.appdirs import AppDirs, get_app_dirs
+from duplio.util.fmt import human_size
 from duplio.vfs.listing import ListingCache
 from duplio.vfs.location import BackendRegistry
 
 log = logging.getLogger("duplio.gui")
+
+# Deleting every kept picture is a key chord, never a click: it cannot be done by accident, and the key bar says what it is.
+PURGE_KEYS = "cmd+shift+del" if sys.platform == "darwin" else "ctrl+shift+del"
 
 
 @dataclass
@@ -127,6 +132,9 @@ class Page(tk.Frame):
     def on_hide(self) -> None:
         """Called when another page is brought to the front."""
 
+    def buffers_changed(self) -> None:
+        """Called when the pictures kept on disk were purged, so a page that shows how many there are can say so."""
+
 
 NAV = (  # (page, shortcut number or "", name)
     ("home", "", "Home"),
@@ -165,6 +173,7 @@ class DuplioWindow(tk.Tk):
         self.title(f"Duplio {__version__}")
         self.minsize(1040, 660)
         self.ui_calls: queue.SimpleQueue[tuple[Callable[[], Any], threading.Event, list[Any]]] = queue.SimpleQueue()
+        self._purging = False
         dirs = (dirs or get_app_dirs()).ensure()
         self.fonts = style.apply_style(self)
         settings = load_settings(dirs)
@@ -232,9 +241,14 @@ class DuplioWindow(tk.Tk):
         self.content.grid(row=1, column=0, sticky="nsew")
         self.content.columnconfigure(0, weight=1)
         self.content.rowconfigure(0, weight=1)
-        self._keybar = tk.Frame(right, bg=PALETTE["sidebar"])
+        self._keybar = FlowFrame(right, PALETTE["sidebar"], hgap=0, vgap=0)  # wraps onto a second line rather than cut a hint off
         self._keybar.grid(row=2, column=0, sticky="ew")
         self.bind_all("<Control-q>", lambda _e: self.close())
+        chords = ["<Control-Shift-Delete>"]
+        if sys.platform == "darwin":  # the delete key of a Mac keyboard is BackSpace; Cmd+Shift+Delete is what empties the Trash there
+            chords += ["<Command-Shift-BackSpace>", "<Command-Shift-Delete>"]
+        for chord in chords:
+            self.bind_all(chord, self._purge_chord)
         for key, number, _label in NAV:
             if number:
                 self.bind_all(f"<Control-Key-{number}>", partial(self._jump, key))
@@ -245,13 +259,52 @@ class DuplioWindow(tk.Tk):
 
     def set_hints(self, hints: tuple[tuple[str, str], ...]) -> None:
         """The key bar along the bottom: what the keys do here (a key in purple, then what it does)."""
-        for child in self._keybar.winfo_children():
+        for child in list(self._keybar.winfo_children()):
+            if isinstance(child, tk.Widget):
+                self._keybar.remove(child)
             child.destroy()
         f = self.fonts
-        everywhere = (("ctrl+1-9", "Pages"), ("ctrl+q", "Quit"))
+        everywhere = (("ctrl+1-9", "Pages"), (PURGE_KEYS, "Purge pictures"), ("ctrl+q", "Quit"))
         for key, what in (*hints, *everywhere):
-            tk.Label(self._keybar, text=key, font=f.bold, bg=PALETTE["sidebar"], fg=PALETTE["key"], padx=0, pady=4).pack(side="left", padx=(12, 4))
-            tk.Label(self._keybar, text=what, font=f.small, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack(side="left")
+            box = tk.Frame(self._keybar, bg=PALETTE["sidebar"])
+            tk.Label(box, text=key, font=f.bold, bg=PALETTE["sidebar"], fg=PALETTE["key"], padx=0, pady=4).pack(side="left", padx=(12, 4))
+            tk.Label(box, text=what, font=f.small, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack(side="left")
+            self._keybar.add(box)
+
+    # ---- purging the kept pictures ----------------------------------------------
+    def _purge_chord(self, _event: tk.Event) -> str:
+        self.purge_pictures()
+        return "break"
+
+    def purge_pictures(self) -> None:
+        """Delete every picture kept on disk, after asking. Only the key chord reaches this (see :data:`PURGE_KEYS`)."""
+        ctx = self.ctx
+        if self._purging:
+            return
+        count, size = ctx.previews.stored()
+        what = f"{count:,} pictures ({human_size(size)})" if count else "no pictures"
+        if not ctx.confirm("Purge pictures", "Delete every picture Duplio has kept on disk?",
+                           [f"Duplio is keeping {what} on disk (small copies of pictures from USB, network, phone and cloud drives).",
+                            "Only these small copies are deleted. Your own files and folders are not touched.",
+                            "Pictures you look at again are fetched from the drive again."],
+                           confirm="Purge", danger=True):
+            return
+        self._purging = True
+        ctx.prefetcher.reset()  # whatever it had filled is about to be gone; it does not start again by itself
+
+        def done(removed: int) -> None:
+            self._purging = False
+            page = self.pages.get(self.current)
+            if page is not None:
+                page.buffers_changed()
+            ctx.info("Purge pictures", f"Deleted {removed:,} kept pictures.", [], "ok")
+
+        def failed(error: BaseException) -> None:
+            self._purging = False
+            ctx.show_error(error)
+
+        ctx.run_job("Deleting kept pictures", lambda _progress, _cancel: ctx.previews.clear(), done, on_error=failed,
+                    on_cancel=lambda: setattr(self, "_purging", False))
 
     def make_logo(self, scale: int, background: str) -> tk.PhotoImage | None:
         """The pixel mark, ``scale`` screen pixels per pixel, laid on ``background`` (it fades into it)."""

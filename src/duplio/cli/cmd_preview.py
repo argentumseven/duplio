@@ -188,7 +188,7 @@ def previews_clear(yes: bool) -> None:
 @click.option("--keep", type=click.Choice(KEEP), default=None,
               help="session = forgotten when Duplio closes · persistent = kept between runs (stored unencrypted).")
 @click.option("--mode", type=click.Choice(MODES), default=None,
-              help="auto = cache pictures from slow, remote and cloud drives · always · off.")
+              help="auto = keep pictures from USB, network, phone and cloud drives (not the computer's own disk) · always = every drive · off.")
 @click.option("--max-size", default=None, help="Size limit of the saved cache, e.g. 2GB.")
 @click.option("--online-only/--no-online-only", default=None,
               help="Fetch pictures of cloud-only files without asking (this downloads them).")
@@ -227,7 +227,7 @@ def previews_settings(keep: str | None, mode: str | None, max_size: str | None, 
         app.console.print(Text("Saved.", style="green"))
     table = Table(box=box.SIMPLE, show_header=False)
     rows = [
-        ("Cache pictures from", {"auto": "slow, remote and cloud drives", "always": "every drive", "off": "nowhere"}[p.mode]),
+        ("Keep pictures from", {"auto": "USB, network, phone and cloud drives", "always": "every drive", "off": "nowhere"}[p.mode]),
         ("Keep them", "until Duplio closes" if p.keep == "session" else
          f"between runs, up to {human_size(p.max_bytes)} (unencrypted)" + (f", forgetting those not looked at for {p.keep_days} days" if p.keep_days else "")),
         ("Pictures with no small preview", "read whole to make one (up to " + human_size(p.max_download) + ")" if p.download_whole

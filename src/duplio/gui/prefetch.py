@@ -1,5 +1,9 @@
 """Filling the picture buffer with a whole folder in the background, so scrolling a folder of thousands is smooth.
 
+This is for folders on drives that are not the computer's own disk (a USB drive, a network share, a phone, a cloud drive):
+those are the pictures that are kept on disk. A folder on the internal disk is quick to read as it is looked at, so nothing
+is fetched ahead for it and nothing is written.
+
 While a folder is on screen its pictures are fetched into the on-disk buffer, in order, starting at the part the viewer is
 looking at, going on to the end, and then doubling back to the pictures before it. When the viewer jumps to another part,
 the fetching carries on from there instead. Fetching only stores small pictures; making them into images happens only for
@@ -71,6 +75,8 @@ class FolderPrefetcher:
     def start(self, items: Sequence[PreviewItem], *, first: int = 0, allow_online_only: bool = False) -> None:
         """Fetch the pictures among ``items``, those nearest position ``first`` first. Replaces any earlier run."""
         pictures = [i for i in items if extension(i.name) in MEDIA_EXT]
+        if pictures and self._previews.buffer_for(pictures[0]) is None:  # a folder lies on one drive: if its pictures are not kept ...
+            pictures = []  # ... there is nothing to fill
         with self._cond:
             self._token.cancel("a new folder")
             self._token = CancelToken()
@@ -99,6 +105,20 @@ class FolderPrefetcher:
     def _in_order(indices: Any, start: int, count: int) -> list[int]:
         """The pictures from ``start`` to the end of the folder, then those before ``start``: the way a person reads on."""
         return sorted(indices, key=lambda i: (i - start) % max(count, 1))
+
+    def reset(self) -> None:
+        """Forget the run: what it filled is gone (the kept pictures were purged), so nothing is shown as ready and nothing is
+        fetched until a new run is started."""
+        with self._cond:
+            self._token.cancel("reset")
+            self._token = CancelToken()
+            self._generation += 1
+            self._items = []
+            self._pending.clear()
+            self._counts = {"fetched": 0, "had": 0, "skipped": 0, "failed": 0}
+            self._in_a_row = 0
+            self._reason = ""
+            self._state = "idle"
 
     def move_to(self, first: int) -> None:
         """The viewer jumped: carry on from the new position (to the end, then back round to what was left behind)."""
@@ -179,7 +199,9 @@ class FolderPrefetcher:
             if store is None:
                 self._halt(generation, "pictures from this drive are not being kept (see Settings), so there is nothing to fill")
                 return
-            if store.fullness >= self._stop_at and store.pinned_bytes() >= 0.8 * store.max_bytes:
+            average = store.total_bytes // max(store.count, 1)  # the next picture is about this big
+            full = store.fullness >= self._stop_at or store.total_bytes + average > store.max_bytes
+            if full and store.pinned_bytes() >= 0.8 * store.max_bytes:
                 # the pictures of this folder alone take most of the buffer: going on would throw its own away
                 self._halt(generation, "this folder's pictures fill the picture buffer; fetching more would throw away pictures "
                                        "of this folder to be fetched again. Make the buffer larger in Settings.")

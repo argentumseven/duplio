@@ -54,6 +54,40 @@ def test_read_cost_ranks_storage_by_how_costly_reading_is() -> None:
     assert Capabilities(kind=MediaKind.LOCAL, virtual=True).read_cost == 2  # a cloud drive that calls itself local
 
 
+def test_only_the_computers_own_disks_are_internal() -> None:
+    assert Capabilities(kind=MediaKind.LOCAL).internal and Capabilities(kind=MediaKind.ROTATIONAL).internal
+    for kind in (MediaKind.REMOVABLE, MediaKind.NETWORK, MediaKind.DEVICE, MediaKind.READONLY):
+        assert not Capabilities(kind=kind).internal
+    assert not Capabilities(kind=MediaKind.LOCAL, virtual=True).internal  # a cloud drive that calls itself local
+
+
+def test_a_usb_hard_disk_is_removable_not_the_internal_hard_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    from duplio.vfs import mounts
+
+    monkeypatch.setattr(mounts.sys, "platform", "linux")
+    monkeypatch.setattr(mounts, "_rotational_for_source", lambda _source: (True, False))
+    spinning_usb = mounts.classify(MountEntry("/run/media/me/BACKUP", "ext4", "/dev/sdb1"), "/run/media/me/BACKUP/x")
+    internal = mounts.classify(MountEntry("/data", "ext4", "/dev/sda2"), "/data/x")
+    assert spinning_usb.kind is MediaKind.REMOVABLE and not spinning_usb.internal and spinning_usb.max_parallel_reads == 1
+    assert internal.kind is MediaKind.ROTATIONAL and internal.internal and internal.max_parallel_reads == 1
+    monkeypatch.setattr(mounts, "_rotational_for_source", lambda _source: (False, True))
+    card = mounts.classify(MountEntry("/media/me/CARD", "ext4", "/dev/mmcblk0p1"), "/media/me/CARD/x")
+    assert card.kind is MediaKind.REMOVABLE and card.max_parallel_reads == 2
+
+
+def test_the_bus_a_windows_disk_hangs_on_is_read_from_its_descriptor() -> None:
+    import struct
+
+    from duplio.vfs.mounts import bus_type_of
+
+    def descriptor(bus: int) -> bytes:  # STORAGE_DEVICE_DESCRIPTOR: BusType is the 4 bytes at offset 28
+        return struct.pack("<IIBBBBIIIIII", 1, 40, 0, 0, 0, 0, 0, 0, 0, 0, bus, 0) + b"\0" * 8
+
+    assert bus_type_of(descriptor(7)) == 7  # USB
+    assert bus_type_of(descriptor(17)) == 17  # NVMe
+    assert bus_type_of(b"\0" * 20) is None
+
+
 @pytest.mark.parametrize(
     ("fstype", "source", "cost"),
     [("ext4", "/dev/nvme0n1p2", 0), ("vfat", "/dev/sdb1", 1), ("cifs", "//nas/share", 2), ("fuse.sshfs", "me@host:/", 2),

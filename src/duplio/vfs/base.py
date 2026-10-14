@@ -79,6 +79,12 @@ class Capabilities:
             return 1
         return 0
 
+    @property
+    def internal(self) -> bool:
+        """Is this one of the computer's own disks (an internal SSD or hard disk)? Not a USB drive or card, a network
+        share, a phone, a cloud or virtual drive, or optical media: reading those is where keeping pictures pays off."""
+        return not self.virtual and self.kind in (MediaKind.LOCAL, MediaKind.ROTATIONAL)
+
 
 @dataclass(frozen=True, slots=True)
 class StatInfo:

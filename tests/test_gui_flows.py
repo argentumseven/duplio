@@ -62,6 +62,16 @@ def window(dirs: AppDirs) -> Iterator[Any]:
     gc.collect()  # free Tk variables and images here, on the main thread, not in whichever thread the collector wakes up in
 
 
+@pytest.fixture
+def usb(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Folders of the test count as being on a USB drive, so their pictures are kept on disk (the computer's own disk keeps none)."""
+    from duplio.vfs.base import Capabilities, MediaKind
+    from duplio.vfs.local import LocalBackend
+
+    monkeypatch.setattr(LocalBackend, "capabilities", lambda self, path: Capabilities(kind=MediaKind.REMOVABLE, label="USB drive",
+                                                                                      max_parallel_reads=2))
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -328,7 +338,7 @@ def prefetch_done(window: Any) -> bool:
     return window.ctx.prefetcher.status().state in ("finished", "stopped")
 
 
-def test_browse_shows_a_folder_and_fetches_all_its_pictures_into_the_buffer(tmp_path: Path, window: Any) -> None:
+def test_browse_shows_a_folder_and_fetches_all_its_pictures_into_the_buffer(tmp_path: Path, window: Any, usb: None) -> None:
     root = tmp_path / "trip"
     make_pictures(root / "day 1", 24)
     (root / "day 1" / "notes.txt").write_text("hi")
@@ -390,7 +400,7 @@ def test_browse_sorts_and_filters_what_is_shown(tmp_path: Path, window: Any) -> 
     assert window.ctx.state.get("browse_sort") == "name" and window.ctx.state.get("browse_desc") is False  # and it is remembered
 
 
-def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_away(tmp_path: Path, window: Any) -> None:
+def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_away(tmp_path: Path, window: Any, usb: None) -> None:
     root = tmp_path / "many"
     make_pictures(root, 40)
     window.ctx.settings.previews.max_bytes = 30_000
@@ -405,7 +415,7 @@ def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_awa
     assert store is not None and store.total_bytes <= 30_000  # and the limit held
 
 
-def test_leaving_the_browser_pauses_the_background_fetch_and_coming_back_resumes_it(tmp_path: Path, window: Any) -> None:
+def test_leaving_the_browser_pauses_the_background_fetch_and_coming_back_resumes_it(tmp_path: Path, window: Any, usb: None) -> None:
     root = tmp_path / "pics"
     make_pictures(root, 60)
     pre = window.ctx.prefetcher
@@ -526,6 +536,7 @@ def test_browsing_a_remote_folder_reads_each_picture_once_and_only_a_little_of_i
 def cut_off(root: Any) -> list[str]:
     """Widgets whose text does not fit in the room they were given (a button, label or box narrower than what it has to show)."""
     import tkinter as tk
+    from tkinter import font as tkfont
     from tkinter import ttk
 
     problems: list[str] = []
@@ -539,13 +550,21 @@ def cut_off(root: Any) -> list[str]:
         if isinstance(widget, kinds) and widget.winfo_width() + 1 < widget.winfo_reqwidth():
             text = widget.cget("text") if "text" in widget.keys() else ""  # noqa: SIM118 (a Tk widget's keys(), not a dict's)
             problems.append(f"{widget.winfo_class()} {str(widget)!r} {text!r}: given {widget.winfo_width()}px, needs {widget.winfo_reqwidth()}px")
+        elif isinstance(widget, tk.Label) and not widget.cget("image") and not int(str(widget.cget("wraplength"))):
+            # a label made a fixed number of characters wide is as wide as it asked to be, but its text may be wider still
+            text = str(widget.cget("text"))
+            if text:
+                font = tkfont.Font(root=widget, font=widget.cget("font"))
+                needed = max(font.measure(line) for line in text.split("\n")) + 2 * int(str(widget.cget("padx")))
+                if needed > widget.winfo_width() + 1:
+                    problems.append(f"Label {str(widget)!r} {text!r}: its text needs {needed}px, it is {widget.winfo_width()}px wide")
 
     walk(root)
     return problems
 
 
 @pytest.mark.parametrize("width", [1280, 1100, 900])
-def test_no_button_label_or_box_is_ever_cut_off(tmp_path: Path, window: Any, width: int) -> None:
+def test_no_button_label_or_box_is_ever_cut_off(tmp_path: Path, window: Any, width: int, usb: None) -> None:
     from duplio.gui.app import NAV
 
     a, b = make_demo_folders(tmp_path)
@@ -1324,3 +1343,131 @@ def test_nothing_in_the_album_dialog_is_cut_off(window: Any) -> None:
     pump(window, timeout=0.4)
     assert cut_off(dialog) == []
     dialog._cancel()
+
+
+# --------------------------------------------------------------------------- what is kept on disk, and the purge
+def keybar_texts(window: Any) -> list[str]:
+    import tkinter as tk
+
+    found: list[str] = []
+
+    def walk(widget: Any) -> None:
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Label):
+                found.append(str(child.cget("text")))
+            walk(child)
+
+    walk(window._keybar)
+    return found
+
+
+def test_a_folder_on_the_computers_own_disk_shows_pictures_but_keeps_none_on_disk(tmp_path: Path, window: Any, dirs: AppDirs) -> None:
+    root = tmp_path / "local"
+    make_pictures(root, 12)
+    page = open_folder(window, root)
+    wait(window, lambda: window.ctx.thumbs.stats()["images"] >= 12)  # all shown ...
+    assert window.ctx.prefetcher.status().state == "idle"  # ... with nothing fetched ahead in the background
+    pump(window, timeout=0.5)
+    assert "Pictures are made as you scroll" in page.fetch_label.cget("text")
+    assert not page.fetch_button.winfo_ismapped()
+    assert "not kept on disk" in page.buffer_label.cget("text")
+    assert window.ctx.previews.stored() == (0, 0) and not (dirs.cache / "previews").exists()
+
+
+def test_choosing_the_memory_for_pictures_on_screen_is_used_and_shown_at_once(tmp_path: Path, window: Any, dirs: AppDirs) -> None:
+    from duplio.config import load_settings
+    from duplio.gui.memory import GIB, MIB
+
+    window.show("settings")
+    pump(window, timeout=0.2)
+    page = window.pages["settings"]
+    page.memory.set("4 GB")
+    page.memory.event_generate("<<ComboboxSelected>>")  # choosing it is enough: no Save button needed
+    pump(window, timeout=0.2)
+    assert window.ctx.thumbs.stats()["budget"] == 4 * GIB and window.ctx.settings.previews.memory_bytes == 4 * GIB
+    assert load_settings(dirs).previews.memory_bytes == 4 * GIB  # and remembered for the next start
+    window.show("browse")
+    browse = window.pages["browse"]
+    pump(window, timeout=0.8)
+    assert "of 4.0 GB" in browse.buffer_label.cget("text")
+    # when the computer is short of memory the window holds fewer, and says what was chosen and why it is less
+    window.ctx.thumbs._memory = lambda: 100 * MIB
+    window.ctx.thumbs.check_memory(force=True)
+    pump(window, timeout=0.8)
+    text = browse.buffer_label.cget("text")
+    assert "of 1.0 GB" in text and "you chose 4.0 GB" in text and "short of memory" in text
+
+
+def test_the_disk_buffer_choices_apply_at_once_and_a_disk_that_will_not_save_does_not_lose_them(
+        tmp_path: Path, window: Any, dirs: AppDirs, monkeypatch: pytest.MonkeyPatch) -> None:
+    from duplio.config import load_settings
+    from duplio.gui.memory import GIB
+
+    dialogs = Dialogs(window.ctx)
+    window.show("settings")
+    pump(window, timeout=0.2)
+    page = window.pages["settings"]
+    assert page.buffer.get() == "4 GB" and window.ctx.settings.previews.max_bytes == 4 * GIB  # the default
+    page.buffer.set("8 GB")
+    page.buffer.event_generate("<<ComboboxSelected>>")
+    assert window.ctx.settings.previews.max_bytes == 8 * GIB and load_settings(dirs).previews.max_bytes == 8 * GIB
+    import duplio.gui.pages.settings as settings_page
+
+    def refuse(*_a: object, **_k: object) -> None:
+        raise PermissionError("read-only")
+
+    monkeypatch.setattr(settings_page, "save_settings", refuse)
+    page.buffer.set("2 GB")
+    page.buffer.event_generate("<<ComboboxSelected>>")
+    assert window.ctx.settings.previews.max_bytes == 2 * GIB  # in use
+    assert dialogs.errors and "could not be saved" in dialogs.errors[-1]
+
+
+def test_purging_is_a_key_chord_shown_in_the_bar_and_asks_first(tmp_path: Path, window: Any, usb: None) -> None:
+    from duplio.gui.app import PURGE_KEYS
+
+    root = tmp_path / "usb stick"
+    make_pictures(root, 10)
+    dialogs = Dialogs(window.ctx)
+    page = open_folder(window, root)
+    wait(window, lambda: prefetch_done(window))
+    count, size = window.ctx.previews.stored()
+    assert count == 10 and size > 0
+    for key in ("home", "browse", "favorites", "compare", "settings"):  # on every page the bar names the chord
+        window.show(key)
+        texts = keybar_texts(window)
+        assert PURGE_KEYS in texts and "Purge pictures" in texts
+    window.show("browse")
+    window.focus_force()
+    pump(window, timeout=0.2)
+    # no on-screen button does it
+    settings = window.pages["settings"]
+    window.show("settings")
+    assert not any("purge" in str(w.cget("text")).lower() or "delete pictures" in str(w.cget("text")).lower()
+                   for w in _all_widgets(settings) if "text" in w.keys())  # noqa: SIM118
+    assert any(PURGE_KEYS in str(w.cget("text")) for w in _all_widgets(settings) if "text" in w.keys())  # noqa: SIM118
+    window.show("browse")
+    # saying no leaves everything alone
+    dialogs.answer = False
+    window.event_generate("<Control-Shift-Delete>")
+    pump(window, timeout=0.3)
+    assert dialogs.confirms and dialogs.confirms[-1][0] == "Purge pictures" and "10 pictures" in " ".join(dialogs.confirms[-1][2])
+    assert window.ctx.previews.stored()[0] == 10
+    # saying yes deletes them all, and the background fetch does not start again by itself
+    dialogs.answer = True
+    window.event_generate("<Control-Shift-Delete>")
+    wait(window, lambda: window.ctx.previews.stored() == (0, 0))
+    wait(window, lambda: any("Deleted 10 kept pictures" in info[1] for info in dialogs.infos))
+    assert window.ctx.prefetcher.status().state == "idle"
+    pump(window, timeout=0.5)
+    assert page.fetch_button.cget("text") == "Fetch all pictures"
+    # the folder is still shown, and looking at it again fetches again
+    page.navigate(window.ctx.registry.open(str(root)), push=False)
+    wait(window, lambda: window.ctx.previews.stored()[0] > 0, timeout=30)
+
+
+def _all_widgets(root: Any) -> list[Any]:
+    out = [root]
+    for child in root.winfo_children():
+        out.extend(_all_widgets(child))
+    return out
