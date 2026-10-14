@@ -119,7 +119,7 @@ class DuplicatesPage(Page):
         self.view = VirtualList(holder, f, self._draw, on_click=self._click, on_context=self._context, on_hover=self._hover,
                                 on_double=self._double)
         self.view.pack(fill="both", expand=True)
-        self.painter = Painter(self.view, ctx.thumbs, f, THUMB_SIZES.get(self.size_box.get(), 132))
+        self.painter = Painter(self.view, ctx.thumbs, f, THUMB_SIZES.get(self.size_box.get(), 132), favorites=ctx.favorites)
         self.view.relayout = self._heights
         self.placeholder = tk.Label(body, text="Choose a folder, then press the button. Looking changes nothing.", font=f.base,
                                     bg=PALETTE["bg"], fg=PALETTE["muted"])
@@ -271,6 +271,11 @@ class DuplicatesPage(Page):
         self.remove_button.set_enabled(bool(marked))
 
     def _click(self, tags: tuple[str, ...], _event: tk.Event) -> None:
+        starred = tag_value(tags, "star:")
+        if starred and starred in self.by_tile:
+            actions.toggle_favorite(self.ctx, self.by_tile[starred][1])
+            self.view.redraw_all()
+            return
         key = tag_value(tags, "tile:")
         if key and key in self.by_tile:
             row, tile = self.by_tile[key]
@@ -302,7 +307,7 @@ class DuplicatesPage(Page):
         actions.context_menu(self.ctx, tile, event.x_root, event.y_root, [
             ("Keep only this copy", keep_only),
             ("Leave this whole set alone" if not row.skipped else "Include this set again", skip),
-        ])
+        ], None, self.view.redraw_all)
 
     def _hover(self, tags: tuple[str, ...], event: tk.Event | None) -> None:
         key = tag_value(tags, "tile:") if event is not None else None

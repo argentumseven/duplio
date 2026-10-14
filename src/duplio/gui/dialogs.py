@@ -7,9 +7,13 @@ import queue
 import threading
 import tkinter as tk
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from tkinter import ttk
 from typing import TYPE_CHECKING, Any
 
+from duplio.backup.album import AlbumOptions, album_name
+from duplio.errors import ConfigError
 from duplio.gui.jobs import Job
 from duplio.gui.model import build_server_address
 from duplio.gui.places import Place
@@ -590,5 +594,145 @@ class ConnectDialog(tk.Toplevel):
         _dismiss(self)
 
     def show(self) -> str | None:
+        self.wait_window()
+        return self.result
+
+
+# --------------------------------------------------------------------------- make an album of the favorites
+@dataclass
+class AlbumChoice:
+    destination: str  # the folder the album folder is made in
+    options: AlbumOptions
+
+
+class AlbumDialog(tk.Toplevel):
+    """Name the album (your own words, a date and time, or both) and say where it goes."""
+
+    PLACES = (("Name only", "none"), ("Date and time, then the name", "before"), ("The name, then the date and time", "after"))
+    STYLES = (("Date  (2026-10-14)", "date"), ("Date and time  (2026-10-14 15-30)", "minutes"),
+              ("Date, time and seconds  (2026-10-14 15-30-22)", "seconds"))
+
+    def __init__(self, ctx: Context, count: int, *, now: Callable[[], Any] | None = None) -> None:
+        super().__init__(ctx.window)
+        self.ctx = ctx
+        self.result: AlbumChoice | None = None
+        self._now = now or datetime.now
+        self.title("Make an album")
+        self.configure(bg=PALETTE["panel"])
+        f = ctx.fonts
+        state = ctx.state
+        outer = tk.Frame(self, bg=PALETTE["panel"], padx=22, pady=18)
+        outer.pack(fill="both", expand=True)
+        row = tk.Frame(outer, bg=PALETTE["panel"])  # packed first, so the buttons stay on screen
+        row.pack(side="bottom", fill="x", pady=(16, 0))
+        self.make_button = Btn(row, "Make the album", self._ok, kind="primary", fonts=f)
+        self.make_button.pack(side="right")
+        Btn(row, "Cancel", self._cancel, fonts=f).pack(side="right", padx=(0, 8))
+        tk.Label(outer, text="Make an album", font=f.heading, bg=PALETTE["panel"], fg=PALETTE["heading"], anchor="w").pack(fill="x")
+        intro = tk.Label(outer, text=f"A new folder with copies of your {count:,} favorites. The originals are not touched, every copy is "
+                         "checked, and History & undo can take the album away again.", font=f.small, bg=PALETTE["panel"], fg=PALETTE["muted"],
+                         anchor="w", justify="left")
+        intro.pack(fill="x", pady=(4, 12))
+        autowrap(intro, margin=4, minimum=300)
+
+        tk.Label(outer, text="Name", font=f.bold, bg=PALETTE["panel"], anchor="w").pack(fill="x")
+        self.name = tk.StringVar(value="")
+        entry = ttk.Entry(outer, textvariable=self.name, font=f.base)
+        entry.pack(fill="x", pady=(2, 10))
+        tk.Label(outer, text="Put the date and time in the name", font=f.bold, bg=PALETTE["panel"], anchor="w").pack(fill="x")
+        self.place = tk.StringVar(value=str(state.get("album_stamp", "none")))
+        for label, value in self.PLACES:
+            ttk.Radiobutton(outer, text=label, value=value, variable=self.place, command=self._update).pack(anchor="w", pady=1)
+        style_row = tk.Frame(outer, bg=PALETTE["panel"])
+        style_row.pack(fill="x", pady=(6, 0))
+        tk.Label(style_row, text="Style", font=f.base, bg=PALETTE["panel"], anchor="w", width=8).pack(side="left")
+        self.style_box = ttk.Combobox(style_row, state="readonly", values=[label for label, _v in self.STYLES], font=f.base, width=46)
+        saved = str(state.get("album_format", "date"))
+        self.style_box.current(next((i for i, (_l, v) in enumerate(self.STYLES) if v == saved), 0))
+        self.style_box.pack(side="left")
+        self.style_box.bind("<<ComboboxSelected>>", lambda _e: self._update())
+
+        self.preview = tk.Label(outer, text="", font=f.bold, bg=PALETTE["panel"], fg=PALETTE["ok"], anchor="w", justify="left")
+        self.preview.pack(fill="x", pady=(14, 2))
+        autowrap(self.preview, margin=4, minimum=300)
+        tk.Label(outer, text="Make it in this folder", font=f.bold, bg=PALETTE["panel"], anchor="w").pack(fill="x", pady=(8, 0))
+        where = tk.Frame(outer, bg=PALETTE["panel"])
+        where.pack(fill="x", pady=(2, 0))
+        self.destination = tk.StringVar(value=str(state.get("album_dest") or os.path.join(os.path.expanduser("~"), "Pictures", "Duplio albums")))
+        ttk.Entry(where, textvariable=self.destination, font=f.base).pack(side="left", fill="x", expand=True)
+        Btn(where, "Choose folder…", self._choose, fonts=f, padx=10, pady=4).pack(side="left", padx=(8, 0))
+        self.problem = tk.Label(outer, text="", font=f.small, bg=PALETTE["panel"], fg=PALETTE["bad"], anchor="w", justify="left")
+        self.problem.pack(fill="x", pady=(8, 0))
+        autowrap(self.problem, margin=4, minimum=300)
+
+        self.name.trace_add("write", lambda *_a: self._update())
+        self.bind("<Escape>", lambda _e: self._cancel())
+        self.bind("<Return>", lambda _e: self._ok())
+        self._update()
+        center_on(self, ctx.window, 640, 560)
+        _modal(self, ctx.window, self._cancel)
+        entry.focus_set()
+
+    # ---- what the choices make ---------------------------------------------------
+    def options(self) -> AlbumOptions:
+        style = self.STYLES[self.style_box.current()][1]
+        return AlbumOptions(name=self.name.get(), stamp=self.place.get(), stamp_format=style)
+
+    def folder_name(self) -> str | None:
+        """The name the album folder will get now, or ``None`` while there is nothing to name it by."""
+        try:
+            return album_name(self.options(), self._now())
+        except ConfigError:
+            return None
+
+    def _update(self) -> None:
+        name = self.folder_name()
+        if name is None:
+            self.preview.configure(text="Type a name, or choose to use the date and time.", fg=PALETTE["muted"])
+        else:
+            self.preview.configure(text=f"The folder will be called:  {name}", fg=PALETTE["ok"])
+        self.make_button.set_enabled(name is not None)
+        self.style_box.configure(state="readonly" if self.place.get() != "none" else "disabled")
+
+    def _choose(self) -> None:
+        from duplio.gui.folders import choose_folder
+
+        picked = choose_folder(self.ctx, self.destination.get())
+        if picked:
+            self.destination.set(picked)
+
+    def _ok(self) -> None:
+        if self.folder_name() is None:
+            return
+        where = self.destination.get().strip()
+        if not where:
+            self.problem.configure(text="Choose the folder the album should be made in.")
+            return
+        from duplio.vfs.location import location_kind
+
+        if location_kind(where) == "local":
+            path = os.path.abspath(os.path.expanduser(where))
+            if not os.path.isdir(path):
+                if not self.ctx.confirm("Make the folder?", f"{path} does not exist yet.", ["The album folder is made inside it."],
+                                        confirm="Make the folder"):
+                    return
+                try:
+                    os.makedirs(path, exist_ok=True)
+                except OSError as exc:
+                    self.problem.configure(text=f"That folder could not be made: {exc}")
+                    return
+            where = path
+        state = self.ctx.state
+        state.set("album_stamp", self.place.get())
+        state.set("album_format", self.STYLES[self.style_box.current()][1])
+        state.set("album_dest", where)
+        state.save()
+        self.result = AlbumChoice(where, self.options())
+        _dismiss(self)
+
+    def _cancel(self) -> None:
+        _dismiss(self)
+
+    def show(self) -> AlbumChoice | None:
         self.wait_window()
         return self.result

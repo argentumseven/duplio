@@ -7,6 +7,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from typing import Any
 
+from duplio.favorites import Favorites
 from duplio.gui.model import (
     ARCHIVE,
     AUDIO,
@@ -61,8 +62,9 @@ def short_reason(reason: str) -> str:
 class Painter:
     """Draws cards onto a :class:`VirtualList` and keeps their thumbnails coming."""
 
-    def __init__(self, view: VirtualList, thumbs: Thumbnailer, fonts: Fonts, box: int = 132) -> None:
+    def __init__(self, view: VirtualList, thumbs: Thumbnailer, fonts: Fonts, box: int = 132, favorites: Favorites | None = None) -> None:
         self.view = view
+        self.favorites = favorites  # when there is a list of favorites, every picture and movie gets a star to click
         self.thumbs = thumbs
         self.fonts = fonts
         self.box = box
@@ -90,6 +92,33 @@ class Painter:
 
     # ---- thumbnails -----------------------------------------------------
     def _thumb(self, tile: Tile, x: int, y: int, row: int, tags: tuple[str, ...], box: int | None = None) -> None:
+        """The picture square of a card, with its star."""
+        self._picture(tile, x, y, row, tags, box)
+        if self.favorites is not None and tile.kind in (PICTURE, VIDEO) and (box or self.box) >= 64:
+            self._star(tile, x + (box or self.box), y, tags)
+
+    def _star(self, tile: Tile, right: int, top: int, tags: tuple[str, ...]) -> None:
+        """A star in the top right corner of a picture: filled when it is a favorite. Clicking it is handled by the page."""
+        assert self.favorites is not None
+        c = self.canvas
+        starred = tile.uri in self.favorites
+        mark = (tags[0], f"star:{tile.key}")
+        c.create_rectangle(right - 23, top + 2, right - 2, top + 22, fill="#000000", outline="", stipple="gray50", tags=mark)
+        c.create_text(right - 12, top + 12, text="★" if starred else "☆", fill=PALETTE["warn"] if starred else "#ffffff",
+                      font=self.fonts.base, tags=mark)
+
+    def star_in_list(self, tile: Tile, cx: int, cy: int, tags: tuple[str, ...]) -> None:
+        """The star of a line in the list view: beside the little picture, not on it."""
+        if self.favorites is None or tile.kind not in (PICTURE, VIDEO):
+            return
+        starred = tile.uri in self.favorites
+        c = self.canvas
+        mark = (tags[0], f"star:{tile.key}")
+        c.create_rectangle(cx - 11, cy - 11, cx + 11, cy + 11, fill=PALETTE["panel"], outline="", tags=mark)
+        c.create_text(cx, cy, text="★" if starred else "☆", fill=PALETTE["warn"] if starred else PALETTE["muted"], font=self.fonts.base,
+                      tags=mark)
+
+    def _picture(self, tile: Tile, x: int, y: int, row: int, tags: tuple[str, ...], box: int | None = None) -> None:
         """The picture square of a card: the thumbnail if it is at hand, otherwise a placeholder that is replaced when it arrives."""
         c = self.canvas
         box = box or self.box
@@ -291,7 +320,8 @@ class Painter:
         else:
             self._folder_icon(tx, ty, box, tags)
         if item.offline:
-            c.create_text(tx + box - 4, ty + 4, text="☁", anchor="ne", fill=PALETTE["warn"], font=f.base, tags=tags)
+            c.create_text(tx + box - 28 if self.favorites is not None else tx + box - 4, ty + 4, text="☁", anchor="ne", fill=PALETTE["warn"],
+                          font=f.base, tags=tags)
         c.create_text(x + w // 2, ty + box + 8, text=shorten(item.name, w - 12, f.bold), anchor="n", font=f.bold, fill=PALETTE["text"], tags=tags)
         lines = item.tile.details.split(" · ") if item.tile is not None else ["folder"]  # the size, then the date: two short lines
         for n, line in enumerate(lines[:2]):
@@ -316,9 +346,10 @@ class Painter:
         h = self.detail_row_height
         c.create_rectangle(self.pad, y + 2, width - self.pad, y + h - 2, fill=PALETTE["header"] if selected else PALETTE["panel"],
                            outline=PALETTE["primary"] if selected else PALETTE["line"], tags=tags)
-        tx, ty = self.pad + 8, y + 8
+        tx, ty = self.pad + 8 + (28 if self.favorites is not None else 0), y + 8
         if item.tile is not None:
             self._thumb(item.tile, tx, ty, row, tags, box)
+            self.star_in_list(item.tile, self.pad + 8 + 12, y + h // 2, tags)
         else:
             self._folder_icon(tx, ty, box, tags)
         columns = width - self.pad - 10

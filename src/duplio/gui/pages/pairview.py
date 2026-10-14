@@ -64,7 +64,7 @@ class PairView(tk.Frame):
         self.view = VirtualList(holder, f, self._draw_row, on_click=self._click, on_double=self._double, on_context=self._context,
                                 on_hover=self._hover)
         self.view.pack(fill="both", expand=True)
-        self.painter = Painter(self.view, ctx.thumbs, f, THUMB_SIZES.get(self.size_box.get(), 132))
+        self.painter = Painter(self.view, ctx.thumbs, f, THUMB_SIZES.get(self.size_box.get(), 132), favorites=ctx.favorites)
         self.painter.selectable = selectable
         if slot_labels:
             self.painter.slot_labels = slot_labels
@@ -165,6 +165,11 @@ class PairView(tk.Frame):
         return self.tiles.get(key) if key else None
 
     def _click(self, tags: tuple[str, ...], _event: tk.Event) -> None:
+        starred = tag_value(tags, "star:")
+        if starred and starred in self.tiles:
+            actions.toggle_favorite(self.ctx, self.tiles[starred])
+            self.view.redraw_all()
+            return
         tile = self._tile_at(tags)
         if tile is not None:
             row = next((r for r in self.rows if tile.key in (t.key for t in r.tiles)), None)
@@ -190,7 +195,7 @@ class PairView(tk.Frame):
 
         actions.context_menu(self.ctx, tile, event.x_root, event.y_root, [
             ("Select" if tile.key not in self.selected else "Unselect", lambda: self.toggle(tile)),
-        ], fetch)
+        ], fetch, self.view.redraw_all)
 
     def _hover(self, tags: tuple[str, ...], event: tk.Event | None) -> None:
         tile = self._tile_at(tags) if event is not None else None

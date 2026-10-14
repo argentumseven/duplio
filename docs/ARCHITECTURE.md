@@ -235,7 +235,22 @@ must ask a question (a password) goes through `Context.call_in_ui`.
   and always leaves room for its border, because wrapping at the full width makes the label ask for more than it has and the
   window keeps growing. `tests/test_gui_flows.py: test_no_button_label_or_box_is_ever_cut_off` walks every screen at three window
   widths and fails if any label or button needs more room than it was given.
-- `foldertree.py` is the folder tree of the Browse page. Nodes open lazily: opening one reads its sub-folders on a worker thread
+- `preview/` makes a picture of a file as cheaply as it can: the cache, the file's own small preview, then the whole file (when
+  allowed) turned into a thumbnail by Pillow, else by `decoders.py` (BMP, GIF, PNM, TGA; PNG in every layout and baseline or
+  progressive JPEG via `png.py` and `jpeg.py`, all sampling rather than decoding big pictures in full), else by `ffmpeg.py`
+  (any other format, and a frame of a movie; `video.py` reads an MP4/MOV cover with a few ranged reads). Pure-Python decoding
+  goes through one lock so it never competes with itself for the window's thread. The store (`store.py`) keeps pictures between
+  runs, forgets those unused for `keep_days`, and `pinned_bytes()` tells the background fetch whether the open folder alone has
+  filled it. The background fetch (`gui/prefetch.py`) orders a folder as "from the viewer onward, then back round", and its reads
+  never take a drive's last free slot (`PreviewService._slot(background=True)`), so what is on screen is not queued behind it.
+- `favorites.py` is the list of starred files (a reference and the size and time they had; written whole and swapped into place).
+  `backup/album.py` makes an album from it with the same `execute_action` and journal as a merge, so its copies are verified and
+  `undo` can take them away; it plans first (`plan_album`: names made safe and unique, unreachable favorites named and left out)
+  and runs after the person has seen the list. `gui/pages/favorites.py` is the page; stars are drawn by `Painter._star` and
+  clicked through the `star:` tag each page's click handler checks first.
+- `scan/inventory.py: Root.recursive` lets a scan stay in a root's top folder (`_TopFolderOnly` wraps the walk filter, and
+  `Inventory.unvisited` remembers the sub-folders it did not enter), which "Is it backed up?" uses so its answer can say exactly
+  what it looked at. `foldertree.py` is the folder tree of the Browse page. Nodes open lazily: opening one reads its sub-folders on a worker thread
   (`_load`), results come back through a queue polled with `after`, and the tree never touches a drive on the window's thread.
   The page tells it where it is (`reveal` opens the path down to that folder from the best matching root and highlights it; a
   highlight the tree made itself is not mistaken for a click) and what it has already read (`learn`), so a folder is not read

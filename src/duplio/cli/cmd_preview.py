@@ -192,8 +192,14 @@ def previews_clear(yes: bool) -> None:
 @click.option("--max-size", default=None, help="Size limit of the saved cache, e.g. 2GB.")
 @click.option("--online-only/--no-online-only", default=None,
               help="Fetch pictures of cloud-only files without asking (this downloads them).")
+@click.option("--keep-days", type=click.IntRange(0, 3650), default=None,
+              help="Forget saved pictures nobody has looked at for this many days (0: never).")
+@click.option("--download-whole/--no-download-whole", default=None,
+              help="Read a whole picture or movie that has no small preview inside, to make one (needed for most movies).")
+@click.option("--ffmpeg", "ffmpeg_path", default=None, help="The ffmpeg program to use for movies and unusual pictures ('' to look for one).")
 @handle_errors
-def previews_settings(keep: str | None, mode: str | None, max_size: str | None, online_only: bool | None) -> None:
+def previews_settings(keep: str | None, mode: str | None, max_size: str | None, online_only: bool | None, keep_days: int | None,
+                      download_whole: bool | None, ffmpeg_path: str | None) -> None:
     """Show or change how pictures are cached."""
     app = get_app()
     p = app.settings.previews
@@ -207,6 +213,12 @@ def previews_settings(keep: str | None, mode: str | None, max_size: str | None, 
         new.max_bytes, changed = parse_size(max_size), True
     if online_only is not None:
         new.online_only, changed = online_only, True
+    if keep_days is not None:
+        new.keep_days, changed = keep_days, True
+    if download_whole is not None:
+        new.download_whole, changed = download_whole, True
+    if ffmpeg_path is not None:
+        new.ffmpeg, changed = ffmpeg_path, True
     if changed:
         new.validate()
         app.settings.previews = new
@@ -216,7 +228,11 @@ def previews_settings(keep: str | None, mode: str | None, max_size: str | None, 
     table = Table(box=box.SIMPLE, show_header=False)
     rows = [
         ("Cache pictures from", {"auto": "slow, remote and cloud drives", "always": "every drive", "off": "nowhere"}[p.mode]),
-        ("Keep them", "until Duplio closes" if p.keep == "session" else f"between runs, up to {human_size(p.max_bytes)} (unencrypted)"),
+        ("Keep them", "until Duplio closes" if p.keep == "session" else
+         f"between runs, up to {human_size(p.max_bytes)} (unencrypted)" + (f", forgetting those not looked at for {p.keep_days} days" if p.keep_days else "")),
+        ("Pictures with no small preview", "read whole to make one (up to " + human_size(p.max_download) + ")" if p.download_whole
+         else "left alone unless small or asked for"),
+        ("ffmpeg (movies, unusual pictures)", p.ffmpeg or "looked for on this computer"),
         ("Cloud-only files", "fetched without asking" if p.online_only else "never fetched without asking"),
         ("Prefetch ahead", f"{p.prefetch} pictures"),
         ("Picture size", f"{p.size_px} pixels on the long side"),

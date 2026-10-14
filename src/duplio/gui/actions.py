@@ -79,17 +79,32 @@ def show_in_folder(ctx: Context, tile: Tile) -> None:
         open_in_viewer(os.path.dirname(path))
 
 
+def is_favorite(ctx: Context, tile: Tile) -> bool:
+    return tile.uri in ctx.favorites
+
+
+def toggle_favorite(ctx: Context, tile: Tile) -> bool:
+    """Star the picture if it is not starred, unstar it if it is. Returns whether it is starred now. Nothing is done to the file."""
+    starred = ctx.favorites.toggle(tile.uri, tile.name, tile.entry.size, tile.entry.mtime_ns)
+    if ctx.favorites.problem:
+        ctx.show_error(ctx.favorites.problem, "Favorites")
+    return starred
+
+
 def copy_path(ctx: Context, tile: Tile) -> None:
     ctx.window.clipboard_clear()
     ctx.window.clipboard_append(tile.location)
 
 
 def context_menu(ctx: Context, tile: Tile, event_x: int, event_y: int, extra: list[tuple[str, Callable[[], None]]] | None = None,
-                 fetch_picture: Callable[[], None] | None = None) -> None:
+                 fetch_picture: Callable[[], None] | None = None, on_star: Callable[[], None] | None = None) -> None:
     import tkinter as tk
 
     menu = tk.Menu(ctx.window, tearoff=0)
     menu.add_command(label="Open", command=lambda: open_tile(ctx, tile))
+    if tile.kind in ("picture", "video"):
+        menu.add_command(label="☆ Remove from favorites" if is_favorite(ctx, tile) else "★ Add to favorites",
+                         command=lambda: (toggle_favorite(ctx, tile), on_star() if on_star else None))
     if is_local(tile):
         menu.add_command(label="Show in its folder", command=lambda: show_in_folder(ctx, tile))
     menu.add_command(label="Copy its address", command=lambda: copy_path(ctx, tile))

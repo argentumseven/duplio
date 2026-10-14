@@ -1042,3 +1042,280 @@ def test_the_other_pages_still_look_inside_every_folder(tmp_path: Path, window: 
     page.run()
     wait(window, lambda: page.diff is not None)
     assert "Day 1/deep.jpg" in {t.entry.rel for r in page.all_rows for t in r.tiles}
+
+
+# --------------------------------------------------------------------------- favorites and albums
+def star_tags(page: Any) -> dict[str, str]:
+    """``{tile key: ★ or ☆}`` for every star drawn on the page's canvas."""
+    canvas = page.view.canvas
+    out: dict[str, str] = {}
+    for item in canvas.find_all():
+        for tag in canvas.gettags(item):
+            if tag.startswith("star:") and canvas.type(item) == "text":
+                out[tag[5:]] = canvas.itemcget(item, "text")
+    return out
+
+
+def tile_key_of(page: Any, name: str) -> str:
+    return next(k for k, i in page.by_key.items() if i.name == name)
+
+
+def test_a_click_on_the_star_of_a_picture_makes_it_a_favorite_and_a_second_click_takes_it_back(tmp_path: Path, window: Any) -> None:
+    make_pictures(tmp_path / "pics", 4)
+    page = open_folder(window, tmp_path / "pics")
+    key = tile_key_of(page, "IMG_001.jpg")
+    pump(window, timeout=0.3)
+    assert set(star_tags(page).values()) == {"☆"}  # every picture has a star, none filled
+    page._click((f"star:{key}",), None)  # type: ignore[arg-type]
+    pump(window, timeout=0.2)
+    uri = page.by_key[key].tile.uri
+    assert uri in window.ctx.favorites and star_tags(page)[key] == "★"
+    assert [f.name for f in window.ctx.favorites.items()] == ["IMG_001.jpg"]
+    page._click((f"star:{key}",), None)  # type: ignore[arg-type]
+    assert uri not in window.ctx.favorites and star_tags(page)[key] == "☆"
+    assert page.selected is None  # starring does not also select the picture
+
+
+def test_the_f_key_stars_the_selected_picture(tmp_path: Path, window: Any) -> None:
+    make_pictures(tmp_path / "pics", 3)
+    page = open_folder(window, tmp_path / "pics")
+    key = tile_key_of(page, "IMG_002.jpg")
+    page._click((f"tile:{key}",), None)  # type: ignore[arg-type]
+    page._star_selected()
+    assert [f.name for f in window.ctx.favorites.items()] == ["IMG_002.jpg"]
+    page._star_selected()
+    assert not len(window.ctx.favorites)
+
+
+def test_stars_are_kept_for_the_next_time_duplio_is_opened(tmp_path: Path, window: Any, dirs: AppDirs) -> None:
+    from duplio.favorites import Favorites
+
+    make_pictures(tmp_path / "pics", 2)
+    page = open_folder(window, tmp_path / "pics")
+    page._click((f"star:{tile_key_of(page, 'IMG_000.jpg')}",), None)  # type: ignore[arg-type]
+    assert [f.name for f in Favorites(dirs.state / "favorites.json").items()] == ["IMG_000.jpg"]  # what a new session would read
+
+
+def test_the_favorites_page_shows_every_starred_picture_from_any_folder_and_unstars(tmp_path: Path, window: Any) -> None:
+    make_pictures(tmp_path / "one", 3)
+    make_pictures(tmp_path / "two", 3)
+    for folder, name in (("one", "IMG_000.jpg"), ("two", "IMG_002.jpg"), ("one", "IMG_001.jpg")):
+        page = open_folder(window, tmp_path / folder)
+        page._click((f"star:{tile_key_of(page, name)}",), None)  # type: ignore[arg-type]
+    window.show("favorites")
+    fav = window.pages["favorites"]
+    pump(window, timeout=0.5)
+    assert [i.name for i in fav.items] == ["IMG_001.jpg", "IMG_002.jpg", "IMG_000.jpg"]  # newest starred first
+    assert "3 favorites: 3 pictures" in fav.summary.cget("text")
+    fav.order_box.set("Name, A to Z")
+    fav._ordered()
+    assert [i.name for i in fav.items] == ["IMG_000.jpg", "IMG_001.jpg", "IMG_002.jpg"]
+    assert set(star_tags(fav).values()) == {"★"}
+    fav._click((f"star:{tile_key_of(fav, 'IMG_001.jpg')}",), None)  # type: ignore[arg-type]
+    assert [i.name for i in fav.items] == ["IMG_000.jpg", "IMG_002.jpg"] and len(window.ctx.favorites) == 2
+    assert (tmp_path / "one" / "IMG_001.jpg").exists()  # taking a star off never touches the picture
+
+
+def test_an_empty_favorites_page_says_how_to_star_something(window: Any) -> None:
+    window.show("favorites")
+    page = window.pages["favorites"]
+    pump(window, timeout=0.3)
+    assert page.summary.cget("text") == "Nothing is starred yet." and not page.album_button._enabled
+    assert "Click the ☆" in page.view.canvas.itemcget(page.view.canvas.find_all()[0], "text") if page.view.canvas.find_all() else True
+
+
+def test_removing_all_stars_asks_first_and_only_removes_stars(tmp_path: Path, window: Any) -> None:
+    make_pictures(tmp_path / "pics", 3)
+    dialogs = Dialogs(window.ctx)
+    page = open_folder(window, tmp_path / "pics")
+    for name in ("IMG_000.jpg", "IMG_001.jpg"):
+        page._click((f"star:{tile_key_of(page, name)}",), None)  # type: ignore[arg-type]
+    window.show("favorites")
+    fav = window.pages["favorites"]
+    dialogs.answer = False
+    fav.clear_all()
+    assert len(window.ctx.favorites) == 2 and dialogs.confirms[-1][0] == "Remove all stars?"
+    dialogs.answer = True
+    fav.clear_all()
+    assert len(window.ctx.favorites) == 0 and (tmp_path / "pics" / "IMG_000.jpg").exists()
+
+
+def test_the_context_menu_of_a_picture_offers_the_star(tmp_path: Path, window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tkinter as tk
+
+    make_pictures(tmp_path / "pics", 2)
+    page = open_folder(window, tmp_path / "pics")
+    menus: list[Any] = []
+    monkeypatch.setattr(tk.Menu, "tk_popup", lambda self, x, y: menus.append(self))
+
+    class Where:
+        x_root = y_root = 10
+
+    key = tile_key_of(page, "IMG_000.jpg")
+    page._context((f"tile:{key}",), Where())  # type: ignore[arg-type]
+    labels = [menus[-1].entrycget(i, "label") for i in range(menus[-1].index("end") + 1) if menus[-1].type(i) == "command"]
+    assert "★ Add to favorites" in labels
+    menus[-1].invoke(labels.index("★ Add to favorites"))
+    page._context((f"tile:{key}",), Where())  # type: ignore[arg-type]
+    labels = [menus[-1].entrycget(i, "label") for i in range(menus[-1].index("end") + 1) if menus[-1].type(i) == "command"]
+    assert "☆ Remove from favorites" in labels and len(window.ctx.favorites) == 1
+
+
+def test_stars_are_on_the_comparison_pages_too(tmp_path: Path, window: Any) -> None:
+    a, b = make_demo_folders(tmp_path)
+    Dialogs(window.ctx)
+    page = page_for(window, "compare", a, b)
+    page.run()
+    wait(window, lambda: page.diff is not None)
+    pump(window, timeout=0.5)
+    keys = [k for k, mark in star_tags(page.pairs).items() if mark == "☆"]
+    assert keys
+    tile = page.pairs.tiles[keys[0]]
+    page.pairs._click((f"star:{keys[0]}",), None)  # type: ignore[arg-type]
+    assert tile.uri in window.ctx.favorites and not page.pairs.selected  # starred, and not ticked for copying
+
+
+class FakeAlbumDialog:
+    """Stands in for the dialog: answers with a fixed choice."""
+
+    choice: Any = None
+
+    def __init__(self, ctx: Any, count: int) -> None:
+        self.count = count
+
+    def show(self) -> Any:
+        return FakeAlbumDialog.choice
+
+
+def test_an_album_is_made_from_the_favorites_and_can_be_undone(tmp_path: Path, window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from duplio.backup.album import AlbumOptions
+    from duplio.gui.dialogs import AlbumChoice
+    from duplio.gui.pages import favorites as favorites_page
+    from duplio.plan.undo import undo
+
+    make_pictures(tmp_path / "pics", 4)
+    dialogs = Dialogs(window.ctx)
+    page = open_folder(window, tmp_path / "pics")
+    for name in ("IMG_000.jpg", "IMG_003.jpg"):
+        page._click((f"star:{tile_key_of(page, name)}",), None)  # type: ignore[arg-type]
+    albums = tmp_path / "albums"
+    albums.mkdir()
+    monkeypatch.setattr(favorites_page, "AlbumDialog", FakeAlbumDialog)
+    FakeAlbumDialog.choice = AlbumChoice(str(albums), AlbumOptions(name="Best of", stamp="after"))
+    window.show("favorites")
+    fav = window.pages["favorites"]
+    fav.make_album()
+    wait(window, lambda: dialogs.infos)
+    title, headline, lines, kind, buttons = dialogs.infos[-1]
+    assert title == "Album made" and headline == "Done." and kind == "ok" and "2 files copied" in lines[0]
+    confirm = dialogs.confirms[-1]
+    assert confirm[0] == "Make the album" and "'Best of " in confirm[1] and {r[0] for r in confirm[3]} == {"IMG_000.jpg", "IMG_003.jpg"}
+    folders = [p for p in albums.iterdir() if p.is_dir()]
+    assert len(folders) == 1 and folders[0].name.startswith("Best of ") and sorted(p.name for p in folders[0].iterdir()) == ["IMG_000.jpg", "IMG_003.jpg"]
+    assert any(label == "Open the album folder" for label, _cmd, _style in buttons)
+    assert all((tmp_path / "pics" / n).exists() for n in ("IMG_000.jpg", "IMG_003.jpg"))  # originals stay
+    from duplio.plan.journal import list_journals, summarize
+
+    journal = list_journals(window.ctx.dirs.journals)[0]
+    assert summarize(journal).header["action"] == "album"
+    assert undo(None, window.ctx.registry, dirs=window.ctx.dirs).count("restored") == 2  # History & undo takes the copies away
+    assert not any(folders[0].glob("*.jpg"))
+
+
+def test_an_album_with_nothing_reachable_says_so_and_copies_nothing(tmp_path: Path, window: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    from duplio.backup.album import AlbumOptions
+    from duplio.gui.dialogs import AlbumChoice
+    from duplio.gui.pages import favorites as favorites_page
+
+    dialogs = Dialogs(window.ctx)
+    window.ctx.favorites.add(str(tmp_path / "gone" / "x.jpg"), "x.jpg", 5, 5)
+    albums = tmp_path / "albums"
+    albums.mkdir()
+    monkeypatch.setattr(favorites_page, "AlbumDialog", FakeAlbumDialog)
+    FakeAlbumDialog.choice = AlbumChoice(str(albums), AlbumOptions(name="Empty"))
+    window.show("favorites")
+    window.pages["favorites"].make_album()
+    wait(window, lambda: dialogs.infos)
+    assert dialogs.infos[-1][0] == "Nothing to copy" and "was not found" in dialogs.infos[-1][2][0] and not list(albums.iterdir())
+
+
+def test_making_an_album_with_no_favorites_says_to_star_some(window: Any) -> None:
+    dialogs = Dialogs(window.ctx)
+    window.show("favorites")
+    window.pages["favorites"].make_album()
+    assert dialogs.infos[-1][0] == "Nothing is starred"
+
+
+# --------------------------------------------------------------------------- the album dialog
+def test_the_album_dialog_previews_the_folder_name_as_it_is_typed(tmp_path: Path, window: Any) -> None:
+    from datetime import datetime
+
+    from duplio.gui.dialogs import AlbumDialog
+
+    dialog = AlbumDialog(window.ctx, 12, now=lambda: datetime(2026, 10, 14, 15, 30, 22))
+    pump(window, timeout=0.2)
+    assert not dialog.make_button._enabled and "Type a name" in dialog.preview.cget("text")  # nothing to name it by yet
+    dialog.name.set("Summer trip")
+    assert dialog.preview.cget("text").endswith("Summer trip") and dialog.make_button._enabled
+    dialog.place.set("before")
+    dialog._update()
+    assert dialog.preview.cget("text").endswith("2026-10-14 Summer trip")
+    dialog.place.set("after")
+    dialog.style_box.current(1)
+    dialog._update()
+    assert dialog.preview.cget("text").endswith("Summer trip 2026-10-14 15-30")
+    dialog.name.set("")
+    assert dialog.preview.cget("text").endswith("2026-10-14 15-30") and dialog.make_button._enabled  # the stamp alone is a name
+    dialog.place.set("none")
+    dialog._update()
+    assert not dialog.make_button._enabled
+    dialog._cancel()
+
+
+def test_the_album_dialog_returns_the_choice_and_remembers_it(tmp_path: Path, window: Any) -> None:
+    from datetime import datetime
+
+    from duplio.gui.dialogs import AlbumDialog
+
+    where = tmp_path / "Albums"
+    where.mkdir()
+    dialog = AlbumDialog(window.ctx, 3, now=lambda: datetime(2026, 1, 2, 3, 4, 5))
+    dialog.name.set("Trip")
+    dialog.place.set("before")
+    dialog.style_box.current(2)
+    dialog.destination.set(str(where))
+    dialog._ok()
+    pump(window, timeout=0.1)
+    choice = dialog.result
+    assert choice is not None and choice.destination == str(where)
+    assert (choice.options.name, choice.options.stamp, choice.options.stamp_format) == ("Trip", "before", "seconds")
+    assert window.ctx.state.get("album_dest") == str(where) and window.ctx.state.get("album_stamp") == "before"
+    again = AlbumDialog(window.ctx, 3)
+    assert again.place.get() == "before" and again.destination.get() == str(where)  # the same choices next time
+    again._cancel()
+
+
+def test_a_missing_destination_is_made_only_after_asking(tmp_path: Path, window: Any) -> None:
+    from duplio.gui.dialogs import AlbumDialog
+
+    dialogs = Dialogs(window.ctx)
+    target = tmp_path / "not" / "yet"
+    dialog = AlbumDialog(window.ctx, 3)
+    dialog.name.set("Trip")
+    dialog.destination.set(str(target))
+    dialogs.answer = False
+    dialog._ok()
+    assert dialog.winfo_exists() and not target.exists() and dialogs.confirms[-1][0] == "Make the folder?"
+    dialogs.answer = True
+    dialog._ok()
+    assert target.is_dir() and dialog.result is not None
+
+
+def test_nothing_in_the_album_dialog_is_cut_off(window: Any) -> None:
+    from duplio.gui.dialogs import AlbumDialog
+
+    dialog = AlbumDialog(window.ctx, 1234)
+    dialog.name.set("A rather long album name that goes on and on for a while")
+    pump(window, timeout=0.4)
+    assert cut_off(dialog) == []
+    dialog._cancel()

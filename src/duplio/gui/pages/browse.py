@@ -38,7 +38,7 @@ VIEWS = ("Thumbnails", "Details")
 
 class BrowsePage(Page):
     title = "Browse a folder"
-    hints = (("Enter", "open"), ("Backspace", "up"), ("F5", "reload"))
+    hints = (("Enter", "open"), ("F", "star"), ("Backspace", "up"), ("F5", "reload"))
     subtitle = ("Look inside any folder, on this computer, a phone, a NAS or a cloud drive. Pictures are fetched once, kept in a "
                 "buffer, and shown from it, so moving around a big remote folder stays quick. Looking changes nothing.")
 
@@ -125,7 +125,7 @@ class BrowsePage(Page):
         self.view = VirtualList(holder, f, self._draw, on_click=self._click, on_double=self._double, on_context=self._context,
                                 on_hover=self._hover)
         self.view.pack(fill="both", expand=True)
-        self.painter = Painter(self.view, ctx.thumbs, f, self.box)
+        self.painter = Painter(self.view, ctx.thumbs, f, self.box, favorites=ctx.favorites)
         self.painter.selectable = False
         self.painter.fetch_online_only = self.fetch_cloud_only
         self.view.relayout = self._heights
@@ -134,6 +134,8 @@ class BrowsePage(Page):
         canvas.bind("<BackSpace>", lambda _e: self.go_up())
         canvas.bind("<F5>", lambda _e: self.refresh())
         canvas.bind("<Return>", lambda _e: self._open_selected())
+        canvas.bind("<Key-f>", lambda _e: self._star_selected())
+        canvas.bind("<Key-F>", lambda _e: self._star_selected())
         self._last_hover = ""
         self._set_buttons()
 
@@ -520,7 +522,21 @@ class BrowsePage(Page):
         item = self.by_key.get(key) if key else None
         return (key, item) if key and item is not None else None
 
+    def _star(self, key: str) -> None:
+        item = self.by_key.get(key)
+        if item is not None and item.tile is not None:
+            actions.toggle_favorite(self.ctx, item.tile)
+            self.view.redraw_all()
+
+    def _star_selected(self) -> None:
+        if self.selected is not None:
+            self._star(self.selected)
+
     def _click(self, tags: tuple[str, ...], _event: tk.Event) -> None:
+        starred = tag_value(tags, "star:")
+        if starred:
+            self._star(starred)
+            return
         found = self._item_at(tags)
         self.selected = found[0] if found else None
         self.view.redraw_all()
@@ -574,7 +590,7 @@ class BrowsePage(Page):
                 self.view.redraw_all()
                 self.painter.fetch_online_only = self.fetch_cloud_only
 
-        actions.context_menu(self.ctx, tile, event.x_root, event.y_root, None, fetch)
+        actions.context_menu(self.ctx, tile, event.x_root, event.y_root, None, fetch, self.view.redraw_all)
 
     def _copy(self, text: str) -> None:
         self.clipboard_clear()

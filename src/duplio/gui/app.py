@@ -14,6 +14,7 @@ from typing import Any
 from duplio import __version__
 from duplio.assets.logo import TAGLINE, WORDMARK
 from duplio.config import Settings, load_settings
+from duplio.favorites import Favorites
 from duplio.gui import style
 from duplio.gui.dialogs import ConfirmDialog, MessageDialog, PasswordDialog, ProgressDialog
 from duplio.gui.jobs import Job, explain
@@ -50,6 +51,7 @@ class Context:
     prefetcher: FolderPrefetcher
     browse_cache: BrowseCache
     places: PlacesService
+    favorites: Favorites
 
     @property
     def cache(self) -> HashCache | NullCache:
@@ -129,13 +131,14 @@ class Page(tk.Frame):
 NAV = (  # (page, shortcut number or "", name)
     ("home", "", "Home"),
     ("browse", "1", "Browse a folder"),
-    ("compare", "2", "Compare two folders"),
-    ("backup", "3", "Is it backed up?"),
-    ("dupes", "4", "Find duplicates"),
-    ("sync", "5", "Keep in sync"),
-    ("import", "6", "Import from phone"),
-    ("history", "7", "History & undo"),
-    ("settings", "8", "Settings"),
+    ("favorites", "2", "Favorites"),
+    ("compare", "3", "Compare two folders"),
+    ("backup", "4", "Is it backed up?"),
+    ("dupes", "5", "Find duplicates"),
+    ("sync", "6", "Keep in sync"),
+    ("import", "7", "Import from phone"),
+    ("history", "8", "History & undo"),
+    ("settings", "9", "Settings"),
 )
 
 
@@ -144,13 +147,14 @@ def _page_classes() -> dict[str, type[Page]]:
     from duplio.gui.pages.browse import BrowsePage
     from duplio.gui.pages.compare import ComparePage
     from duplio.gui.pages.dupes import DuplicatesPage
+    from duplio.gui.pages.favorites import FavoritesPage
     from duplio.gui.pages.history import HistoryPage
     from duplio.gui.pages.home import HomePage
     from duplio.gui.pages.ingest import ImportPage
     from duplio.gui.pages.settings import SettingsPage
     from duplio.gui.pages.sync import SyncPage
 
-    return {"home": HomePage, "browse": BrowsePage, "compare": ComparePage, "backup": BackedUpPage, "dupes": DuplicatesPage, "sync": SyncPage,
+    return {"home": HomePage, "browse": BrowsePage, "favorites": FavoritesPage, "compare": ComparePage, "backup": BackedUpPage, "dupes": DuplicatesPage, "sync": SyncPage,
             "import": ImportPage, "history": HistoryPage, "settings": SettingsPage}
 
 
@@ -169,7 +173,7 @@ class DuplioWindow(tk.Tk):
         thumbs = Thumbnailer(self, previews, image_budget=settings.previews.memory_bytes or None)
         self.ctx = Context(self, self.fonts, dirs, settings, registry, previews, thumbs, ListingCache(),
                            GuiState(dirs.state / "window.json"), Tooltip(self, self.fonts), FolderPrefetcher(previews), BrowseCache(),
-                           PlacesService())
+                           PlacesService(), Favorites(dirs.state / "favorites.json"))
         registry.credential_provider = self.ctx.password_provider
         self.hash_cache: HashCache | NullCache | None = None
         self.pages: dict[str, Page] = {}
@@ -244,7 +248,7 @@ class DuplioWindow(tk.Tk):
         for child in self._keybar.winfo_children():
             child.destroy()
         f = self.fonts
-        everywhere = (("ctrl+1-8", "Pages"), ("ctrl+q", "Quit"))
+        everywhere = (("ctrl+1-9", "Pages"), ("ctrl+q", "Quit"))
         for key, what in (*hints, *everywhere):
             tk.Label(self._keybar, text=key, font=f.bold, bg=PALETTE["sidebar"], fg=PALETTE["key"], padx=0, pady=4).pack(side="left", padx=(12, 4))
             tk.Label(self._keybar, text=what, font=f.small, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack(side="left")

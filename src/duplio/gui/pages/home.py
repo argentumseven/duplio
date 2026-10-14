@@ -16,13 +16,14 @@ if TYPE_CHECKING:
 
 CARDS = (  # (page, number, title, what it does)
     ("browse", "1", "Browse a folder", "Look inside any folder, on this computer, a phone, a NAS or a cloud drive, as a wall of pictures."),
-    ("compare", "2", "Compare two folders", "Put folder A next to folder B: what is in one and not the other. Renamed files are recognised."),
-    ("backup", "3", "Is it backed up?", "Check that everything in a folder has a safe copy in your backup, and copy over what is missing."),
-    ("dupes", "4", "Find duplicates", "Scan folders, phones and shares for identical files; review them side by side; clean up safely."),
-    ("sync", "5", "Keep in sync", "Make two folders match, in one direction or both, without ever destroying anything."),
-    ("import", "6", "Import from phone", "Copy new photos and videos into your library, skipping the ones it already has."),
-    ("history", "7", "History & undo", "Everything Duplio changed, and the button to put it back."),
-    ("settings", "8", "Settings", "Colours, the picture buffer, and what to skip when searching."),
+    ("favorites", "2", "Favorites", "Star the pictures and movies you love, wherever they are, and gather copies of them into an album."),
+    ("compare", "3", "Compare two folders", "Put folder A next to folder B: what is in one and not the other. Renamed files are recognised."),
+    ("backup", "4", "Is it backed up?", "Check that everything in a folder has a safe copy in your backup, and copy over what is missing."),
+    ("dupes", "5", "Find duplicates", "Scan folders, phones and shares for identical files; review them side by side; clean up safely."),
+    ("sync", "6", "Keep in sync", "Make two folders match, in one direction or both, without ever destroying anything."),
+    ("import", "7", "Import from phone", "Copy new photos and videos into your library, skipping the ones it already has."),
+    ("history", "8", "History & undo", "Everything Duplio changed, and the button to put it back."),
+    ("settings", "9", "Settings", "Colours, the picture buffer, and what to skip when searching."),
 )
 SAFETY = ("Nothing is removed without your review. Files are re-verified the moment before any change, every change is "
           "journaled, and the default action — quarantine — is instantly undoable.")

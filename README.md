@@ -149,7 +149,7 @@ blue and folder B is red everywhere, the colours of the two figures in the icon,
 which folder it is in. The look is the text screen's, in a window: one monospace typeface throughout, near-black background, red
 screen titles, amber headings, flat buttons with a thin rule above and below (red for the main action, green for a safe copy,
 bright red for anything that removes), a numbered list of screens on the left, and a bar of keys along the bottom
-(**Ctrl+1** to **Ctrl+8** jump to a screen, **Ctrl+Q** quits). *Settings → Colours* switches to a light version for the next
+(**Ctrl+1** to **Ctrl+9** jump to a screen, **Ctrl+Q** quits). *Settings → Colours* switches to a light version for the next
 start. Button labels are short and toolbars wrap onto a second line in a narrow window, so no text is cut off; a test
 checks every screen at three window widths. Every list can be put in the order you want (name, date, size, type or
 folder, ascending or descending; duplicates also by number of copies), and the choice is remembered. Each folder box takes a typed path, a recent folder, **Choose folder…**, or **Phone or server…**
@@ -157,9 +157,10 @@ folder, ascending or descending; duplicates also by number of copies), and the c
 
 | Screen | What A and B are | What you see | What you can do |
 |---|---|---|---|
-| **Browse a folder** | one folder, on any drive | a wall of thumbnails or a list; folders to enter, Up and Back, a filter | open a file, copy its address; sort by name, date, size or type ([Browsing a folder](#browsing-a-folder-and-the-picture-buffer)) |
+| **Browse a folder** | one folder, on any drive | a folder tree on the left; a wall of thumbnails or a list; Up and Back, a filter | open a file, copy its address, star a picture; sort by name, date, size or type ([Browsing a folder](#browsing-a-folder-and-the-picture-buffer)) |
+| **Favorites** | every picture or movie you starred, from any folder or drive | a wall of thumbnails | take a star off; **make an album**: a new folder of verified copies, named as you like ([Favorites and albums](#favorites-and-albums)) |
 | **Compare two folders** | any two folders | every file of A with what B has for it: identical, renamed or moved, different content, only in A, only in B | copy the missing files A → B or B → A (all of them, or just the pictures you clicked) |
-| **Is it backed up?** | A: what you want to protect. B: the backup | a verdict ("Everything in A is safe in B" or "12 of 340 files in A are NOT in B"), and the files that are missing | copy what is missing into the backup |
+| **Is it backed up?** | A: what you want to protect. B: the backup | a verdict ("Everything in A is safe in B" or "12 of 340 files in A are NOT in B"), and the files that are missing | copy what is missing into the backup; tick **Include sub-folders** for A, for the backup, or both (it asks first, because it can take a long time) |
 | **Find duplicates** | A alone, or A and B (B can be a *reference* that is never changed) | every set of identical files as a row of pictures, each marked KEEP, REMOVE or LOCKED | click a picture to change its mark, choose a rule ("keep the oldest"…), move the REMOVE copies to the quarantine, undo |
 | **Keep in sync** | the two sides of a two-way sync | what a sync would do, with arrows; a file changed on both sides is kept as two versions | preview, then **Sync now** |
 | **Import from phone** | A: a phone or card. B: your library | what is new on the phone and what the library already has (even under another name) | import only the new files, sorted into folders by date |
@@ -243,9 +244,11 @@ slow part: a 6 MB photo has to cross the link just to draw a thumbnail. Duplio a
 2. **The photo's own thumbnail.** Cameras and phones store a small JPEG inside each photo (in its EXIF block), and RAW files
    (DNG, CR2, NEF, ARW and the like) carry larger previews. Duplio reads only the first ~64 KiB of the file (a *ranged*
    read, a few kilobytes on the wire) and takes that.
-3. **A small file, read whole**: up to 1 MiB on a slow drive.
-4. **Only when you ask**: a larger picture with no preview inside is not downloaded unless you press `f` in the review
-   screen (or pass `--download`). Until then the pane says why there is no picture.
+3. **The picture read whole**, when it has no small preview inside it. Most phone photos have one; many edited, exported or
+   scanned pictures do not, and neither does a movie. In the window this is on by default (Settings → *Read whole pictures
+   and movies that have no small preview*; at most 64 MB per file, once, and the picture is kept). The terminal screens and
+   commands read only small files (up to 1 MiB) on a slow drive unless you press `f` or pass `--download`, and the
+   similar-image search never reads whole photos unless asked (`--similar-full-read`).
 5. **Identical copies are one picture.** For a group of identical files, the picture comes from the cheapest copy: one
    already cached, then one that is not cloud-only, then the faster drive, then the smaller file.
 
@@ -258,13 +261,17 @@ internal SSD is read directly.
 downloaded it) is detected from its file attributes, and previewing it would download it. Duplio waits: `f` in the review
 screen, `--online-only`, or `duplio previews settings --online-only` allow it.
 
-**What is kept, and for how long.** By default pictures are kept only until Duplio closes, in a private temporary folder
-that is deleted on exit. That is deliberate: a zero-knowledge drive such as Tresorit keeps your files encrypted so that
-only your devices see them, and a thumbnail cache on disk would be a plain-text copy of part of them. If you would rather
-keep the pictures between runs, switch it on knowingly:
+**What is kept, and for how long.** In the window, pictures from slow, remote and cloud drives are kept **between runs**, in
+Duplio's cache folder, so coming back to a folder tomorrow (or after closing the program) costs nothing. A picture nobody has
+looked at for 60 days is let go (Settings, or `--keep-days`). The buffer may grow to 16 GB, which is only a ceiling: nothing is
+reserved, and when it is reached the pictures nobody has looked at for the longest go first, never the folder you are
+looking at. The pictures are stored **unencrypted**: a zero-knowledge drive such as Tresorit keeps your files encrypted so
+that only your devices see them, and a thumbnail cache on disk is a plain copy of a small part of them. If that matters to
+you, choose *until Duplio closes* in Settings (or `--keep session`), and the pictures live in a private temporary folder
+that is deleted on exit.
 
 ```bash
-duplio previews settings --keep persistent --max-size 2GB   # stored UNENCRYPTED in Duplio's cache folder
+duplio previews settings --keep persistent --max-size 32GB --keep-days 90   # stored UNENCRYPTED in Duplio's cache folder
 duplio previews stats                                       # how big is it?
 duplio previews clear                                       # delete every saved picture
 duplio previews warm sftp://me@nas/photos/trip              # fetch a folder's pictures in advance (or overnight)
@@ -295,22 +302,26 @@ Open it on a Tresorit, NAS, phone or SFTP folder and move around freely:
 
 - The folder is read in one trip (a WebDAV PROPFIND, an FTP MLSD, an SFTP readdir carry every size and time), and listings
   of slow drives are remembered for five minutes, so Back and Up are instant. *Reload* asks the drive again.
-- Its pictures are fetched in the background into a buffer on disk, **nearest the part you are looking at first**, ahead of
-  your scrolling. A folder of three thousand photos fills in a few seconds from a local disk; from a remote one it takes as
-  long as the drive needs, and each picture costs the few kilobytes of its embedded preview, once.
+- Its pictures are fetched in the background into a buffer on disk, **in order, starting at the part you are looking at**:
+  on to the end of the folder, and then back to the pictures before it. Scroll or jump to another part and the fetching
+  carries on from there instead, doubling back to what it left behind when it is done. A folder of three thousand photos fills
+  in a few seconds from a local disk; from a remote one it takes as long as the drive needs, and each picture costs the few
+  kilobytes of its embedded preview (or the whole file, once, where it has none). What is on screen is never kept waiting
+  behind this: the background fetch always leaves one read of the drive free.
 - What is on screen is shown from the buffer. If memory runs short the pictures held in memory shrink (never below 48 MB),
   and any that were let go are made again from the buffer, **never fetched from the drive again**.
-- **Failsafes.** The buffer has a size limit (Settings, 1 GB by default, roughly 1 to 4 MB per hundred pictures) and the picture
-  memory has its own (Automatic: an eighth of the computer's memory, between 192 MB and 1 GB). When the buffer is full,
-  fetching **stops and says so** instead of evicting pictures of the folder you are looking at only to fetch them again; the
-  pictures of the open folder are also the last the buffer lets go. Fetching also stops, saying why, when the disk the buffer
+- **Failsafes.** The buffer has a size limit (Settings, 16 GB by default, roughly 1 to 4 MB per hundred pictures) and the picture
+  memory has its own (Automatic: an eighth of the computer's memory, between 192 MB and 1 GB). When the buffer is full, the
+  pictures of other folders that nobody has looked at for the longest are let go to make room; the pictures of the open folder
+  are the last it lets go, and when **this folder alone** fills the buffer, fetching **stops and says so** instead of evicting
+  its own pictures only to fetch them again. Fetching also stops, saying why, when the disk the buffer
   is on is almost full (under 1 GB free) or when the drive stops answering (25 reads in a row fail). The queues are bounded,
   so scrolling through a huge folder cannot pile up work. A full disk or damaged cache index never loses a picture that was
   just fetched or stops the window: the index is simply started again.
 - Cloud-only files are still not downloaded unless you switch on *Fetch pictures of cloud-only files too* in Settings. Some cloud drives
   download the whole file even for a small read; Duplio reads each file once and keeps the picture, so it happens once.
-- To keep the pictures **between runs** (so opening the same folder tomorrow costs nothing), choose *between runs* under
-  *Remember pictures* in Settings. They are then stored unencrypted in Duplio's cache folder, which is why it is off by default.
+- The pictures are kept **between runs** by default (Settings → *Remember pictures*), unencrypted, and forgotten after 60
+  days unused; see "What is kept, and for how long" above.
 
 **A picture is only a picture.** Previews are for your eyes. They are never used to decide that files are identical, which
 files to remove, or whether a copy is safe: those decisions always come from re-reading the real files (see
@@ -320,8 +331,45 @@ files to remove, or whether a copy is safe: those decisions always come from re-
 from the same small embedded thumbnail instead, a few kilobytes per photo. Photos with no small preview inside are
 skipped with a note saying how many; `--similar-full-read` reads them whole, as it used to.
 
-**Pictures without Pillow.** The terminal picture pane works with nothing installed: Duplio carries its own small JPEG and
-PNG decoders for thumbnails. (Pillow is used when present, and for similar images.)
+**Pictures without Pillow.** Duplio makes thumbnails with nothing installed: its own decoders read JPEG (baseline at full
+quality, progressive from its first scan), PNG in every layout, GIF, BMP, PBM/PGM/PPM and TGA. Big pictures are sampled rather
+than decoded in full, and a 12-megapixel JPEG takes a few seconds of Python (Pillow does it in a fraction of a second, so it
+is used whenever it is there). WebP, HEIC/AVIF, JPEG 2000, PSD, ICO and the like need Pillow or **ffmpeg**: Settings →
+*Picture support* says which of them is installed and has a button that installs Pillow with `pip` (it shows the exact
+command first, and only runs it when you press *Install*).
+
+**Movies.** A movie's thumbnail is its cover picture when the file has one (MP4/M4V/MOV from iTunes and many editors; a few
+small reads, however big the film), and otherwise a frame from its first seconds, taken by **ffmpeg** if it is installed
+(`winget install ffmpeg`, `brew install ffmpeg`, `apt install ffmpeg`; or name the program in Settings or in
+`DUPLIO_FFMPEG`). On this computer ffmpeg reads only what it needs of the movie; from a server the whole file (up to 64 MB) is
+fetched once. Without ffmpeg a movie with no cover shows its type and says what is needed. Movies carry a small ▶ in the corner.
+
+## Favorites and albums
+
+Every picture and movie in Browse, Compare, Find duplicates and the other lists has a **☆** in its corner (a ★ when starred),
+and a right-click offers *Add to favorites*; in Browse, `F` stars the selected one. A star only remembers where the file is
+and what it looked like; nothing is done to the file, and the list (`favorites.json` in Duplio's state folder) survives
+restarts. The **Favorites** screen shows them all, from any folder or drive, newest starred first (or by name, date or
+folder).
+
+**Make an album…** gathers copies of the favorites in one new folder. You choose how it is named, with your own words, a date
+and time before or after them, or just the date and time:
+
+| Choice | Folder name |
+|---|---|
+| name only | `Summer trip` |
+| date and time, then the name | `2026-10-14 Summer trip` |
+| the name, then the date and time | `Summer trip 2026-10-14 15-30` |
+| date and time only (leave the name empty) | `2026-10-14 15-30-22` |
+
+(The date can be shown as a date, with minutes, or with seconds.) The folder is made inside a folder you pick; if something
+with that name is already there the album gets " (2)" rather than mixing into it. The copies are made like every other copy
+Duplio makes: written under a temporary name, **read back and compared**, then renamed into place; nothing is overwritten (two
+favorites called `IMG_1.jpg` both stay, the second as `IMG_1 (2).jpg`); the originals are not touched; the list of what will be
+copied is shown first; favorites that cannot be reached (a drive that is not plugged in) are named and left out; and *History &
+undo* can take the album's copies away again while the originals still hold the same content. Names the destination cannot
+store (`:`, `?`, trailing dots, reserved Windows names) are made safe, and a slash typed in a name never makes a folder inside a
+folder.
 
 **A Tresorit drive.** Tresorit describes its drive as a virtual drive that exists while its app runs, lists files without
 storing them locally and decrypts them as they are opened. Whether Windows reports it to programs as a network (SMB or
@@ -854,8 +902,9 @@ skip_hidden = false
 
 [previews]               # pictures from slow, remote and cloud drives (see "Pictures on slow drives")
 mode = "auto"            # auto: slow/remote/cloud drives · always · off
-keep = "session"         # session: gone when Duplio closes · persistent: kept (UNENCRYPTED) between runs
-max_size = "1GB"         # limit of the picture buffer on disk (persistent or not)
+keep = "persistent"      # persistent: kept (UNENCRYPTED) between runs · session: gone when Duplio closes
+keep_days = 60           # a kept picture nobody looked at for this long is let go (0: never)
+max_size = "16GB"        # ceiling of the picture buffer on disk (nothing is reserved)
 size_px = 256            # longest side of a stored picture
 prefetch = 12            # pictures fetched ahead of the one on screen
 small_download = "1MB"   # a picture this small may be read whole on a slow drive without asking
@@ -863,6 +912,8 @@ max_download = "64MB"    # never read more than this of one file to make a pictu
 online_only = false      # fetch cloud-only files' pictures without asking (this downloads them)
 memory = 0               # memory the window may use for pictures on screen, in bytes (0: automatic)
 prefetch_folder = true   # Browse: fetch a whole folder's pictures in the background
+download_whole = true    # read a whole picture or movie that has no small preview inside, to make one (up to max_download)
+ffmpeg = ""              # the ffmpeg program for movies and unusual pictures ("": look for one)
 ```
 
 ## Project layout

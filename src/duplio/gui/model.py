@@ -108,6 +108,11 @@ class Tile:
         return self.root.backend.display(self.entry.path)
 
     @property
+    def uri(self) -> str:
+        """The file's address in the form the rest of Duplio takes (it names the same file in any later session)."""
+        return self.root.backend.uri(self.entry.path)
+
+    @property
     def preview_item(self) -> PreviewItem | None:
         if self.kind not in (PICTURE, VIDEO):  # a movie gets a picture too: its cover, or a frame taken by ffmpeg
             return None
