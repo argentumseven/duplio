@@ -107,7 +107,7 @@ class FolderPrefetcher:
         return sorted(indices, key=lambda i: (i - start) % max(count, 1))
 
     def reset(self) -> None:
-        """Forget the run: what it filled is gone (the kept pictures were purged), so nothing is shown as ready and nothing is
+        """Forget the run: what it filled may be gone (a buffer was emptied), so nothing is shown as ready and nothing is
         fetched until a new run is started."""
         with self._cond:
             self._token.cancel("reset")

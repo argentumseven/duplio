@@ -28,6 +28,7 @@ import sqlite3
 import struct
 import tempfile
 import threading
+import time
 from collections import deque
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -38,6 +39,7 @@ from rich.text import Text
 
 from duplio.events import CancelToken
 from duplio.preview import decoders, exif, ffmpeg, png, render, video
+from duplio.preview.memory import BufferView, MemoryTier, Spilled
 from duplio.preview.settings import PreviewSettings
 from duplio.preview.store import StoredThumb, ThumbStore, drive_tag, thumb_key
 from duplio.util.appdirs import AppDirs
@@ -139,7 +141,9 @@ class PreviewService:
         self.settings = settings or PreviewSettings()
         self.settings.validate()
         self._dirs = dirs
-        self._stores: dict[str, ThumbStore] = {}
+        self._stores: dict[str, ThumbStore] = {}  # the disk buffer ("persistent", or "session" in a temporary folder)
+        self._memory_managed = False  # the window sets the memory limit itself (see set_memory_limit)
+        self._hot = MemoryTier(self._default_memory())
         self._lock = threading.Lock()
         self.stats = PreviewStats()
         self._device_slots: dict[str, threading.BoundedSemaphore] = {}
@@ -154,19 +158,36 @@ class PreviewService:
         self._ffmpeg_path: str | None = None
         self._ffmpeg_for: str | None = None  # the setting the path was looked up for
 
-    # ------------------------------------------------------------------ stores
-    def _stores_for(self, caps: Capabilities) -> list[ThumbStore]:
-        """The buffer that may hold a picture from this drive (none or one).
+    # ------------------------------------------------------------------ the buffer: memory first, then disk
+    def _default_memory(self) -> int:
+        """Memory for pictures when nobody has set it (the terminal screens and commands): the setting's three quarters, or 128 MB."""
+        chosen = self.settings.memory_bytes
+        return chosen * 3 // 4 if chosen > 0 else 128 * 1024 * 1024
 
-        Pictures are kept on disk for drives that are not the computer's own disk: a USB drive or card, a network share, a
-        phone, a cloud or virtual drive, optical media. Reading those is slow or costs bandwidth, so a picture is fetched once.
-        The internal disk is quick to read again, so nothing is written for it (the window still holds the finished pictures
-        of the folder on screen in memory). The setting ``mode`` can widen that to every drive, or switch keeping off."""
+    def set_memory_limit(self, nbytes: int) -> None:
+        """How much memory the pictures held in memory may take. What no longer fits moves on to the disk buffer."""
+        self._memory_managed = True
+        self._move_on(self._hot.set_limit(nbytes))
+
+    def _kept(self, caps: Capabilities) -> bool:
+        """Are pictures from this drive kept on disk (once memory has no room for them)?
+
+        They are for drives that are not the computer's own disk: a USB drive or card, a network share, a phone, a cloud or
+        virtual drive, optical media. Reading those is slow or costs bandwidth, so a picture is fetched once. The internal disk
+        is quick to read again, so nothing is written for it. The setting ``mode`` can widen that to every drive, or switch
+        keeping off (then nothing is kept in memory either: every picture is read from the drive)."""
         mode = self.settings.mode
-        if mode == "off" or (mode == "auto" and caps.internal):
-            return []
+        return not (mode == "off" or (mode == "auto" and caps.internal))
+
+    def _warm_for(self, caps: Capabilities) -> ThumbStore | None:
+        """The disk buffer for a picture from this drive, or ``None`` when pictures from it are not kept on disk."""
+        return self._warm_store() if self._kept(caps) else None
+
+    def _warm_store(self) -> ThumbStore | None:
+        if self.settings.mode == "off":
+            return None
         keep = self.settings.keep == "persistent" and self._dirs is not None
-        return [self._buffer("persistent" if keep else "session")]
+        return self._buffer("persistent" if keep else "session")
 
     def _buffer(self, kind: str) -> ThumbStore:
         with self._lock:
@@ -182,10 +203,25 @@ class PreviewService:
                 self._stores[kind] = store
             return store
 
-    def _store(self, caps: Capabilities) -> ThumbStore | None:
-        """The buffer a new picture goes into (``None``: pictures from this drive are not kept)."""
-        stores = self._stores_for(caps)
-        return stores[0] if stores else None
+    def _remember(self, item: PreviewItem, thumb: StoredThumb) -> None:
+        """Keep a picture that was just made: in memory; what memory has no room for moves on to the disk buffer."""
+        if self.settings.mode == "off":
+            return
+        self._move_on(self._hot.put(item.key, drive_tag(item.backend.id), thumb, demote=self._kept(item.caps)))
+
+    def _move_on(self, spilled: list[Spilled]) -> None:
+        """Pictures that left memory: those from drives that are kept on disk go to the disk buffer (which trims its oldest to
+        make room), the others are simply let go (they are quick to make again)."""
+        for out in spilled:
+            if not out.demote:
+                continue
+            warm = self._warm_store()
+            if warm is None:
+                continue
+            try:
+                warm.put(out.key, out.drive, out.thumb)
+            except (OSError, sqlite3.Error):
+                self.stats.add(not_kept=1)  # a full disk or a broken buffer must not lose a picture that was just fetched
 
     def apply_settings(self) -> None:
         """Settings changed (the size limit of the buffer): existing buffers follow it, trimming if they are now over."""
@@ -194,6 +230,8 @@ class PreviewService:
         for store in stores:
             store.max_bytes = self.settings.max_bytes
             store.trim()
+        if not self._memory_managed:
+            self._move_on(self._hot.set_limit(self._default_memory()))
 
     def stored(self) -> tuple[int, int]:
         """How many pictures are kept on disk and how much room they take, counting those an earlier run left behind."""
@@ -204,18 +242,24 @@ class PreviewService:
             stores = list(self._stores.values())
         return sum(s.count for s in stores), sum(s.total_bytes for s in stores)
 
+    def held(self) -> tuple[int, int]:
+        """How many pictures are held in memory and how much room they take."""
+        return self._hot.count, self._hot.total_bytes
+
     def storage_summary(self) -> list[tuple[str, int, int, str]]:
         with self._lock:
             return [(kind, s.stats().count, s.stats().bytes, s.stats().path) for kind, s in self._stores.items()]
 
     # ------------------------------------------------------------------ lookup
     def peek(self, item: PreviewItem) -> Preview | None:
-        """The cached picture, if any. Never touches the drive."""
-        for store in self._stores_for(item.caps):
-            found = store.get(item.key)
-            if found:
-                return Preview(found, True)
-        return None
+        """The cached picture, if any (in memory, else in the disk buffer). Never touches the drive."""
+        if self.settings.mode == "off":
+            return None
+        found = self._hot.get(item.key)
+        if found is None:
+            warm = self._warm_for(item.caps)
+            found = warm.get(item.key) if warm is not None else None
+        return Preview(found, True) if found else None
 
     def pick_source(self, items: Sequence[PreviewItem]) -> PreviewItem:
         """The member of a group of identical files that is cheapest to show a picture of."""
@@ -277,12 +321,7 @@ class PreviewService:
                 except Unavailable:
                     self.stats.add(unavailable=1)
                     raise
-            store = self._store(item.caps)
-            if store is not None:
-                try:
-                    store.put(item.key, drive_tag(item.backend.id), thumb)
-                except (OSError, sqlite3.Error):
-                    self.stats.add(not_kept=1)  # a full disk or a broken cache must not lose a picture that was just fetched
+            self._remember(item, thumb)
             self.stats.add(fetched=1, bytes_read=read)
             return Preview(thumb, False, read)
         finally:
@@ -293,19 +332,29 @@ class PreviewService:
     # ------------------------------------------------------------------ the buffer (for a folder that is being browsed)
     def cached(self, item: PreviewItem) -> bool:
         """Whether the picture is already in the buffer (a cheap check: no picture is read)."""
-        return any(store.has(item.key) for store in self._stores_for(item.caps))
+        if self.settings.mode == "off":
+            return False
+        if self._hot.has(item.key):
+            return True
+        warm = self._warm_for(item.caps)
+        return warm is not None and warm.has(item.key)
 
-    def buffer_for(self, item: PreviewItem) -> ThumbStore | None:
-        """The buffer that would hold this picture, if pictures from this drive are kept on disk at all."""
-        return self._store(item.caps)
+    def buffer_for(self, item: PreviewItem) -> BufferView | None:
+        """The buffer (memory and disk together) that holds this picture, if pictures from this drive are kept on disk at all."""
+        warm = self._warm_for(item.caps)
+        return BufferView(self._hot, warm) if warm is not None else None
 
     def pin(self, items: Sequence[PreviewItem]) -> None:
         """Keep these pictures when a buffer has to make room: they are the folder that is on screen."""
+        self._hot.pin({item.key for item in items})
         wanted: dict[int, tuple[ThumbStore, set[str]]] = {}
         for item in items:
-            for store in self._stores_for(item.caps):
-                wanted.setdefault(id(store), (store, set()))[1].add(item.key)
-        for store in list(self._stores.values()):
+            warm = self._warm_for(item.caps)
+            if warm is not None:
+                wanted.setdefault(id(warm), (warm, set()))[1].add(item.key)
+        with self._lock:
+            stores = list(self._stores.values())
+        for store in stores:
             store.pin(wanted.get(id(store), (store, set()))[1])
 
     @contextlib.contextmanager
@@ -529,7 +578,12 @@ class PreviewService:
                 continue  # prefetch is best effort; the foreground request reports the reason
 
     # ------------------------------------------------------------------ housekeeping
-    def clear(self) -> int:
+    def clear_memory(self) -> int:
+        """Empty the pictures held in memory (nothing is moved to the disk buffer). Returns how many there were."""
+        return self._hot.clear()
+
+    def clear_disk(self) -> int:
+        """Delete every picture kept on disk (the copies only; never the files they were made from). Returns how many."""
         removed = 0
         with self._lock:
             stores = list(self._stores.values())
@@ -544,12 +598,37 @@ class PreviewService:
                     store.close()
         return removed
 
+    def clear(self) -> int:
+        """Empty both: memory and disk."""
+        return self.clear_memory() + self.clear_disk()
+
+    def flush(self, seconds: float = 8.0) -> int:
+        """Move the pictures held in memory on to the disk buffer so they are there next time (most recently used first, for at
+        most ``seconds``; what is not reached is let go, it is only a copy). Returns how many were moved."""
+        moved = 0
+        deadline = time.monotonic() + seconds
+        for out in self._hot.take_all(newest_first=True):
+            if not out.demote or time.monotonic() > deadline:
+                continue
+            warm = self._warm_store()
+            if warm is None:
+                continue
+            try:
+                warm.put(out.key, out.drive, out.thumb)
+                moved += 1
+            except (OSError, sqlite3.Error):
+                self.stats.add(not_kept=1)
+        return moved
+
     def close(self) -> None:
         with self._wake:
             self._closing = True
             self._wake.notify_all()
         for thread in self._workers:
             thread.join(timeout=2)
+        if self.settings.keep == "persistent" and self._dirs is not None:
+            with contextlib.suppress(Exception):
+                self.flush()  # what is only in memory is kept for next time (a temporary buffer is deleted anyway)
         with self._lock:
             stores = list(self._stores.values())
             self._stores.clear()

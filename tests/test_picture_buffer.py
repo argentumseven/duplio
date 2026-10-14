@@ -166,13 +166,14 @@ def test_two_requests_for_one_picture_read_the_drive_once(folder: Any) -> None:
 def test_a_full_disk_does_not_lose_a_picture_that_was_just_fetched(folder: Any) -> None:
     _root, items, reg = folder
     svc = service()
+    svc.set_memory_limit(0)  # nothing stays in memory, so the picture goes straight on to the disk buffer
     store = svc.buffer_for(items[0])
     assert store is not None
 
     def broken(*_a: Any, **_k: Any) -> None:
         raise OSError(28, "No space left on device")
 
-    store.put = broken  # type: ignore[method-assign]
+    store.warm.put = broken  # type: ignore[method-assign]
     got = svc.get(items[0])
     assert got.thumb.data and svc.stats.not_kept == 1
     svc.close()
@@ -216,6 +217,7 @@ def test_a_folder_is_fetched_from_the_viewer_onward_then_back_round_and_then_it_
 def test_when_this_folder_alone_fills_the_buffer_the_fetch_stops_instead_of_throwing_its_pictures_away(folder: Any) -> None:
     _root, items, reg = folder
     svc = service(max_bytes=40_000)  # room for only some of the 30 pictures
+    svc.set_memory_limit(10_000)  # (a little in memory, the rest of the room on disk)
     svc.pin(items)  # as the Browse page does: these are the pictures on screen
     pre = FolderPrefetcher(svc, workers=1)
     pre.start(items)
@@ -234,11 +236,12 @@ def test_when_this_folder_alone_fills_the_buffer_the_fetch_stops_instead_of_thro
 def test_a_buffer_full_of_other_folders_makes_room_instead_of_stopping(folder: Any) -> None:
     _root, items, reg = folder
     svc = service(max_bytes=400_000)
+    svc.set_memory_limit(10_000)
     store = svc.buffer_for(items[0])
     assert store is not None
     old_keys = [f"{n:02d}" + "b" * 30 for n in range(380)]
     for key in old_keys:
-        store.put(key, "other", thumb(1, 1000))  # an old, big folder fills the buffer
+        store.warm.put(key, "other", thumb(1, 1000))  # an old, big folder fills the disk buffer
     assert store.fullness > 0.9
     svc.pin(items)
     pre = FolderPrefetcher(svc, workers=1)
@@ -246,7 +249,7 @@ def test_a_buffer_full_of_other_folders_makes_room_instead_of_stopping(folder: A
     assert wait_until(lambda: finished(pre))
     assert pre.status().state == "finished" and pre.status().fetched == 30
     assert all(svc.cached(i) for i in items)  # every picture of this folder is there
-    assert sum(1 for key in old_keys if store.has(key)) < 380  # at the old folder's cost
+    assert sum(1 for key in old_keys if store.warm.has(key)) < 380  # at the old folder's cost
     pre.close()
     svc.close()
     reg.close()

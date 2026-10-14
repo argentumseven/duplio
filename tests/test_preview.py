@@ -401,6 +401,7 @@ def test_modes_and_where_things_are_kept(tmp_path: Path, dirs: AppDirs) -> None:
     off.close()
     # session: gone when the service closes
     session = PreviewService(dirs, PreviewSettings(keep="session"))
+    session.set_memory_limit(0)  # (so the picture goes on to the disk buffer at once)
     session.get(item)
     root = Path(session.storage_summary()[0][3])
     assert root.exists()
@@ -552,8 +553,9 @@ def test_a_photo_with_no_small_preview_is_not_compared_on_a_slow_drive_and_the_u
     assert any("--similar-full-read" in text and "2" in text for text in progress.warnings())
 
 
-def test_nothing_is_kept_on_disk_for_the_computers_own_disk(tmp_path: Path, dirs: AppDirs) -> None:
-    """A picture on the internal disk (SSD or hard disk) is quick to make again: no buffer is created or written for it."""
+def test_nothing_is_kept_on_disk_for_the_computers_own_disk_only_in_memory(tmp_path: Path, dirs: AppDirs) -> None:
+    """A picture on the internal disk (SSD or hard disk) is quick to make again: it is held in memory while there is room, but no
+    disk buffer is created or written for it."""
     plain = tmp_path / "d" / "plain.jpg"
     plain.parent.mkdir(parents=True)
     plain.write_bytes(jpeg_bytes(picture(400, 300, seed=3)))  # no thumbnail inside: it has to be decoded
@@ -564,12 +566,12 @@ def test_nothing_is_kept_on_disk_for_the_computers_own_disk(tmp_path: Path, dirs
         for name in ("plain.jpg", "camera.jpg"):
             item = item_for(backend, tmp_path / "d" / name)
             assert service.get(item).from_cache is False
-            assert service.get(item).from_cache is False  # made again, not read from a buffer
-            assert service.buffer_for(item) is None and not service.cached(item)
-        assert service.stats.hits == 0 and service.stats.fetched == 4
-        assert service.storage_summary() == [] and service.stored() == (0, 0)
+            assert service.get(item).from_cache is True  # held in memory
+            assert service.buffer_for(item) is None  # but there is no disk buffer for it
+        assert service.stats.hits == 2 and service.stats.fetched == 2
+        assert service.held()[0] == 2 and service.stored() == (0, 0) and service.storage_summary() == []
         service.close()
-    assert not (dirs.cache / "previews").exists()
+    assert not (dirs.cache / "previews").exists()  # and closing wrote nothing
 
 
 @pytest.mark.parametrize("kind", [MediaKind.REMOVABLE, MediaKind.NETWORK, MediaKind.DEVICE, MediaKind.READONLY])
@@ -579,11 +581,12 @@ def test_pictures_from_usb_network_phone_and_optical_drives_are_kept_between_run
     item = item_for(backend, tmp_path / "d" / "a.jpg")
     service = PreviewService(dirs)
     service.get(item)
-    assert service.buffer_for(item) is not None and service.stored()[0] == 1
-    service.close()
+    assert service.buffer_for(item) is not None
+    assert service.held()[0] == 1 and service.stored() == (0, 0)  # in memory first; the disk is for what memory has no room for
+    service.close()  # what is only in memory moves on to the disk when the program closes
     reads = backend.bytes_read
     tomorrow = PreviewService(dirs)
-    assert tomorrow.stored()[0] == 1  # counted even before anything is looked at this run
+    assert tomorrow.stored()[0] == 1 and tomorrow.held()[0] == 0  # counted even before anything is looked at this run
     assert tomorrow.get(item).from_cache and backend.bytes_read == reads
     tomorrow.close()
 
@@ -595,8 +598,9 @@ def test_pictures_from_a_cloud_drive_are_kept_even_though_it_looks_like_a_local_
     item = item_for(backend, tmp_path / "d" / "a.jpg")
     service = PreviewService(dirs)
     service.get(item)
-    assert service.buffer_for(item) is not None and service.stored()[0] == 1
+    assert service.buffer_for(item) is not None
     service.close()
+    assert PreviewService(dirs).stored()[0] == 1
 
 
 def test_the_setting_every_drive_keeps_the_internal_disk_too_and_off_keeps_nothing(tmp_path: Path, dirs: AppDirs) -> None:
@@ -615,19 +619,20 @@ def test_the_buffer_on_disk_is_four_gigabytes_unless_chosen_otherwise() -> None:
     assert PreviewSettings().max_bytes == 4 * 1024**3
 
 
-def test_purging_removes_every_kept_picture_even_a_leftover_no_entry_knows(tmp_path: Path, dirs: AppDirs) -> None:
+def test_emptying_the_disk_buffer_removes_every_kept_picture_even_a_leftover_no_entry_knows(tmp_path: Path, dirs: AppDirs) -> None:
     photo_with_exif_thumbnail(tmp_path / "d" / "a.jpg")
     backend = CountingBackend(MediaKind.NETWORK)
     item = item_for(backend, tmp_path / "d" / "a.jpg")
     service = PreviewService(dirs)
+    service.set_memory_limit(0)  # straight on to the disk buffer
     service.get(item)
     store = service.buffer_for(item)
     assert store is not None
-    stray = store.root / "ab" / "left-behind.jpg"
+    stray = store.warm.root / "ab" / "left-behind.jpg"
     stray.parent.mkdir(exist_ok=True)
     stray.write_bytes(b"x" * 100)
-    assert service.clear() == 1
+    assert service.clear_disk() == 1
     assert service.stored() == (0, 0) and not stray.exists()
-    assert not any(p.is_file() and p.suffix in (".jpg", ".png") for p in store.root.rglob("*"))
+    assert not any(p.is_file() and p.suffix in (".jpg", ".png") for p in store.warm.root.rglob("*"))
     assert service.get(item).from_cache is False  # asking again fetches again, and keeps again
     service.close()

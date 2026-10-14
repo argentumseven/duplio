@@ -175,7 +175,7 @@ the void, and *History & undo* reverses a whole action.
 
 **Pictures.** The thumbnail is the small preview already inside each photo (or Duplio's own decoder of it), so a phone or a
 NAS is not made to send whole photos. Pictures from USB, network, phone and cloud drives are remembered (between runs by default; the computer's own disk keeps none, and
-Ctrl+Shift+Delete purges them); a file that exists only in the cloud shows a cloud symbol and is not downloaded unless you right-click it and
+Ctrl+Shift+M and Ctrl+Shift+D empty the memory and disk buffers); a file that exists only in the cloud shows a cloud symbol and is not downloaded unless you right-click it and
 ask. Double-click a picture to open the file; right-click for *Show in its folder*, *Copy its address* and more. Pillow
 makes the thumbnails faster when it is installed, but is not required.
 
@@ -265,7 +265,7 @@ downloaded it) is detected from its file attributes, and previewing it would dow
 screen, `--online-only`, or `duplio previews settings --online-only` allow it.
 
 **What is kept, and for how long.** In the window, pictures from USB, network, phone and cloud drives are kept **between
-runs**, in Duplio's cache folder, so coming back to a folder tomorrow (or after closing the program) costs nothing. A picture
+runs**, in Duplio's cache folder (first held in memory, see "Memory first, then disk" below), so coming back to a folder tomorrow (or after closing the program) costs nothing. A picture
 nobody has looked at for 60 days is let go (Settings, or `--keep-days`). The buffer on disk may grow to 4 GB by default (the
 sizes in Settings run from 1 GB to 128 GB), which is only a ceiling: nothing is reserved, and when it is reached the pictures
 nobody has looked at for the longest go first, never the folder you are looking at. The pictures are stored **unencrypted**: a zero-knowledge drive such as Tresorit keeps your files encrypted so
@@ -276,17 +276,27 @@ that is deleted on exit.
 ```bash
 duplio previews settings --keep persistent --max-size 32GB --keep-days 90   # stored UNENCRYPTED in Duplio's cache folder
 duplio previews stats                                       # how big is it?
-duplio previews clear                                       # delete every saved picture (the window: see "Purging" below)
+duplio previews clear                                       # delete every saved picture (the window: see "Emptying the buffers")
 duplio previews warm sftp://me@nas/photos/trip              # fetch a folder's pictures in advance (or overnight)
 ```
 
 The saved index holds no file names (entries are looked up by a hash of the drive, path, size and modification time), and a
 file that changes gets a new key, so an edited photo is never shown as its old self.
 
-**Purging.** In the window, deleting every kept picture is a key combination, not a button, so it cannot be done by a stray
-click: **Ctrl+Shift+Delete** (**Cmd+Shift+Delete** on a Mac), shown in the key bar along the bottom of every page as
-*Purge pictures*. It asks first, saying how many pictures and how much room they take, then deletes only those small copies
-(never your files). The background fetch does not start again by itself. Settings shows how many pictures are kept.
+**Memory first, then disk.** The picture buffer has two tiers and a picture is in one of them, not both. A picture that has
+been fetched is held in **memory** while there is room (Settings → *Memory for pictures*). Only when memory is full do the next
+ones go to the **disk buffer** (Settings → *Picture buffer on disk, up to*), and when the disk buffer is full its oldest are let
+go to make room for the ones coming in. Memory is shared out by the window: a quarter of it (at most 512 MB) for the finished
+images being drawn and the rest for the small compressed pictures. The folder on screen is never pushed out to make room for
+itself: when memory is full of it, the next pictures of that folder go to disk and the ones nearest where you are looking
+stay in memory. What is only in memory when Duplio closes is moved to the disk buffer (for up to eight seconds, newest first), so
+it is there next time; if the program is killed instead of closed, what was only in memory is lost and fetched again.
+
+**Emptying the buffers.** In the window, each buffer is emptied by its own key combination, not a button, so it cannot be done
+by a stray click, and both are shown in the key bar along the bottom of every page: **Ctrl+Shift+M** *Clear memory buffer* and
+**Ctrl+Shift+D** *Clear disk buffer*. Each asks first, saying how many pictures and how much room they take, and empties only
+Duplio's own small copies (never your files). The background fetch does not start again by itself. Settings shows how many
+pictures are in memory and on disk.
 
 ### Browsing a folder, and the picture buffer
 
@@ -322,8 +332,9 @@ Open it on a Tresorit, NAS, phone or SFTP folder and move around freely:
   and any that were let go are made again from the buffer, **never fetched from the drive again**.
 - **Failsafes.** The buffer on disk has a size limit (Settings, 4 GB by default, roughly 1 to 4 MB per hundred pictures) and the
   picture memory has its own (Automatic: an eighth of the computer's memory, between 192 MB and 1 GB; Settings offers up to 4 GB).
-  Both choices take effect the moment they are made, and the *Buffer* line under the pictures shows the memory limit in use; if
-  the computer runs short of memory the limit is cut to a quarter and the line says what you chose and why it is less. When the buffer is full, the
+  Both choices take effect the moment they are made, and the *Buffer* line under the pictures shows how many pictures are in
+  memory and on disk and the memory limit in use; if the computer runs short of memory the limit is cut to a quarter (what no
+  longer fits moves to the disk buffer) and the line says what you chose and why it is less. When the buffer is full, the
   pictures of other folders that nobody has looked at for the longest are let go to make room; the pictures of the open folder
   are the last it lets go, and when **this folder alone** fills the buffer, fetching **stops and says so** instead of evicting
   its own pictures only to fetch them again. Fetching also stops, saying why, when the disk the buffer

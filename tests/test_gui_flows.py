@@ -405,6 +405,7 @@ def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_awa
     make_pictures(root, 40)
     window.ctx.settings.previews.max_bytes = 30_000
     window.ctx.previews.apply_settings()
+    window.ctx.previews.set_memory_limit(10_000)  # (a little room in memory, a little on disk: 40 kB for 40 pictures of about 2 kB)
     page = open_folder(window, root)
     wait(window, lambda: prefetch_done(window))
     status = window.ctx.prefetcher.status()
@@ -412,7 +413,7 @@ def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_awa
     wait(window, lambda: "Stopped" in page.fetch_label.cget("text"))
     assert "Settings" in page.fetch_label.cget("text") and page.fetch_button.cget("text") == "Try again"
     store = window.ctx.previews.buffer_for(page._preview_items()[0])
-    assert store is not None and store.total_bytes <= 30_000  # and the limit held
+    assert store is not None and store.total_bytes <= 40_000  # and the limit (memory and disk together) held
 
 
 def test_leaving_the_browser_pauses_the_background_fetch_and_coming_back_resumes_it(tmp_path: Path, window: Any, usb: None) -> None:
@@ -1423,47 +1424,62 @@ def test_the_disk_buffer_choices_apply_at_once_and_a_disk_that_will_not_save_doe
     assert dialogs.errors and "could not be saved" in dialogs.errors[-1]
 
 
-def test_purging_is_a_key_chord_shown_in_the_bar_and_asks_first(tmp_path: Path, window: Any, usb: None) -> None:
-    from duplio.gui.app import PURGE_KEYS
+def test_the_two_buffers_are_emptied_by_two_separate_key_chords_shown_in_the_bar_and_each_asks_first(
+        tmp_path: Path, window: Any, usb: None) -> None:
+    from duplio.gui.app import CLEAR_DISK_KEYS, CLEAR_MEMORY_KEYS
 
     root = tmp_path / "usb stick"
     make_pictures(root, 10)
+    previews = window.ctx.previews
+    previews.set_memory_limit(7_000)  # room for only a few in memory: the rest of the folder goes on to the disk buffer
     dialogs = Dialogs(window.ctx)
     page = open_folder(window, root)
     wait(window, lambda: prefetch_done(window))
-    count, size = window.ctx.previews.stored()
-    assert count == 10 and size > 0
-    for key in ("home", "browse", "favorites", "compare", "settings"):  # on every page the bar names the chord
+    held, _ = previews.held()
+    stored, _ = previews.stored()
+    assert 0 < held < 10 and stored > 0 and held + stored == 10  # memory first; the disk only for what memory had no room for
+    for key in ("home", "browse", "favorites", "compare", "settings"):  # on every page the bar names both chords
         window.show(key)
         texts = keybar_texts(window)
-        assert PURGE_KEYS in texts and "Purge pictures" in texts
+        assert CLEAR_MEMORY_KEYS in texts and "Clear memory buffer" in texts and CLEAR_DISK_KEYS in texts and "Clear disk buffer" in texts
     window.show("browse")
     window.focus_force()
     pump(window, timeout=0.2)
-    # no on-screen button does it
     settings = window.pages["settings"]
     window.show("settings")
-    assert not any("purge" in str(w.cget("text")).lower() or "delete pictures" in str(w.cget("text")).lower()
-                   for w in _all_widgets(settings) if "text" in w.keys())  # noqa: SIM118
-    assert any(PURGE_KEYS in str(w.cget("text")) for w in _all_widgets(settings) if "text" in w.keys())  # noqa: SIM118
+    words = [str(w.cget("text")).lower() for w in _all_widgets(settings) if "text" in w.keys()]  # noqa: SIM118
+    assert not any(text.strip() in ("purge", "clear", "delete pictures", "clear memory buffer", "clear disk buffer") for text in words)  # no button
+    assert any(CLEAR_MEMORY_KEYS in text and CLEAR_DISK_KEYS in text for text in words)  # the page says which keys do what
     window.show("browse")
-    # saying no leaves everything alone
+
+    # the memory chord: no leaves everything alone, yes empties memory only, and what is on screen comes back from the disk buffer
     dialogs.answer = False
-    window.event_generate("<Control-Shift-Delete>")
+    (window.focus_get() or window).event_generate("<Control-Shift-Key-M>")
     pump(window, timeout=0.3)
-    assert dialogs.confirms and dialogs.confirms[-1][0] == "Purge pictures" and "10 pictures" in " ".join(dialogs.confirms[-1][2])
-    assert window.ctx.previews.stored()[0] == 10
-    # saying yes deletes them all, and the background fetch does not start again by itself
+    assert dialogs.confirms[-1][0] == "Clear memory buffer" and previews.held()[0] == held
     dialogs.answer = True
-    window.event_generate("<Control-Shift-Delete>")
-    wait(window, lambda: window.ctx.previews.stored() == (0, 0))
-    wait(window, lambda: any("Deleted 10 kept pictures" in info[1] for info in dialogs.infos))
-    assert window.ctx.prefetcher.status().state == "idle"
+    (window.focus_get() or window).event_generate("<Control-Shift-Key-M>")
+    pump(window, timeout=0.5)
+    assert any(f"Emptied the memory buffer ({held:,} pictures)" in info[1] for info in dialogs.infos)  # all that was held went
+    assert previews.stored()[0] == stored  # the disk buffer was not touched
+    wait(window, lambda: window.ctx.thumbs.stats()["images"] == 10)  # the pictures on screen were drawn again (from disk or the drive)
+
+    # the disk chord: no leaves everything alone, yes empties the disk buffer only
+    previews.stats.fetched = 0
+    dialogs.answer = False
+    (window.focus_get() or window).event_generate("<Control-Shift-Key-D>")
+    pump(window, timeout=0.3)
+    assert dialogs.confirms[-1][0] == "Clear disk buffer" and "pictures" in " ".join(dialogs.confirms[-1][2]) and previews.stored()[0] == stored
+    dialogs.answer = True
+    (window.focus_get() or window).event_generate("<Control-Shift-Key-D>")
+    wait(window, lambda: previews.stored() == (0, 0))
+    wait(window, lambda: any("Emptied the disk buffer" in info[1] for info in dialogs.infos))
+    assert window.ctx.prefetcher.status().state == "idle"  # the background fetch does not start again by itself
     pump(window, timeout=0.5)
     assert page.fetch_button.cget("text") == "Fetch all pictures"
-    # the folder is still shown, and looking at it again fetches again
-    page.navigate(window.ctx.registry.open(str(root)), push=False)
-    wait(window, lambda: window.ctx.previews.stored()[0] > 0, timeout=30)
+    # nothing anywhere says "purge", and neither dialog is dressed up as a danger to the person's own pictures
+    said = " ".join(" ".join([title, headline, *details]) for title, headline, details, _rows in dialogs.confirms).lower()
+    assert "purge" not in said and "only these copies are emptied" in said and "your own files" in said
 
 
 def _all_widgets(root: Any) -> list[Any]:

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from duplio.config import Settings, save_settings
 from duplio.errors import ConfigError
 from duplio.gui import extras
-from duplio.gui.app import PURGE_KEYS, Page
+from duplio.gui.app import CLEAR_DISK_KEYS, CLEAR_MEMORY_KEYS, Page
 from duplio.gui.memory import GIB, MIB, default_image_budget, describe
 from duplio.gui.palette import THEME, THEME_NAMES
 from duplio.gui.style import PALETTE
@@ -61,10 +61,11 @@ class SettingsPage(Page):
         note("Applies the next time Duplio starts.", (2, 4))
 
         heading("Pictures from USB, network, phone and cloud drives")
-        note("Duplio takes the small preview that is already inside a photo (or a picture of the first moments of a movie) and keeps it "
-             "on disk, so looking at pictures on a USB drive, a phone, a NAS or a cloud drive does not read the photos again and again. "
-             "Pictures on this computer's own disk are quick to make again, so none are kept for them. These choices take effect "
-             "as soon as you make them.")
+        note("Duplio takes the small preview that is already inside a photo (or a picture of the first moments of a movie) and keeps it, "
+             "so looking at pictures on a USB drive, a phone, a NAS or a cloud drive does not read the photos again and again. "
+             "Pictures are held in memory first; only when memory is full do the next ones go to the disk buffer, and when that "
+             "is full the oldest are let go. A picture is in one place, not both. Pictures on this computer's own disk are quick to "
+             "make again, so none are put on disk for them. These choices take effect as soon as you make them.")
         keeps = ["between runs (kept unencrypted; recommended)", "until Duplio closes"]
         self.keep = choice("Remember pictures", keeps, keeps[0 if s.previews.keep == "persistent" else 1])
         self.days_choices = [(7, "a week"), (30, "30 days"), (60, "60 days"), (180, "6 months"), (365, "a year"), (0, "never")]
@@ -85,9 +86,10 @@ class SettingsPage(Page):
         self.memory_sizes = [(0, f"Automatic ({describe(default_image_budget())})"), (256 * MIB, "256 MB"), (512 * MIB, "512 MB"), (GIB, "1 GB"),
                              (2 * GIB, "2 GB"), (4 * GIB, "4 GB")]
         labels = [label for _n, label in self.memory_sizes]
-        self.memory = choice("Memory for pictures on screen", labels,
+        self.memory = choice("Memory for pictures", labels,
                              next((label for n, label in self.memory_sizes if n == s.previews.memory_bytes), labels[0]))
-        note("Shrinks by itself if the computer runs short of memory.", (2, 6))
+        note("Pictures are held in memory first. When it is full the next ones go to the disk buffer above, and when that is full "
+             "the oldest are let go, never the folder you are looking at. Memory shrinks by itself if the computer runs short of it.", (2, 6))
         self.whole_folder = tk.BooleanVar(value=s.previews.prefetch_folder)
         check("Browse: fetch a folder's pictures in the background", self.whole_folder, self.apply_pictures)
         note("From the part you are looking at to the end of the folder, then back to the start. Jump ahead and it carries on from there. "
@@ -104,8 +106,9 @@ class SettingsPage(Page):
         row.pack(fill="x", pady=(8, 2))
         self.cache_info = tk.Label(row, text="", font=f.base, bg=bg, fg=PALETTE["muted"])
         self.cache_info.pack(side="left")
-        note(f"To delete every kept picture press {PURGE_KEYS} anywhere in the window (it asks first). It is a key combination on purpose, "
-             "so a stray click cannot do it.", (0, 6))
+        note(f"To empty the buffer in memory press {CLEAR_MEMORY_KEYS}, and to empty the one on disk press {CLEAR_DISK_KEYS}, anywhere in "
+             "the window (each asks first). Only Duplio's own small copies of pictures are emptied, never your files. They are key "
+             "combinations on purpose, so a stray click cannot do it.", (0, 6))
 
         heading("Picture support")
         note("Duplio reads JPEG, PNG, GIF, BMP and a few more formats by itself. These two programs add the rest and make it faster. "
@@ -183,7 +186,10 @@ class SettingsPage(Page):
 
     def buffers_changed(self) -> None:
         count, size = self.ctx.previews.stored()
-        self.cache_info.configure(text=f"{count:,} pictures kept on disk ({human_size(size)})" if count else "no pictures kept on disk yet")
+        held, held_size = self.ctx.previews.held()
+        memory = f"{held:,} pictures in memory ({human_size(held_size)})" if held else "none in memory"
+        disk = f"{count:,} on disk ({human_size(size)})" if count else "none on disk"
+        self.cache_info.configure(text=f"{memory} · {disk}")
 
     def _read_pictures(self, p: PreviewSettings) -> None:
         """Read the picture choices into ``p`` (``ConfigError`` if one is not allowed)."""

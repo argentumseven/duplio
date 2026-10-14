@@ -40,8 +40,8 @@ class BrowsePage(Page):
     title = "Browse a folder"
     hints = (("Enter", "open"), ("F", "star"), ("Backspace", "up"), ("F5", "reload"))
     subtitle = ("Look inside any folder, on this computer, a phone, a NAS, a USB drive or a cloud drive. Pictures from the drives that are "
-                "not this computer's own disk are fetched once, kept in a buffer on disk, and shown from it, so moving around a big "
-                "remote folder stays quick. Looking changes nothing.")
+                "not this computer's own disk are fetched once, kept in a buffer (in memory first, then on disk), and shown from it, so "
+                "moving around a big remote folder stays quick. Looking changes nothing.")
 
     def __init__(self, master: tk.Misc, ctx: Context) -> None:
         super().__init__(master, ctx)
@@ -494,27 +494,32 @@ class BrowsePage(Page):
         self.buffer_label.configure(text=self._buffer_text(), fg=PALETTE["warn"] if thumbs.low_memory else PALETTE["muted"])
 
     def _buffer_store(self) -> Any:
-        """The on-disk buffer for this folder's pictures, or ``None`` when they are not kept (a folder on the computer's own disk)."""
+        """The buffer (memory and disk together) for this folder's pictures, or ``None`` when they are not kept on disk (a folder
+        on the computer's own disk)."""
         items = self._preview_items()
         return self.ctx.previews.buffer_for(items[0]) if items else None
 
     def _buffer_text(self) -> str:
         stats = self.ctx.thumbs.stats()
-        store = self._buffer_store()
-        if store is not None:
-            disk = f"on disk {store.count:,} pictures, {describe(store.total_bytes)} of {describe(store.max_bytes)}"
-            if not store.persistent:
-                disk += " (until Duplio closes; Settings can keep them between runs)"
-        elif self._preview_items():
-            disk = "not kept on disk (this drive is quick to read again)"
-        else:
-            disk = ""
-        memory = f"in memory {describe(stats['bytes'])} of {describe(stats['budget'])}"
-        text = "Buffer: " + (disk + " · " if disk else "") + memory
+        view = self._buffer_store()
+        text = f"Buffer: in memory {stats['held']:,} pictures, {describe(stats['bytes'])} of {describe(stats['budget'])}"
         if stats["low_memory"]:
             text += (f" (you chose {describe(stats['base_budget'])}; the computer is short of memory, so fewer pictures are held "
                      "at once)")
+        if view is not None:
+            warm = view.warm
+            text += f" · on disk {warm.count:,} pictures, {describe(warm.total_bytes)} of {describe(warm.max_bytes)}"
+            if not warm.persistent:
+                text += " (until Duplio closes; Settings can keep them between runs)"
+        elif self._preview_items():
+            text += " · not kept on disk (this drive is quick to read again)"
         return text
+
+    def buffers_changed(self) -> None:
+        """The memory or disk buffer was cleared: draw what is on screen again (it comes back from the disk buffer or the drive)."""
+        if self.listing is not None:
+            self._apply_view(reset=False)
+        self._tick()
 
     def _fetch_clicked(self) -> None:
         pre = self.ctx.prefetcher

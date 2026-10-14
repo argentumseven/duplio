@@ -71,10 +71,12 @@ class _Request:
 class Thumbnailer:
     """Asks the preview service for pictures on worker threads and delivers Tk images on the window's thread.
 
-    Memory is bounded three ways. The finished images are kept up to a *byte* budget (the least recently shown go first;
-    an image that goes is made again from the buffer on disk, never fetched from the drive again). If the computer runs
-    short of memory the budget shrinks by itself and comes back when memory does. And the queues are bounded, so scrolling
-    through a huge folder cannot pile up work faster than it can be done."""
+    Memory is bounded three ways. The memory budget is shared by two things: a quarter of it (at most 512 MB) for the
+    finished images, which are what is drawn (the least recently shown go first), and the rest for the small compressed
+    pictures the preview service holds in memory before they move on to the disk buffer. An image that goes is made again
+    from those, never fetched from the drive again. If the computer runs short of memory the budget shrinks by itself and comes
+    back when memory does. And the queues are bounded, so scrolling through a huge folder cannot pile up work faster than it
+    can be done."""
 
     STACK_LIMIT = 6000  # requests waiting for a worker; the oldest (scrolled past long ago) are dropped beyond this
     FINISHED_LIMIT = 256  # pictures made but not yet turned into images; workers wait beyond this
@@ -97,6 +99,7 @@ class Thumbnailer:
         self._reasons: dict[str, str] = {}
         self.base_budget = image_budget or default_image_budget()
         self._budget = self.base_budget
+        self._image_budget = self._share(self._budget)
         self._memory = memory
         self._last_memory_check = 0.0
         self.low_memory = False
@@ -104,22 +107,39 @@ class Thumbnailer:
         self._closing = False
         self._pump_scheduled = False
         self._workers = [threading.Thread(target=self._work, name=f"duplio-thumb-{n}", daemon=True) for n in range(workers)]
+        self._apply_budget()
         for w in self._workers:
             w.start()
 
     # ---- the budget -----------------------------------------------------
     @property
     def budget(self) -> int:
+        """The memory pictures may use altogether (images drawn and pictures held), as it stands now."""
         return self._budget
 
-    def set_budget(self, nbytes: int | None) -> None:
-        """Choose how much memory finished images may use (``None``: automatic)."""
-        self.base_budget = nbytes or default_image_budget()
-        self._budget = max(LOWEST_BUDGET, self.base_budget // 4) if self.low_memory else self.base_budget
+    @staticmethod
+    def _share(budget: int) -> int:
+        """The part of the memory budget for finished images: a quarter, at most 512 MB, never more than there is."""
+        return min(budget, max(LOWEST_BUDGET, min(budget // 4, 512 * MIB)))
+
+    def _apply_budget(self) -> None:
+        """Divide the budget between the finished images and the pictures the preview service holds in memory."""
+        self._image_budget = self._share(self._budget)
+        setter = getattr(self._previews, "set_memory_limit", None)
+        if setter is not None:
+            setter(self._budget - self._image_budget)  # what no longer fits there moves on to the disk buffer
         self._evict()
 
+    def set_budget(self, nbytes: int | None) -> None:
+        """Choose how much memory pictures may use altogether (``None``: automatic)."""
+        self.base_budget = nbytes or default_image_budget()
+        self._budget = max(LOWEST_BUDGET, self.base_budget // 4) if self.low_memory else self.base_budget
+        self._apply_budget()
+
     def stats(self) -> dict[str, Any]:
-        return {"images": len(self._images), "bytes": self._image_bytes, "budget": self._budget, "base_budget": self.base_budget,
+        held, held_bytes = self._previews.held() if hasattr(self._previews, "held") else (0, 0)
+        return {"images": len(self._images), "image_bytes": self._image_bytes, "held": held, "held_bytes": held_bytes,
+                "bytes": self._image_bytes + held_bytes, "budget": self._budget, "base_budget": self.base_budget,
                 "low_memory": self.low_memory, "dropped": self.dropped}
 
     def check_memory(self, *, force: bool = False) -> bool:
@@ -134,20 +154,28 @@ class Thumbnailer:
         if not self.low_memory and free < self.LOW_MEMORY:
             self.low_memory = True
             self._budget = max(LOWEST_BUDGET, self.base_budget // 4)
-            self._evict()
+            self._apply_budget()
         elif self.low_memory and free > self.MEMORY_OK:
             self.low_memory = False
             self._budget = self.base_budget
+            self._apply_budget()
         return self.low_memory
 
     def _evict(self) -> None:
-        while self._image_bytes > self._budget and self._images:
+        while self._image_bytes > self._image_budget and self._images:
             _key, (_image, cost) = self._images.popitem(last=False)
             self._image_bytes -= cost
 
     def clear_images(self) -> None:
         self._images.clear()
         self._image_bytes = 0
+
+    def clear_memory(self) -> int:
+        """Empty the memory: the finished images and the pictures held in memory (nothing moves to the disk buffer). Returns
+        how many pictures were held. Pictures on screen are drawn again, from the disk buffer or the drive."""
+        self.clear_images()
+        clear = getattr(self._previews, "clear_memory", None)
+        return int(clear()) if clear is not None else 0
 
     # ---- asking ---------------------------------------------------------
     def peek(self, tile: Tile, box: int) -> Any | None:

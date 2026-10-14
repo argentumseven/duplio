@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import queue
-import sys
 import threading
 import tkinter as tk
 from collections.abc import Callable
@@ -35,8 +34,11 @@ from duplio.vfs.location import BackendRegistry
 
 log = logging.getLogger("duplio.gui")
 
-# Deleting every kept picture is a key chord, never a click: it cannot be done by accident, and the key bar says what it is.
-PURGE_KEYS = "cmd+shift+del" if sys.platform == "darwin" else "ctrl+shift+del"
+# Emptying a buffer is a key chord, never a click: it cannot be done by accident, and the key bar says what each one is. They
+# only ever empty Duplio's own small copies of pictures (never anyone's files), and are independent: one for the memory
+# buffer (M), one for the disk buffer (D). (Letters, not Delete or BackSpace: the pages already use BackSpace to go up.)
+CLEAR_MEMORY_KEYS = "ctrl+shift+m"
+CLEAR_DISK_KEYS = "ctrl+shift+d"
 
 
 @dataclass
@@ -133,7 +135,7 @@ class Page(tk.Frame):
         """Called when another page is brought to the front."""
 
     def buffers_changed(self) -> None:
-        """Called when the pictures kept on disk were purged, so a page that shows how many there are can say so."""
+        """Called when the memory or the disk buffer was emptied, so a page that shows how many pictures there are can say so."""
 
 
 NAV = (  # (page, shortcut number or "", name)
@@ -173,7 +175,7 @@ class DuplioWindow(tk.Tk):
         self.title(f"Duplio {__version__}")
         self.minsize(1040, 660)
         self.ui_calls: queue.SimpleQueue[tuple[Callable[[], Any], threading.Event, list[Any]]] = queue.SimpleQueue()
-        self._purging = False
+        self._purging = False  # the disk buffer is being emptied
         dirs = (dirs or get_app_dirs()).ensure()
         self.fonts = style.apply_style(self)
         settings = load_settings(dirs)
@@ -244,11 +246,10 @@ class DuplioWindow(tk.Tk):
         self._keybar = FlowFrame(right, PALETTE["sidebar"], hgap=0, vgap=0)  # wraps onto a second line rather than cut a hint off
         self._keybar.grid(row=2, column=0, sticky="ew")
         self.bind_all("<Control-q>", lambda _e: self.close())
-        chords = ["<Control-Shift-Delete>"]
-        if sys.platform == "darwin":  # the delete key of a Mac keyboard is BackSpace; Cmd+Shift+Delete is what empties the Trash there
-            chords += ["<Command-Shift-BackSpace>", "<Command-Shift-Delete>"]
-        for chord in chords:
-            self.bind_all(chord, self._purge_chord)
+        for letter in ("M", "m"):  # (the lower case one is for when Caps Lock is on)
+            self.bind_all(f"<Control-Shift-Key-{letter}>", self._clear_memory_chord)
+        for letter in ("D", "d"):
+            self.bind_all(f"<Control-Shift-Key-{letter}>", self._clear_disk_chord)
         for key, number, _label in NAV:
             if number:
                 self.bind_all(f"<Control-Key-{number}>", partial(self._jump, key))
@@ -264,46 +265,69 @@ class DuplioWindow(tk.Tk):
                 self._keybar.remove(child)
             child.destroy()
         f = self.fonts
-        everywhere = (("ctrl+1-9", "Pages"), (PURGE_KEYS, "Purge pictures"), ("ctrl+q", "Quit"))
+        everywhere = (("ctrl+1-9", "Pages"), (CLEAR_MEMORY_KEYS, "Clear memory buffer"), (CLEAR_DISK_KEYS, "Clear disk buffer"),
+                      ("ctrl+q", "Quit"))
         for key, what in (*hints, *everywhere):
             box = tk.Frame(self._keybar, bg=PALETTE["sidebar"])
             tk.Label(box, text=key, font=f.bold, bg=PALETTE["sidebar"], fg=PALETTE["key"], padx=0, pady=4).pack(side="left", padx=(12, 4))
             tk.Label(box, text=what, font=f.small, bg=PALETTE["sidebar"], fg=PALETTE["sidebar_text"]).pack(side="left")
             self._keybar.add(box)
 
-    # ---- purging the kept pictures ----------------------------------------------
-    def _purge_chord(self, _event: tk.Event) -> str:
-        self.purge_pictures()
+    # ---- emptying the buffers ---------------------------------------------------
+    def _clear_memory_chord(self, _event: tk.Event) -> str:
+        self.clear_memory_buffer()
         return "break"
 
-    def purge_pictures(self) -> None:
-        """Delete every picture kept on disk, after asking. Only the key chord reaches this (see :data:`PURGE_KEYS`)."""
+    def _clear_disk_chord(self, _event: tk.Event) -> str:
+        self.clear_disk_buffer()
+        return "break"
+
+    def clear_memory_buffer(self) -> None:
+        """Empty the pictures held in memory, after asking. Only the key chord reaches this (see :data:`CLEAR_MEMORY_KEYS`)."""
+        ctx = self.ctx
+        stats = ctx.thumbs.stats()
+        what = f"{stats['held']:,} pictures ({human_size(stats['bytes'])})" if stats["held"] or stats["images"] else "no pictures"
+        if not ctx.confirm("Clear memory buffer", "Empty the picture buffer in memory?",
+                           [f"Duplio is holding {what} in memory (small copies, so pictures appear quickly).",
+                            "Only these copies are emptied. Your own files and folders are not touched.",
+                            "Pictures on screen are drawn again: from the disk buffer if they had moved on to it, otherwise from their drive."],
+                           confirm="Clear memory buffer"):
+            return
+        ctx.prefetcher.reset()  # what it had filled is gone; it does not start again by itself
+        removed = ctx.thumbs.clear_memory()
+        page = self.pages.get(self.current)
+        if page is not None:
+            page.buffers_changed()
+        ctx.info("Clear memory buffer", f"Emptied the memory buffer ({removed:,} pictures).", [], "ok")
+
+    def clear_disk_buffer(self) -> None:
+        """Empty the pictures kept on disk, after asking. Only the key chord reaches this (see :data:`CLEAR_DISK_KEYS`)."""
         ctx = self.ctx
         if self._purging:
             return
         count, size = ctx.previews.stored()
         what = f"{count:,} pictures ({human_size(size)})" if count else "no pictures"
-        if not ctx.confirm("Purge pictures", "Delete every picture Duplio has kept on disk?",
+        if not ctx.confirm("Clear disk buffer", "Empty the picture buffer on disk?",
                            [f"Duplio is keeping {what} on disk (small copies of pictures from USB, network, phone and cloud drives).",
-                            "Only these small copies are deleted. Your own files and folders are not touched.",
-                            "Pictures you look at again are fetched from the drive again."],
-                           confirm="Purge", danger=True):
+                            "Only these copies are emptied. Your own files and folders are not touched.",
+                            "Pictures you look at again are fetched from their drive again."],
+                           confirm="Clear disk buffer"):
             return
         self._purging = True
-        ctx.prefetcher.reset()  # whatever it had filled is about to be gone; it does not start again by itself
+        ctx.prefetcher.reset()  # what it had filled is about to be gone; it does not start again by itself
 
         def done(removed: int) -> None:
             self._purging = False
             page = self.pages.get(self.current)
             if page is not None:
                 page.buffers_changed()
-            ctx.info("Purge pictures", f"Deleted {removed:,} kept pictures.", [], "ok")
+            ctx.info("Clear disk buffer", f"Emptied the disk buffer ({removed:,} pictures).", [], "ok")
 
         def failed(error: BaseException) -> None:
             self._purging = False
             ctx.show_error(error)
 
-        ctx.run_job("Deleting kept pictures", lambda _progress, _cancel: ctx.previews.clear(), done, on_error=failed,
+        ctx.run_job("Emptying the disk buffer", lambda _progress, _cancel: ctx.previews.clear_disk(), done, on_error=failed,
                     on_cancel=lambda: setattr(self, "_purging", False))
 
     def make_logo(self, scale: int, background: str) -> tk.PhotoImage | None:

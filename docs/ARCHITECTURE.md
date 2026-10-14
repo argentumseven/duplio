@@ -114,11 +114,17 @@ The review screens and `duplio preview` show pictures without paying for them tw
   byte-budgeted reader, so a hostile file cannot make it read without limit.
 - `jpeg.py` and `png.py` decode and encode thumbnails in pure Python (baseline JPEG matches Pillow within rounding), so the
   picture pane needs nothing installed. `render.py` turns a picture into half-block characters, applying EXIF orientation.
-- `store.py` keeps pictures: a session store in a temporary folder or a persistent one in the cache folder, indexed in
-  SQLite by a hash of drive, path, size and modification time, with no file names, trimmed least-recently-used to a size cap
-  (4 GiB by default). `PreviewService` has at most one store and uses it only for drives that are not the computer's own disk
-  (`Capabilities.internal` is false: USB, network, phone, cloud, optical); on an internal disk nothing is written (mode
-  `always` overrides that). The window's key chord Ctrl+Shift+Delete (`DuplioWindow.purge_pictures`) clears the store, asking first.
+- `store.py` keeps pictures on disk (the warm tier): a session store in a temporary folder or a persistent one in the cache
+  folder, indexed in SQLite by a hash of drive, path, size and modification time, with no file names, trimmed
+  least-recently-used to a size cap (4 GiB by default). `memory.py` is the hot tier: a byte-limited, thread-safe,
+  least-recently-used `MemoryTier` of the same small pictures. `PreviewService` puts a made picture in the hot tier;
+  only what that has no room for (`Spilled`) goes on to the warm tier, and only for drives that are not the computer's own
+  disk (`Capabilities.internal` is false: USB, network, phone, cloud, optical; mode `always` overrides that). So a picture is
+  in one tier, not both; the pictures pinned as the folder on screen are never evicted to make room for each other (the
+  newcomer spills instead), and closing flushes the hot tier to the warm one. `BufferView` shows the two as one buffer to the
+  background fetch and the status line. The window's `Thumbnailer` splits its memory budget: a quarter (at most 512 MiB) for the
+  decoded Tk images, the rest for the hot tier (`PreviewService.set_memory_limit`). The window's key chords Ctrl+Shift+M and
+  Ctrl+Shift+D (`DuplioWindow.clear_memory_buffer`, `clear_disk_buffer`) empty each tier, asking first.
 - `service.py` is the cheapest-first ladder: cache, then a ranged read of the photo's own thumbnail, then a bounded whole read
   only when the file is small or the caller asked, otherwise `Unavailable` with a reason. It also chooses the cheapest member of
   a group of identical files (`pick_source`) and prefetches the next groups in the background (two workers, a per-drive
