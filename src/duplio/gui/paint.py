@@ -45,6 +45,10 @@ def short_reason(reason: str) -> str:
     low = reason.lower()
     if reason == "online-only" or "cloud" in low:
         return "☁\nIn the cloud\n(not downloaded)"
+    if "movie" in low and "ffmpeg" in low:
+        return "Needs ffmpeg\nto show movies"
+    if "pillow or ffmpeg" in low:
+        return "Needs Pillow or\nffmpeg to show"
     if "pillow" in low:
         return "Needs the Pillow\nlibrary to show"
     if "small preview" in low or "needs-download" in low or "fetch key" in low:
@@ -90,14 +94,18 @@ class Painter:
         c = self.canvas
         box = box or self.box
         key = tile.picture_key or tile.key  # what the picture is, not where it sits in this scan: a late answer from an earlier scan cannot land on another file
-        background = c.create_rectangle(x, y, x + box, y + box, fill=PALETTE["thumb_bg"], outline="", tags=(*tags, f"thumbbg:{key}"))
+        movie = ("movie",) if tile.kind == VIDEO else ()
+        background = c.create_rectangle(x, y, x + box, y + box, fill=PALETTE["thumb_bg"], outline="",
+                                        tags=(*tags, f"thumbbg:{key}", *movie))
         image = self.thumbs.peek(tile, box)
         if image is not None:
             item = c.create_image(x + box // 2, y + box // 2, image=image, tags=(*tags, f"img:{key}"))
             c.tag_raise(item, background)
+            if movie:
+                self._play_badge(x, y + box, tags, key)
             return
         ext = tile.ext[:5]
-        if tile.kind == PICTURE:
+        if tile.kind in (PICTURE, VIDEO):
             reason = self.thumbs.reason(tile)
             c.create_text(x + box // 2, y + box // 2, text=short_reason(reason) if reason else "…", fill=PALETTE["muted"],
                           font=self.fonts.small, justify="center", width=box - 10, tags=(*tags, f"ph:{key}", f"phmsg:{key}"))
@@ -118,6 +126,12 @@ class Painter:
         c.create_text(x + box // 2, y + box // 2 + (24 if glyph else 0), text=ext or "FILE", fill=PALETTE["muted"],
                       font=self.fonts.big, tags=tags)
 
+    def _play_badge(self, x: float, bottom: float, tags: tuple[str, ...], key: str) -> None:
+        """A small play button in the corner of a movie's picture, so a movie is told from a photo at a glance."""
+        c = self.canvas
+        c.create_rectangle(x + 4, bottom - 22, x + 26, bottom - 4, fill="#000000", outline="", stipple="gray50", tags=(*tags, f"play:{key}"))
+        c.create_text(x + 15, bottom - 13, text="▶", fill="#ffffff", font=self.fonts.tiny, tags=(*tags, f"play:{key}"))
+
     def ready(self, key: str, image: Any, reason: str) -> None:
         """Where finished pictures are delivered (for requests made on this painter's behalf)."""
         self._ready(key, image, reason)
@@ -129,9 +143,12 @@ class Painter:
             if image is not None:
                 for rect in c.find_withtag(f"thumbbg:{key}"):
                     x1, y1, x2, y2 = c.coords(rect)
-                    tags = tuple(t for t in c.gettags(rect) if not t.startswith("thumbbg:") and t != "current")
+                    own = c.gettags(rect)
+                    tags = tuple(t for t in own if not t.startswith("thumbbg:") and t not in ("current", "movie"))
                     item = c.create_image((x1 + x2) / 2, (y1 + y2) / 2, image=image, tags=(*tags, f"img:{key}"))
                     c.tag_raise(item, rect)
+                    if "movie" in own:
+                        self._play_badge(x1, y2, tags, key)
                 c.delete(f"ph:{key}")
             else:
                 c.itemconfigure(f"phmsg:{key}", text=short_reason(reason))

@@ -19,15 +19,15 @@ from duplio.gui.palette import PALETTE
 from duplio.plan.model import ActionType
 from duplio.plan.planner import decide
 from duplio.plan.rules import parse_rules
-from duplio.preview.service import PICTURE_EXT, PreviewItem, extension
+from duplio.preview.service import PICTURE_EXT, VIDEO_EXT, PreviewItem, extension
 from duplio.scan.inventory import FileEntry, Root
-from duplio.util.fmt import format_ns, human_size
+from duplio.util.fmt import format_ns, human_size, plural
 
 PALETTE_OK, PALETTE_WARN, PALETTE_BAD = PALETTE["ok"], PALETTE["warn"], PALETTE["bad"]
 
 PICTURE, VIDEO, AUDIO, DOCUMENT, ARCHIVE, OTHER = "picture", "video", "audio", "document", "archive", "other"
 
-_VIDEO = frozenset({"mp4", "mov", "m4v", "avi", "mkv", "wmv", "webm", "mpg", "mpeg", "3gp", "mts", "m2ts", "flv"})
+_VIDEO = VIDEO_EXT
 _AUDIO = frozenset({"mp3", "m4a", "wav", "flac", "aac", "ogg", "opus", "wma", "aiff", "amr"})
 _DOCUMENT = frozenset({"pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", "txt", "rtf", "odt", "ods", "odp", "md", "csv", "epub", "pages", "numbers", "key"})
 _ARCHIVE = frozenset({"zip", "rar", "7z", "tar", "gz", "bz2", "xz", "iso", "dmg"})
@@ -109,7 +109,7 @@ class Tile:
 
     @property
     def preview_item(self) -> PreviewItem | None:
-        if self.kind != PICTURE:
+        if self.kind not in (PICTURE, VIDEO):  # a movie gets a picture too: its cover, or a frame taken by ffmpeg
             return None
         e = self.entry
         return PreviewItem(self.root.backend, e.path, e.size, e.mtime_ns, e.rel, e.offline)
@@ -228,6 +228,21 @@ class BackupVerdict:
     headline: str
     detail: str
     ok: bool
+    partial: bool = False  # something was not looked at (sub-folders were left out), so "safe" does not cover everything
+
+
+def scope_notes(diff: DiffResult, names: tuple[str, str]) -> list[str]:
+    """What a check did NOT look at: the sub-folders of a folder that was checked without them."""
+    notes = []
+    inventory = diff.inventory
+    for index, name in enumerate(names):
+        left = inventory.unvisited[index] if index < len(inventory.unvisited) else []
+        if inventory.roots[index].recursive or not left:
+            continue
+        shown = ", ".join(sorted(left, key=str.casefold)[:3]) + (f" and {len(left) - 3:,} more" if len(left) > 3 else "")
+        notes.append(f"{name}: only the files directly inside it were checked; its {plural(len(left), 'sub-folder')} ({shown}) were not looked "
+                     "inside")
+    return notes
 
 
 def backup_verdict(diff: DiffResult, a_name: str = "A", b_name: str = "B") -> BackupVerdict:
@@ -237,14 +252,18 @@ def backup_verdict(diff: DiffResult, a_name: str = "A", b_name: str = "B") -> Ba
     different = [i for i in mine if i.kind is Kind.CHANGED]
     unreadable = [i for i in mine if i.kind is Kind.UNREADABLE]
     not_safe = len(missing) + len(different)
+    notes = scope_notes(diff, (a_name, b_name))
+    a_partial = bool(diff.inventory.unvisited and diff.inventory.unvisited[0] and not diff.inventory.roots[0].recursive)
+    b_partial = bool(len(diff.inventory.unvisited) > 1 and diff.inventory.unvisited[1] and not diff.inventory.roots[1].recursive)
+    where = f"directly in {a_name}" if a_partial else f"in {a_name}"
     if not mine:
-        headline, ok = f"There are no files in {a_name} to check.", True
+        headline, ok = f"There are no files {where} to check.", True
     elif not not_safe and not unreadable:
-        headline, ok = f"Everything in {a_name} is safe in {b_name}.", True
+        headline, ok = f"Everything {where} is safe in {b_name}.", True
     elif not not_safe:
         headline, ok = f"{len(unreadable):,} files could not be checked.", False
     else:
-        headline, ok = f"{not_safe:,} of {len(mine):,} files in {a_name} are NOT in {b_name}.", False
+        headline, ok = f"{not_safe:,} of {len(mine):,} files {where} are NOT in {b_name}.", False
     parts = [f"{len(safe):,} files are safe (an identical copy exists in {b_name}, whatever it is called there)"]
     if missing:
         parts.append(f"{len(missing):,} exist only in {a_name} ({human_size(sum(i.entry.size for i in missing))})")
@@ -252,8 +271,13 @@ def backup_verdict(diff: DiffResult, a_name: str = "A", b_name: str = "B") -> Ba
         parts.append(f"{len(different):,} are in {b_name} only as a different version")
     if unreadable:
         parts.append(f"{len(unreadable):,} could not be read, so nothing is claimed about them")
+    detail = "; ".join(parts) + "."
+    if b_partial and (missing or different):
+        detail += (f" {b_name} has sub-folders that were not looked inside, so a copy kept in one of them shows here as missing: "
+                   "tick the box to include them and check again.")
+    detail = " ".join([detail, *[n + "." for n in notes]]) if notes else detail
     return BackupVerdict(len(safe), sum(i.entry.size for i in safe), len(missing), sum(i.entry.size for i in missing),
-                         len(different), len(unreadable), headline, "; ".join(parts) + ".", ok)
+                         len(different), len(unreadable), headline, detail, ok, partial=a_partial)
 
 
 # --------------------------------------------------------------------------- duplicates

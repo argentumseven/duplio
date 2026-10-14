@@ -56,7 +56,7 @@ def preview_cmd(files: tuple[str, ...], width: int | None, download: bool, onlin
     for text in files:
         item = _item(app, text)
         try:
-            preview = service.get(item, allow_download=download, allow_online_only=online_only)
+            preview = service.get(item, allow_download=True if download else None, allow_online_only=online_only)
         except Unavailable as exc:
             app.console.print(Text.assemble((item.name, "bold"), f": {exc.reason}", style="yellow"))
             continue
@@ -112,7 +112,7 @@ def previews_warm(location: str, limit: int, download: bool, online_only: bool) 
             def make(item: PreviewItem):  # type: ignore[no-untyped-def]
                 def run() -> None:
                     try:
-                        preview = service.get(item, cancel=cancel, allow_download=download, allow_online_only=online_only)
+                        preview = service.get(item, cancel=cancel, allow_download=True if download else None, allow_online_only=online_only)
                         outcome["already cached" if preview.from_cache else "fetched"] += 1
                         progress.advance(items=1, nbytes=preview.bytes_read)
                     except Unavailable as exc:

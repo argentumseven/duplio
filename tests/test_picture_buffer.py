@@ -184,7 +184,7 @@ def finished(pre: FolderPrefetcher) -> bool:
     return pre.status().state in ("finished", "stopped")
 
 
-def test_a_folder_is_fetched_nearest_the_viewer_first_and_then_it_is_all_at_hand(folder: Any) -> None:
+def test_a_folder_is_fetched_from_the_viewer_onward_then_back_round_and_then_it_is_all_at_hand(folder: Any) -> None:
     _root, items, reg = folder
     svc = service()
     order: list[str] = []
@@ -200,7 +200,8 @@ def test_a_folder_is_fetched_nearest_the_viewer_first_and_then_it_is_all_at_hand
     assert wait_until(lambda: finished(pre))
     status = pre.status()
     assert status.state == "finished" and status.fetched == 30 and status.ready == 30 and status.failed == 0
-    assert order[0] == "IMG_020.jpg" and set(order[:3]) == {"IMG_020.jpg", "IMG_019.jpg", "IMG_021.jpg"}
+    # from where the viewer is, on to the end of the folder, and then back to the part that was skipped
+    assert order == [f"IMG_{n:03d}.jpg" for n in (*range(20, 30), *range(0, 20))]
     assert all(svc.cached(i) for i in items)
     again = FolderPrefetcher(svc, workers=2)  # a second visit finds everything already there
     again.start(items)
@@ -212,16 +213,17 @@ def test_a_folder_is_fetched_nearest_the_viewer_first_and_then_it_is_all_at_hand
     reg.close()
 
 
-def test_a_full_buffer_stops_the_fetch_instead_of_throwing_pictures_away(folder: Any) -> None:
+def test_when_this_folder_alone_fills_the_buffer_the_fetch_stops_instead_of_throwing_its_pictures_away(folder: Any) -> None:
     _root, items, reg = folder
     svc = service(max_bytes=40_000)  # room for only some of the 30 pictures
+    svc.pin(items)  # as the Browse page does: these are the pictures on screen
     pre = FolderPrefetcher(svc, workers=1)
     pre.start(items)
     assert wait_until(lambda: finished(pre))
     status = pre.status()
     store = svc.buffer_for(items[0])
     assert store is not None
-    assert status.state == "stopped" and "buffer is full" in status.reason and "Settings" in status.reason
+    assert status.state == "stopped" and "fill the picture buffer" in status.reason and "Settings" in status.reason
     assert 0 < status.fetched < 30
     assert store.count == status.fetched  # nothing was evicted to make room: what was fetched is still there
     pre.close()
@@ -229,9 +231,50 @@ def test_a_full_buffer_stops_the_fetch_instead_of_throwing_pictures_away(folder:
     reg.close()
 
 
+def test_a_buffer_full_of_other_folders_makes_room_instead_of_stopping(folder: Any) -> None:
+    _root, items, reg = folder
+    svc = service(max_bytes=400_000)
+    store = svc.buffer_for(items[0])
+    assert store is not None
+    old_keys = [f"{n:02d}" + "b" * 30 for n in range(380)]
+    for key in old_keys:
+        store.put(key, "other", thumb(1, 1000))  # an old, big folder fills the buffer
+    assert store.fullness > 0.9
+    svc.pin(items)
+    pre = FolderPrefetcher(svc, workers=1)
+    pre.start(items)
+    assert wait_until(lambda: finished(pre))
+    assert pre.status().state == "finished" and pre.status().fetched == 30
+    assert all(svc.cached(i) for i in items)  # every picture of this folder is there
+    assert sum(1 for key in old_keys if store.has(key)) < 380  # at the old folder's cost
+    pre.close()
+    svc.close()
+    reg.close()
+
+
+def test_pictures_nobody_looked_at_for_a_long_while_are_let_go_when_the_store_opens(tmp_path: Path) -> None:
+    store = ThumbStore(tmp_path / "s", max_bytes=10**9, persistent=True)
+    for n in range(6):
+        store.put(f"k{n:02d}" + "0" * 29, "d", thumb(n))
+    store.close()
+    db = sqlite3.connect(tmp_path / "s" / "index.sqlite3")
+    db.execute("UPDATE thumbs SET used = ? WHERE key < 'k03'", (time.time() - 90 * 86400,))  # three not looked at for 90 days
+    db.commit()
+    db.close()
+    again = ThumbStore(tmp_path / "s", max_bytes=10**9, persistent=True)
+    assert again.expire(60) == 3 and again.count == 3 and not again.has("k00" + "0" * 29) and again.has("k05" + "0" * 29)
+    assert again.expire(0) == 0  # 0 means never
+    again.close()
+
+
 class FakeStore:
+    max_bytes = 1000
+
     def __init__(self, fullness: float = 0.1, free: int | None = 10 * 1024**3) -> None:
         self.fullness, self._free = fullness, free
+
+    def pinned_bytes(self) -> int:
+        return int(self.fullness * self.max_bytes)  # the whole of it is this folder's
 
     def free_disk(self) -> int | None:
         return self._free
@@ -338,7 +381,8 @@ def test_moving_the_viewer_reorders_what_is_left() -> None:
     pre.move_to(15)
     gate.set()
     assert wait_until(lambda: pre.status().state == "finished")
-    assert seen[1] == "p15.jpg" and set(seen[1:4]) == {"p15.jpg", "p14.jpg", "p16.jpg"}
+    # from the new position on to the end, and then back to what was left behind
+    assert seen[1:] == [f"p{n}.jpg" for n in (*range(15, 20), *range(1, 15))]
     pre.close()
 
 

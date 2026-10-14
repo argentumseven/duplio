@@ -60,7 +60,8 @@ def connect_server(ctx: Context) -> str | None:
 class FolderBox(tk.Frame):
     """One folder: a coloured letter, a path box with recent folders, and the buttons that fill it in."""
 
-    def __init__(self, master: tk.Misc, ctx: Context, side: int, title: str, hint: str, on_change=None) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, master: tk.Misc, ctx: Context, side: int, title: str, hint: str, on_change=None,  # type: ignore[no-untyped-def]
+                 recursion: str = "") -> None:
         super().__init__(master, bg=PALETTE["bg"])
         self.ctx, self.side, self._on_change = ctx, side, on_change
         f = ctx.fonts
@@ -84,10 +85,19 @@ class FolderBox(tk.Frame):
         row.pack(fill="x", pady=(6, 0))
         Btn(row, "Choose folder…", self.choose, fonts=f, padx=10, pady=4).pack(side="left")
         Btn(row, "Phone or server…", self.connect, fonts=f, padx=10, pady=4).pack(side="left", padx=(6, 0))
+        self.recursive = tk.BooleanVar(value=False)
+        if recursion:  # an option for looking inside the folders below this one too (it can take a while, so it starts off)
+            ttk.Checkbutton(self, text=recursion, variable=self.recursive).pack(anchor="w", pady=(6, 0))
         self.about = tk.Label(self, text="", font=f.small, bg=PALETTE["bg"], fg=PALETTE["muted"], anchor="w", justify="left")
         self.about.pack(fill="x", pady=(4, 0))
         autowrap(self.about, margin=6, minimum=120)
         self._shown = ""
+        self._has_option = bool(recursion)
+
+    @property
+    def include_subfolders(self) -> bool:
+        """Whether to look inside the folders below this one: always, unless the page offers the choice and it is not ticked."""
+        return bool(self.recursive.get()) if self._has_option else True
 
     # ---- the value --------------------------------------------------------
     def get(self) -> str:
@@ -125,10 +135,11 @@ class FolderBox(tk.Frame):
 class FolderPair(tk.Frame):
     """Folder A and folder B next to each other, with a button that swaps them."""
 
-    def __init__(self, master: tk.Misc, ctx: Context, a_title: str, a_hint: str, b_title: str, b_hint: str, on_change=None) -> None:  # type: ignore[no-untyped-def]
+    def __init__(self, master: tk.Misc, ctx: Context, a_title: str, a_hint: str, b_title: str, b_hint: str, on_change=None,  # type: ignore[no-untyped-def]
+                 recursion: tuple[str, str] | None = None) -> None:
         super().__init__(master, bg=PALETTE["bg"])
-        self.a = FolderBox(self, ctx, 0, a_title, a_hint, on_change)
-        self.b = FolderBox(self, ctx, 1, b_title, b_hint, on_change)
+        self.a = FolderBox(self, ctx, 0, a_title, a_hint, on_change, recursion[0] if recursion else "")
+        self.b = FolderBox(self, ctx, 1, b_title, b_hint, on_change, recursion[1] if recursion else "")
         self.a.grid(row=0, column=0, sticky="we")
         self.b.grid(row=0, column=2, sticky="we")
         swap = tk.Label(self, text="⇄", font=ctx.fonts.title, bg=PALETTE["bg"], fg=PALETTE["muted"], cursor="hand2", padx=14)
@@ -140,6 +151,9 @@ class FolderPair(tk.Frame):
 
     def values(self) -> tuple[str, str]:
         return self.a.get(), self.b.get()
+
+    def include_subfolders(self) -> tuple[bool, bool]:
+        return self.a.include_subfolders, self.b.include_subfolders
 
     def swap(self) -> None:
         a, b = self.a.get(), self.b.get()

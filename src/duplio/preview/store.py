@@ -80,6 +80,7 @@ class ThumbStore:
         self._touched: dict[str, float] = {}
         self._last_flush = time.monotonic()
         self._pinned: frozenset[str] = frozenset()
+        self._pinned_cache: tuple[frozenset[str], float, int] | None = None
         self._closed = False
 
     def _open_index(self) -> sqlite3.Connection:
@@ -169,6 +170,41 @@ class ThumbStore:
     def pin(self, keys: set[str] | frozenset[str]) -> None:
         """Pictures to keep when the store is trimmed (the folder on screen), for as long as anything else can go instead."""
         self._pinned = frozenset(keys)
+
+    def pinned_bytes(self) -> int:
+        """How much of the store the pinned pictures (the folder on screen) take up. Cached for a few seconds."""
+        now = time.monotonic()
+        with self._lock:
+            pinned = self._pinned
+            if self._pinned_cache and self._pinned_cache[0] is pinned and now - self._pinned_cache[1] < 3.0:
+                return self._pinned_cache[2]
+            keys = list(pinned)
+            total = 0
+            for start in range(0, len(keys), 500):  # SQLite takes a limited number of values in one query
+                chunk = keys[start : start + 500]
+                marks = ",".join("?" * len(chunk))
+                total += int(self._db.execute(f"SELECT COALESCE(SUM(bytes), 0) FROM thumbs WHERE key IN ({marks})", chunk).fetchone()[0])
+            self._pinned_cache = (pinned, now, total)
+            return total
+
+    def expire(self, days: int) -> int:
+        """Remove pictures nobody has looked at for ``days`` days (the point of keeping them is to have them at hand
+        again, and a folder not opened for months is not coming back). Returns how many went."""
+        if days <= 0:
+            return 0
+        cutoff = time.time() - days * 86400
+        with self._lock:
+            self._flush_touched(force=True)
+            rows = self._db.execute("SELECT key, fmt, bytes FROM thumbs WHERE used < ?", (cutoff,)).fetchall()
+            for key, fmt, size in rows:
+                with contextlib.suppress(OSError):
+                    self._file(key, fmt).unlink()
+                self._total -= size
+                self._count -= 1
+            if rows:
+                self._db.execute("DELETE FROM thumbs WHERE used < ?", (cutoff,))
+                self._db.commit()
+        return len(rows)
 
     @property
     def total_bytes(self) -> int:

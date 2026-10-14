@@ -19,7 +19,7 @@ from typing import Any
 
 from duplio.events import CancelToken
 from duplio.gui.memory import LOWEST_BUDGET, MIB, available_memory, default_image_budget
-from duplio.gui.model import PICTURE, Tile
+from duplio.gui.model import PICTURE, VIDEO, Tile
 from duplio.preview import render
 from duplio.preview.service import PreviewService, Unavailable
 from duplio.preview.store import StoredThumb
@@ -60,7 +60,7 @@ class _Request:
     box: int
     ready: Ready
     wanted: Callable[[], bool] | None
-    allow_download: bool
+    allow_download: bool | None
     allow_online_only: bool
 
     @property
@@ -162,10 +162,10 @@ class Thumbnailer:
         return self._reasons.get(tile.picture_key, "")
 
     def request(self, tile: Tile, box: int, ready: Ready, wanted: Callable[[], bool] | None = None, *,
-                allow_download: bool = False, allow_online_only: bool = False, background: bool = False) -> None:
+                allow_download: bool | None = None, allow_online_only: bool = False, background: bool = False) -> None:
         """Deliver a picture of ``tile`` through ``ready`` (at once when it is already at hand). ``background`` marks
         read-ahead: it is served only when nothing that is on screen is waiting."""
-        if tile.kind != PICTURE:
+        if tile.kind not in (PICTURE, VIDEO):
             ready(tile.picture_key, None, "")
             return
         image = self.peek(tile, box)

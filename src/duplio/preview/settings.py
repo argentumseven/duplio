@@ -15,8 +15,9 @@ KEEP = ("session", "persistent")
 @dataclass
 class PreviewSettings:
     mode: str = "auto"  # auto: cache pictures from slow, remote and cloud drives · always: everywhere · off: never
-    keep: str = "session"  # session: deleted when Duplio closes · persistent: kept in the cache folder between runs
-    max_bytes: int = 1024 * 1024 * 1024  # size limit of the persistent cache
+    keep: str = "persistent"  # session: deleted when Duplio closes · persistent: kept in the cache folder between runs
+    keep_days: int = 60  # a kept picture nobody has looked at for this long is let go (0: never)
+    max_bytes: int = 16 * 1024 * 1024 * 1024  # size limit of the buffer; it is a ceiling, nothing is reserved
     size_px: int = 256  # longest side of a stored thumbnail, in pixels
     prefetch: int = 12  # how many pictures ahead of the one on screen are fetched in the background
     small_download: int = 1024 * 1024  # a picture up to this size may be read whole on a slow drive without asking
@@ -24,6 +25,8 @@ class PreviewSettings:
     online_only: bool = False  # fetch previews of cloud-only placeholder files without asking (this downloads them)
     memory_bytes: int = 0  # memory the window may use for pictures it is showing (0: a share of the computer's memory)
     prefetch_folder: bool = True  # when a folder is browsed, fetch the pictures of the whole folder in the background
+    download_whole: bool = True  # a picture or movie with no small preview inside may be read whole to make one (up to max_download)
+    ffmpeg: str = ""  # the ffmpeg program to use for movies and unusual picture formats ("": look for one)
 
     def validate(self) -> None:
         if self.mode not in MODES:
@@ -36,11 +39,13 @@ class PreviewSettings:
             raise ConfigError("[previews] prefetch must be between 0 and 200")
         if self.memory_bytes < 0:
             raise ConfigError("[previews] memory cannot be negative")
+        if not 0 <= self.keep_days <= 3650:
+            raise ConfigError("[previews] keep_days must be between 0 and 3650")
 
     @classmethod
     def from_table(cls, table: dict[str, Any]) -> PreviewSettings:
-        known = {"mode", "keep", "max_size", "size_px", "prefetch", "small_download", "max_download", "online_only", "memory",
-                 "prefetch_folder"}
+        known = {"mode", "keep", "keep_days", "max_size", "size_px", "prefetch", "small_download", "max_download", "online_only",
+                 "memory", "prefetch_folder", "download_whole", "ffmpeg"}
         unknown = set(table) - known
         if unknown:
             raise ConfigError(f"unknown [previews] setting(s): {', '.join(sorted(unknown))}")
@@ -54,12 +59,13 @@ class PreviewSettings:
             if name in table:
                 value = table[name]
                 setattr(out, attr, int(value) if isinstance(value, int) else parse_size(str(value)))
-        for name in ("size_px", "prefetch"):
+        for name in ("size_px", "prefetch", "keep_days"):
             if name in table:
                 setattr(out, name, int(table[name]))
-        if "online_only" in table:
-            out.online_only = bool(table["online_only"])
-        if "prefetch_folder" in table:
-            out.prefetch_folder = bool(table["prefetch_folder"])
+        for name in ("online_only", "prefetch_folder", "download_whole"):
+            if name in table:
+                setattr(out, name, bool(table[name]))
+        if "ffmpeg" in table:
+            out.ffmpeg = str(table["ffmpeg"])
         out.validate()
         return out

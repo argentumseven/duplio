@@ -398,7 +398,7 @@ def test_browse_says_so_when_the_buffer_is_full_instead_of_throwing_pictures_awa
     page = open_folder(window, root)
     wait(window, lambda: prefetch_done(window))
     status = window.ctx.prefetcher.status()
-    assert status.state == "stopped" and "buffer is full" in status.reason
+    assert status.state == "stopped" and "fill the picture buffer" in status.reason
     wait(window, lambda: "Stopped" in page.fetch_label.cget("text"))
     assert "Settings" in page.fetch_label.cget("text") and page.fetch_button.cget("text") == "Try again"
     store = window.ctx.previews.buffer_for(page._preview_items()[0])
@@ -955,3 +955,90 @@ def test_reload_reads_the_sub_folders_again(tmp_path: Path, window: Any) -> None
     (tmp_path / "pics" / "two").mkdir()
     page.refresh()
     wait(window, lambda: child_names(page, node) == ["one", "two"])
+
+
+# --------------------------------------------------------------------------- "is it backed up?": looking inside sub-folders is an option
+def nested_folders(tmp_path: Path) -> tuple[Path, Path]:
+    """A has a file at the top and one in a sub-folder; the backup keeps both, filed under a sub-folder."""
+    a, b = tmp_path / "phone", tmp_path / "backup"
+    (a / "Day 1").mkdir(parents=True)
+    (b / "2024" / "kept").mkdir(parents=True)
+    (a / "top.jpg").write_bytes(b"top photo" * 300)
+    (a / "Day 1" / "deep.jpg").write_bytes(b"deep photo" * 300)
+    (b / "2024" / "kept" / "top.jpg").write_bytes(b"top photo" * 300)
+    (b / "2024" / "kept" / "deep.jpg").write_bytes(b"deep photo" * 300)
+    (b / "loose.jpg").write_bytes(b"only loose in the backup" * 30)
+    return a, b
+
+
+def test_by_default_only_the_files_directly_in_each_folder_are_checked_and_the_answer_says_so(tmp_path: Path, window: Any) -> None:
+    from duplio.gui.palette import PALETTE
+
+    a, b = nested_folders(tmp_path)
+    dialogs = Dialogs(window.ctx)
+    page = page_for(window, "backup", a, b)
+    assert not page.folders.a.recursive.get() and not page.folders.b.recursive.get()
+    page.run()
+    wait(window, lambda: page.diff is not None)
+    assert not dialogs.confirms  # nothing slow was asked for, so there is no warning
+    seen = {t.entry.rel for r in page.all_rows for t in r.tiles}
+    assert seen == {"top.jpg", "loose.jpg"}  # sub-folders were not looked inside
+    headline, detail = page.headline.cget("text"), page.detail.cget("text")
+    assert headline == "1 of 1 files directly in A are NOT in the backup."  # it does not claim more than it looked at
+    assert "Day 1" in detail and "were not looked inside" in detail
+    assert "the backup has sub-folders that were not looked inside" in detail.lower()  # why top.jpg shows as missing, and what to do
+    assert page.banner.cget("bg") == PALETTE["bad_soft"]
+
+def test_ticking_a_side_warns_first_and_then_looks_inside_its_sub_folders(tmp_path: Path, window: Any) -> None:
+    a, b = nested_folders(tmp_path)
+    dialogs = Dialogs(window.ctx)
+    page = page_for(window, "backup", a, b)
+    page.folders.a.recursive.set(True)
+    page.folders.b.recursive.set(True)
+    page.run()
+    wait(window, lambda: page.diff is not None)
+    title, headline, details, _rows = dialogs.confirms[-1]
+    assert title == "Look inside sub-folders?" and "take a long time" in headline
+    assert any("many minutes" in line and "only reads" in line for line in details)  # why it can take a while, and that nothing changes
+    assert any("sub-folders of A and the backup" in line for line in details)
+    seen = {t.entry.rel for r in page.all_rows for t in r.tiles if t.side == 0}
+    assert seen == {"top.jpg", "Day 1/deep.jpg"}
+    assert page.headline.cget("text").startswith("Everything in A is safe")  # all of A, found in the backup's sub-folders
+    assert not page.diff.inventory.unvisited[0] and "not looked inside" not in page.detail.cget("text")
+
+
+def test_declining_the_warning_checks_nothing(tmp_path: Path, window: Any) -> None:
+    a, b = nested_folders(tmp_path)
+    dialogs = Dialogs(window.ctx)
+    dialogs.answer = False
+    page = page_for(window, "backup", a, b)
+    page.folders.b.recursive.set(True)
+    page.run()
+    pump(window, timeout=0.5)
+    assert dialogs.confirms and page.diff is None and not page.has_result
+
+
+def test_the_backup_can_be_looked_inside_while_a_is_only_checked_at_its_top(tmp_path: Path, window: Any) -> None:
+    a, b = nested_folders(tmp_path)
+    Dialogs(window.ctx)
+    page = page_for(window, "backup", a, b)
+    page.folders.b.recursive.set(True)  # the usual case: a flat phone folder against a backup filed into folders
+    page.run()
+    wait(window, lambda: page.diff is not None)
+    assert {t.entry.rel for r in page.all_rows for t in r.tiles if t.side == 0} == {"top.jpg"}
+    assert page.diff.inventory.roots[1].recursive and not page.diff.inventory.roots[0].recursive
+    from duplio.gui.palette import PALETTE
+
+    assert page.headline.cget("text") == "Everything directly in A is safe in the backup."
+    assert "Day 1" in page.detail.cget("text") and "not looked inside" in page.detail.cget("text")
+    assert page.banner.cget("bg") == PALETTE["warn_soft"]  # amber: all that was looked at is safe, but not everything was looked at
+
+
+def test_the_other_pages_still_look_inside_every_folder(tmp_path: Path, window: Any) -> None:
+    a, b = nested_folders(tmp_path)
+    Dialogs(window.ctx)
+    page = page_for(window, "compare", a, b)
+    assert not hasattr(page.folders.a, "recursive") or not page.folders.a._has_option  # no option, no change in behaviour
+    page.run()
+    wait(window, lambda: page.diff is not None)
+    assert "Day 1/deep.jpg" in {t.entry.rel for r in page.all_rows for t in r.tiles}

@@ -187,7 +187,7 @@ def find_similar_images(
                     assert previews is not None
                     item = PreviewItem(root.backend, entry.path, entry.size, entry.mtime_ns, entry.rel, entry.offline)
                     try:
-                        preview = previews.get(item, cancel=cancel)
+                        preview = previews.get(item, cancel=cancel, allow_download=False)  # as ever, no whole photos unless --similar-full-read
                     except Unavailable:
                         with lock:
                             skipped["count"] += 1

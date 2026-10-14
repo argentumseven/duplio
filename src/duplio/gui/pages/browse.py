@@ -380,8 +380,10 @@ class BrowsePage(Page):
             return
         folders = sum(1 for i in self.items if i.is_dir)
         files = [i for i in self.items if not i.is_dir]
-        pictures = sum(1 for i in files if i.tile is not None and i.tile.picture_key)
-        text = f"{plural(folders, 'folder')}, {plural(len(files), 'file')} ({plural(pictures, 'picture')}, {human_size(sum(i.size for i in files))})"
+        pictures = sum(1 for i in files if i.tile is not None and i.tile.kind == "picture")
+        movies = sum(1 for i in files if i.tile is not None and i.tile.kind == "video")
+        counted = plural(pictures, "picture") + (f", {plural(movies, 'movie')}" if movies else "")
+        text = f"{plural(folders, 'folder')}, {plural(len(files), 'file')} ({counted}, {human_size(sum(i.size for i in files))})"
         if len(self.shown) != len(self.items):
             text += f" · showing {len(self.shown):,}"
         colour = PALETTE["text"]

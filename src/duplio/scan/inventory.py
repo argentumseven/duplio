@@ -36,6 +36,7 @@ class Root:
     role: RootRole = RootRole.NORMAL
     label: str = ""
     caps: Capabilities = field(default_factory=Capabilities)
+    recursive: bool = True  # False: only the files directly in this folder are looked at, not those in its sub-folders
 
     @property
     def backend(self):  # type: ignore[no-untyped-def]
@@ -80,6 +81,7 @@ class Inventory:
     roots: list[Root]
     entries: list[FileEntry] = field(default_factory=list)
     walk_stats: list[WalkStats] = field(default_factory=list)
+    unvisited: list[list[str]] = field(default_factory=list)  # per root: sub-folders that were not looked inside (non-recursive roots)
 
     @property
     def total_bytes(self) -> int:
@@ -169,6 +171,22 @@ def make_roots(locations: Sequence[tuple[Location, RootRole]], labels: Sequence[
     return roots
 
 
+class _TopFolderOnly:
+    """A walk filter that keeps the walk in the top folder, and notes the sub-folders it did not go into."""
+
+    def __init__(self, inner: ScanFilter, unvisited: list[str]) -> None:
+        self._inner = inner
+        self._unvisited = unvisited
+
+    def skip_dir(self, rel: str, name: str) -> bool:
+        if not self._inner.skip_dir(rel, name):  # only folders that would have been looked into count as left out
+            self._unvisited.append(rel or name)
+        return True
+
+    def skip_file(self, rel: str, name: str, size: int) -> bool:
+        return self._inner.skip_file(rel, name, size)
+
+
 def scan(
     roots: Sequence[Root],
     scan_filter: ScanFilter,
@@ -184,14 +202,16 @@ def scan(
     inventory = Inventory(roots=list(roots))
     per_root: list[list[FileEntry]] = [[] for _ in roots]
     stats = [WalkStats() for _ in roots]
+    unvisited: list[list[str]] = [[] for _ in roots]
     lock = threading.Lock()
 
     def walk_one(root: Root) -> None:
         bucket = per_root[root.index]
         pending = 0
+        walk_filter = scan_filter if root.recursive else _TopFolderOnly(scan_filter, unvisited[root.index])
         for raw in root.backend.walk(
             root.path,
-            walk_filter=scan_filter,
+            walk_filter=walk_filter,
             stats=stats[root.index],
             one_file_system=one_file_system,
             should_stop=lambda: cancel.cancelled,
@@ -235,6 +255,7 @@ def scan(
             next_id += 1
             inventory.entries.append(entry)
     inventory.walk_stats = stats
+    inventory.unvisited = unvisited
     for root, st in zip(roots, stats, strict=True):
         if st.errors:
             progress.message(

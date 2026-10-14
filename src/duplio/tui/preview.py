@@ -109,7 +109,7 @@ class PreviewPane(Static):
     @work(thread=True, exclusive=True, group="preview")
     def _fetch(self, item: PreviewItem, force: bool, cancel: CancelToken) -> None:
         try:
-            preview = self.service.get(item, cancel=cancel, allow_download=force, allow_online_only=force)
+            preview = self.service.get(item, cancel=cancel, allow_download=True if force else None, allow_online_only=force)
         except Unavailable as exc:
             hint = " Press F to fetch it." if exc.code in ("needs-download", "online-only") else ""
             self.app.call_from_thread(self._after, item, None, exc.reason + hint)

@@ -123,9 +123,21 @@ def test_reduced_decoding_gives_an_eighth_scale_picture() -> None:
     assert sum(abs(a - b) for a, b in zip(small.rgb, ref, strict=True)) / len(ref) < 8
 
 
-def test_progressive_and_non_jpeg_data_are_refused_cleanly() -> None:
+def test_a_progressive_jpeg_is_read_at_an_eighth_scale_from_its_first_scan() -> None:
+    data = jpeg_bytes(picture(800, 600, seed=4), quality=85, progressive=True)
+    small = jpeg.decode(data)  # no reduce asked for: a progressive file can only be read this way
+    assert (small.width, small.height) == (100, 75) and small.reduced
+    ref = Image.open(io.BytesIO(data)).convert("RGB").resize((100, 75), Image.Resampling.BOX).tobytes()
+    assert sum(abs(a - b) for a, b in zip(small.rgb, ref, strict=True)) / len(ref) < 8
+    grey = jpeg.decode(jpeg_bytes(picture(160, 120, seed=5).convert("L"), progressive=True))
+    assert (grey.width, grey.height) == (20, 15)
+
+
+def test_unsupported_and_non_jpeg_data_are_refused_cleanly() -> None:
+    arithmetic = bytearray(jpeg_bytes(picture(64, 64)))
+    arithmetic[arithmetic.index(b"\xff\xc0") + 1] = 0xC9  # the frame header of an arithmetic-coded file
     with pytest.raises(jpeg.Unsupported):
-        jpeg.decode(jpeg_bytes(picture(64, 64), progressive=True))
+        jpeg.decode(bytes(arithmetic))
     with pytest.raises(jpeg.JpegError):
         jpeg.decode(b"not a jpeg at all")
     with pytest.raises(jpeg.JpegError):
@@ -302,22 +314,37 @@ def test_a_photo_on_a_slow_drive_costs_kilobytes_the_first_time_and_nothing_afte
     service.close()
 
 
-def test_a_picture_without_a_preview_is_not_downloaded_unless_small_or_asked(tmp_path: Path, dirs: AppDirs) -> None:
+def test_a_picture_without_a_preview_is_not_downloaded_unless_small_asked_or_allowed(tmp_path: Path, dirs: AppDirs) -> None:
     big = tmp_path / "d" / "big.png"
     big.parent.mkdir(parents=True)
     Image.effect_noise((900, 900), 80).convert("RGB").save(big, "PNG")  # incompressible: several MiB
     assert big.stat().st_size > 1024 * 1024
     backend = CountingBackend()
-    service = PreviewService(dirs)
+    service = PreviewService(dirs, PreviewSettings(download_whole=False))
     with pytest.raises(Unavailable) as refused:
         service.get(item_for(backend, big))
     assert refused.value.code == "needs-download" and backend.bytes_read == 0
+    with pytest.raises(Unavailable):  # a bulk job says "never" outright
+        service.get(item_for(backend, big), allow_download=False)
     preview = service.get(item_for(backend, big), allow_download=True)
     assert preview.thumb.source == "decoded" and backend.bytes_read >= big.stat().st_size
     small = tmp_path / "d" / "small.png"
     picture(64, 48).save(small, "PNG")
     before = backend.bytes_read
     assert service.get(item_for(backend, small)).thumb.width == 64 and backend.bytes_read > before
+    service.close()
+
+
+def test_by_default_a_picture_with_no_small_preview_is_read_whole_to_make_one(tmp_path: Path, dirs: AppDirs) -> None:
+    """A phone photo with no thumbnail inside gets a thumbnail on a slow drive too (the setting is on unless turned off)."""
+    path = tmp_path / "d" / "plain.jpg"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(jpeg_bytes(picture(400, 300, seed=7)) + b"\0" * 2_500_000)  # over the small-file limit, no EXIF thumbnail
+    backend = CountingBackend()
+    service = PreviewService(dirs)
+    preview = service.get(item_for(backend, path))
+    assert preview.thumb.source == "decoded" and backend.bytes_read >= 2_500_000
+    assert service.get(item_for(backend, path)).from_cache  # and it is kept: the drive is asked once
     service.close()
 
 
@@ -436,9 +463,12 @@ def test_without_pillow_the_embedded_thumbnail_still_works_and_big_pictures_say_
     backend = CountingBackend()
     service = PreviewService(dirs)
     assert service.get(item_for(backend, tmp_path / "d" / "a.jpg")).thumb.fmt == "jpg"
-    with pytest.raises(Unavailable) as refused:
-        service.get(item_for(backend, tmp_path / "d" / "b.png"))
-    assert refused.value.code == "needs-pillow"
+    monkeypatch.setattr(service_module.ffmpeg, "find_ffmpeg", lambda configured="": None)
+    assert service.get(item_for(backend, tmp_path / "d" / "b.png")).thumb.fmt == "png"  # the built-in PNG reader
+    Image.new("RGB", (80, 60), (200, 10, 10)).save(tmp_path / "d" / "c.webp", "WEBP")
+    with pytest.raises(Unavailable) as refused:  # WebP needs Pillow or ffmpeg, and says so
+        service.get(item_for(backend, tmp_path / "d" / "c.webp"))
+    assert refused.value.code == "needs-decoder" and "Pillow or ffmpeg" in refused.value.reason
     # a plain JPEG with no thumbnail inside is decoded by the built-in decoder
     (tmp_path / "d" / "plain.jpg").write_bytes(jpeg_bytes(picture(900, 600)))
     plain = service.get(item_for(backend, tmp_path / "d" / "plain.jpg"))

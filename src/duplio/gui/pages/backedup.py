@@ -16,7 +16,9 @@ class BackedUpPage(PairPage):
     b_title, b_hint = "Against this", "your backup drive or backup folder"
     run_text = "Check the backup"
     allow_reverse = False
+    recursion = ("Include sub-folders of A", "Include sub-folders of the backup")
     names = ("A", "backup")
+    side_words = ("A", "the backup")
     chips = (
         ("missing", "Not in the backup", (RowKind.ONLY_A,), PALETTE["bad"]),
         ("changed", "Only a different version is there", (RowKind.CHANGED,), CHIP_COLORS[RowKind.CHANGED]),
@@ -26,8 +28,10 @@ class BackedUpPage(PairPage):
     )
 
     def placeholder_text(self) -> str:
-        return "Choose what to check and where its backup is, then press the button. Nothing is changed by checking."
+        return ("Choose what to check and where its backup is, then press the button. By default only the files directly inside each "
+                "folder are looked at; tick a box to include the sub-folders of that side too. Nothing is changed by checking.")
 
     def banner_text(self, diff: DiffResult) -> tuple[str, str, str]:
         verdict = backup_verdict(diff, "A", "the backup")
-        return verdict.headline, verdict.detail, "ok" if verdict.ok else "bad"
+        kind = "bad" if not verdict.ok else "warn" if verdict.partial else "ok"  # amber: safe, but not everything was looked at
+        return verdict.headline, verdict.detail, kind

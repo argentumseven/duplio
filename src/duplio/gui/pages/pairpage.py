@@ -42,10 +42,12 @@ class PairPage(Page):
     again_text = "Compare again"
     allow_reverse = True
     selectable = True
+    recursion: tuple[str, str] | None = None  # the words of the "include sub-folders" option for A and B, if the page has it
     job_title = "Comparing the two folders"
     # (chip key, title, the kinds it shows, colour); {A} and {B} are replaced by the folder names
     chips: tuple[tuple[str, str, tuple[RowKind, ...], str], ...] = ()
     names = ("A", "B")
+    side_words: tuple[str, str] | None = None  # the sides as they read in a sentence, if not the same as ``names``
     summary_names = ("A", "B")  # how the folders are named in the line shown above the answer
     slot_labels: tuple[str, str] | None = None  # what an empty half of a row says; None: "Folder A" / "Folder B"
 
@@ -57,7 +59,8 @@ class PairPage(Page):
         body = tk.Frame(self, bg=PALETTE["bg"])
         body.pack(fill="both", expand=True, padx=28, pady=(8, 18))
         self.body = body
-        self.folders = FolderPair(body, ctx, self.a_title, self.a_hint, self.b_title, self.b_hint)
+        self.folders = FolderPair(body, ctx, self.a_title, self.a_hint, self.b_title, self.b_hint, recursion=self.recursion)
+        self.recursive_flags: tuple[bool, bool] = (True, True)
         self.run_row = tk.Frame(body, bg=PALETTE["bg"])
         self.run_button = Btn(self.run_row, self.run_text, self.run, kind="primary", fonts=f, padx=22, pady=9)
         self.run_button.pack(side="left")
@@ -138,9 +141,12 @@ class PairPage(Page):
     # ---- running ---------------------------------------------------------------------------------
     def make_job(self, a: str, b: str):  # type: ignore[no-untyped-def]
         ctx = self.ctx
+        flags = self.recursive_flags
 
         def job(progress, cancel):  # type: ignore[no-untyped-def]
             roots = make_roots([(ctx.registry.open(a), RootRole.NORMAL), (ctx.registry.open(b), RootRole.NORMAL)])
+            for root, deep in zip(roots, flags, strict=True):
+                root.recursive = deep
             inventory = scan(roots, ScanFilter(min_size=0, exclude=list(ctx.settings.exclude)), progress=progress, cancel=cancel)
             return diff_inventory(inventory, DiffOptions(), cache=ctx.fresh_cache, progress=progress, cancel=cancel)
 
@@ -152,12 +158,27 @@ class PairPage(Page):
             self.ctx.show_error("Choose both folders first.", "Two folders are needed")
             return
         ctx = self.ctx
+        flags = self.folders.include_subfolders()
+        if self.recursion is not None and any(flags) and not ctx.confirm(
+                "Look inside sub-folders?", "Checking the sub-folders as well can take a long time.",
+                [f"You asked to look inside the sub-folders of {self.sides_text(flags)}. Duplio has to list every folder below it and read what is "
+                 "in each one, and then compare every file it finds with the other side by its content.",
+                 "A folder with thousands of files, or one on a phone, a network drive or a cloud drive, can take many minutes, sometimes hours. "
+                 "Looking only reads: nothing is changed, and you can stop at any time.",
+                 "Leave the boxes empty to check just the files directly in each folder, which is quick."],
+                confirm="Start checking"):
+            return
+        self.recursive_flags = flags
         for text in (a, b):
             ctx.state.remember(text)
         ctx.state.save()
         self.folders.a.refresh_recent()
         self.folders.b.refresh_recent()
         ctx.run_job(self.job_title, self.make_job(a, b), self.show_result)
+
+    def sides_text(self, flags: tuple[bool, bool]) -> str:
+        names = [n for n, deep in zip(self.side_words or self.names, flags, strict=True) if deep]
+        return " and ".join(names)
 
     def show_result(self, diff: DiffResult) -> None:
         self.diff = diff

@@ -257,6 +257,7 @@ def save_settings(settings: Settings, dirs: AppDirs | None = None) -> Path:
     data["previews"] = {
         "mode": previews.mode,
         "keep": previews.keep,
+        "keep_days": previews.keep_days,
         "max_size": previews.max_bytes,
         "size_px": previews.size_px,
         "prefetch": previews.prefetch,
@@ -265,6 +266,8 @@ def save_settings(settings: Settings, dirs: AppDirs | None = None) -> Path:
         "online_only": previews.online_only,
         "memory": previews.memory_bytes,
         "prefetch_folder": previews.prefetch_folder,
+        "download_whole": previews.download_whole,
+        "ffmpeg": previews.ffmpeg,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(path, "# Duplio configuration — see 'duplio config --help'\n\n" + dump_toml(data))

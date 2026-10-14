@@ -1,9 +1,11 @@
 """Filling the picture buffer with a whole folder in the background, so scrolling a folder of thousands is smooth.
 
-While a folder is on screen its pictures are fetched (nearest the viewer first) into the on-disk buffer. Fetching only
-stores small pictures; making them into images happens only for what is on screen. It never downloads more than the
-picture service would for one picture, and it stops, saying why, instead of thrashing: when the buffer is full (going on
-would throw away pictures of this very folder, to be fetched again), when the disk is almost full, or when the drive stops
+While a folder is on screen its pictures are fetched into the on-disk buffer, in order, starting at the part the viewer is
+looking at, going on to the end, and then doubling back to the pictures before it. When the viewer jumps to another part,
+the fetching carries on from there instead. Fetching only stores small pictures; making them into images happens only for
+what is on screen. It never downloads more than the picture service would for one picture, and it stops, saying why,
+instead of thrashing: when this folder alone has filled the buffer (going on would throw away its own pictures, to be
+fetched again; pictures of other folders are let go first), when the disk is almost full, or when the drive stops
 answering. Nothing here needs Tk.
 """
 
@@ -17,7 +19,7 @@ from typing import Any
 
 from duplio.errors import CancelledError
 from duplio.events import CancelToken
-from duplio.preview.service import PICTURE_EXT, PreviewItem, Unavailable, extension
+from duplio.preview.service import MEDIA_EXT, PreviewItem, Unavailable, extension
 
 GIB = 1024 * 1024 * 1024
 
@@ -68,7 +70,7 @@ class FolderPrefetcher:
     # ---- control --------------------------------------------------------------
     def start(self, items: Sequence[PreviewItem], *, first: int = 0, allow_online_only: bool = False) -> None:
         """Fetch the pictures among ``items``, those nearest position ``first`` first. Replaces any earlier run."""
-        pictures = [i for i in items if extension(i.name) in PICTURE_EXT]
+        pictures = [i for i in items if extension(i.name) in MEDIA_EXT]
         with self._cond:
             self._token.cancel("a new folder")
             self._token = CancelToken()
@@ -78,7 +80,7 @@ class FolderPrefetcher:
             self._counts = {"fetched": 0, "had": 0, "skipped": 0, "failed": 0}
             self._in_a_row = 0
             self._reason = ""
-            self._pending = deque(self._by_distance(range(len(pictures)), self._index_near(items, pictures, first)))
+            self._pending = deque(self._in_order(range(len(pictures)), self._index_near(items, pictures, first), len(pictures)))
             self._state = "running" if pictures else "idle"
             self._cond.notify_all()
 
@@ -89,19 +91,20 @@ class FolderPrefetcher:
             return 0
         seen = 0
         for item in items[:first]:
-            if extension(item.name) in PICTURE_EXT:
+            if extension(item.name) in MEDIA_EXT:
                 seen += 1
         return min(seen, len(pictures) - 1)
 
     @staticmethod
-    def _by_distance(indices: Any, centre: int) -> list[int]:
-        return sorted(indices, key=lambda i: (abs(i - centre), i))
+    def _in_order(indices: Any, start: int, count: int) -> list[int]:
+        """The pictures from ``start`` to the end of the folder, then those before ``start``: the way a person reads on."""
+        return sorted(indices, key=lambda i: (i - start) % max(count, 1))
 
     def move_to(self, first: int) -> None:
-        """The viewer scrolled: fetch what is near the new position next."""
+        """The viewer jumped: carry on from the new position (to the end, then back round to what was left behind)."""
         with self._cond:
             if self._pending:
-                self._pending = deque(self._by_distance(self._pending, max(0, min(first, len(self._items) - 1))))
+                self._pending = deque(self._in_order(self._pending, max(0, min(first, len(self._items) - 1)), len(self._items)))
 
     def pause(self) -> None:
         with self._cond:
@@ -176,9 +179,10 @@ class FolderPrefetcher:
             if store is None:
                 self._halt(generation, "pictures from this drive are not being kept (see Settings), so there is nothing to fill")
                 return
-            if store.fullness >= self._stop_at:
-                self._halt(generation, "the picture buffer is full; fetching more would throw away pictures of this folder to be "
-                                       "fetched again. Make the buffer larger in Settings.")
+            if store.fullness >= self._stop_at and store.pinned_bytes() >= 0.8 * store.max_bytes:
+                # the pictures of this folder alone take most of the buffer: going on would throw its own away
+                self._halt(generation, "this folder's pictures fill the picture buffer; fetching more would throw away pictures "
+                                       "of this folder to be fetched again. Make the buffer larger in Settings.")
                 return
             free = store.free_disk()
             if free is not None and free < self._min_free:
@@ -187,7 +191,7 @@ class FolderPrefetcher:
             if self._previews.cached(item):
                 self._count(generation, "had")
                 return
-            self._previews.get(item, cancel=token, allow_online_only=self._allow_online_only)
+            self._previews.get(item, cancel=token, allow_online_only=self._allow_online_only, background=True)
         except CancelledError:
             return
         except Unavailable:
